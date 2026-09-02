@@ -40,6 +40,9 @@
       "items": {
         "$ref": "#/$defs/near_miss"
       }
+    },
+    "seam": {
+      "$ref": "#/$defs/seam"
     }
   },
   "$defs": {
@@ -1299,6 +1302,112 @@
         "tokens": {
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "seam": {
+      "type": "object",
+      "description": "What one recorded evaluation of the seam ledger found, read back from the audit database rather than recomputed here. Absent when no seam run has been recorded for this tree.",
+      "required": [
+        "seam_run_id",
+        "settings_digest",
+        "commits",
+        "seams"
+      ],
+      "properties": {
+        "seam_run_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "settings_digest": {
+          "$ref": "#/$defs/hex"
+        },
+        "first_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "since_seam_run_id": {
+          "description": "The recorded run the deltas are taken against. Null when no earlier run under the same settings digest exists, in which case no seam carries a delta.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "seams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reported_seam"
+          }
+        }
+      }
+    },
+    "reported_seam": {
+      "type": "object",
+      "description": "One seam of the ledger as the recorded run measured it. A delta is null where the previous run did not carry this seam, which is how a seam added since then is told apart from one whose counts stood still.",
+      "required": [
+        "id",
+        "asymmetric_changes",
+        "breaches",
+        "findings"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "asymmetric_changes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "breaches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_breach": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "findings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "asymmetric_changes_since": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "breaches_since": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "findings_since": {
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       }
     },

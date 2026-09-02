@@ -2,9 +2,16 @@
 //! `seam` and `guard`.
 //!
 //! What separates these from the rest of the tool is their input. A scan reads
-//! source text; these read commits. Nothing here parses a file, opens the audit
-//! database, or asks a compiler helper anything, and the crates that do those
-//! things are absent from the path this module takes.
+//! source text; these read commits. Nothing here parses a file or asks a
+//! compiler helper anything.
+//!
+//! Of the three, only `seam` opens the audit database, and only to write to it:
+//! its counts are a measurement, and a measurement nobody keeps cannot be
+//! compared with the next one. `history` and `guard` open none. `history`
+//! reports the extent of a range rather than anything about the code in it, and
+//! `guard` judges the change in front of it, which the ledger and the working
+//! tree answer between them — requiring a recorded run would make it
+//! unanswerable in exactly the checkouts it exists to run in.
 //!
 //! # What each answers
 //!
@@ -13,8 +20,9 @@
 //!   can be checked against the range it was taken over.
 //! - `seam` reports what each ledger entry has cost — how often a change
 //!   touched some of its members and not the rest, and how often a `fix`
-//!   followed. `--suggest` proposes candidates from co-change instead, and
-//!   writes nothing.
+//!   followed — and records that as one generation of the measurement, which
+//!   `codehelion report` reads back beside the next one. `--suggest` proposes
+//!   candidates from co-change instead, and writes nothing.
 //! - `guard` judges one change against the ledger.
 //!
 //! # Why the ledger and not discovery
@@ -32,10 +40,12 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use codehelion_history::{History, HistoryRange, HistoryRequest, RepoPath};
+use codehelion_store::seam::{FindingLocation, SeamEntryRecord, SeamRunRecord};
+use globset::Glob;
 use serde::Serialize;
 
 use crate::cli::{GuardArgs, HistoryArgs, SeamArgs, SeamCommonArgs, SeamFormat};
-use crate::config::{self, Config};
+use crate::config::{self, Config, ResolvedConfig};
 use crate::{Outcome, scan};
 
 /// Version of the JSON these commands emit.
@@ -53,8 +63,8 @@ pub const SEAM_SCHEMA_VERSION: u32 = 1;
 /// Returns an error when the repository or the configuration cannot be read,
 /// when `--until` names nothing, or when the report cannot be written.
 pub fn history(args: &HistoryArgs, out: &mut impl Write) -> Result<Outcome> {
-    let (root, config) = resolve(&args.common)?;
-    let history = read_history(&root, &config, args.until.as_deref())?;
+    let (root, resolved) = resolve(&args.common)?;
+    let history = read_history(&root, &resolved.config, args.until.as_deref())?;
 
     let mut sizes: Vec<usize> = history
         .commits()
@@ -101,12 +111,12 @@ pub fn history(args: &HistoryArgs, out: &mut impl Write) -> Result<Outcome> {
 /// Returns an error when the repository or the configuration cannot be read,
 /// when `--until` names nothing, or when the report cannot be written.
 pub fn seam(args: &SeamArgs, out: &mut impl Write) -> Result<Outcome> {
-    let (root, config) = resolve(&args.common)?;
-    let ledger = config.ledger()?;
-    let settings = config.seam_tracking.settings();
-    let history = read_history(&root, &config, args.until.as_deref())?;
+    let (root, resolved) = resolve(&args.common)?;
+    let ledger = resolved.config.ledger()?;
+    let settings = resolved.config.seam_tracking.settings();
+    let history = read_history(&root, &resolved.config, args.until.as_deref())?;
 
-    let text = if args.suggest {
+    if args.suggest {
         // A candidate naming a directory that is no longer there is a proposal
         // nobody can act on, and the history is full of them: a pair of crates
         // since folded into one moved together in every commit either appeared
@@ -118,24 +128,162 @@ pub fn seam(args: &SeamArgs, out: &mut impl Write) -> Result<Outcome> {
             // which is a shape `Path::join` accepts everywhere.
             root.join(unit).exists()
         });
-        match args.common.format {
+        let text = match args.common.format {
             SeamFormat::Json => json(&SuggestReport {
                 schema_version: SEAM_SCHEMA_VERSION,
                 suggestion: &suggestion,
             })?,
             SeamFormat::Text => render_suggestion(&suggestion)?,
-        }
-    } else {
-        let evaluation = codehelion_seam::evaluate(&ledger, &history, &settings);
-        match args.common.format {
-            SeamFormat::Json => json(&EvaluationReport {
-                schema_version: SEAM_SCHEMA_VERSION,
-                evaluation: &evaluation,
-            })?,
-            SeamFormat::Text => render_evaluation(&evaluation)?,
-        }
+        };
+        // Nothing is recorded here. A proposal is not a measurement: these
+        // candidates were never evaluated against the ledger, and filing them
+        // as the newest generation of what the ledger costs would answer a
+        // question nobody asked.
+        return deliver(&args.common, text.as_bytes(), out);
+    }
+
+    let evaluation = codehelion_seam::evaluate(&ledger, &history, &settings);
+    let text = match args.common.format {
+        SeamFormat::Json => json(&EvaluationReport {
+            schema_version: SEAM_SCHEMA_VERSION,
+            evaluation: &evaluation,
+        })?,
+        SeamFormat::Text => render_evaluation(&evaluation)?,
     };
-    deliver(&args.common, text.as_bytes(), out)
+    let outcome = deliver(&args.common, text.as_bytes(), out)?;
+    if records(args)
+        && let Err(error) = record_evaluation(&root, &resolved, args.db.as_deref(), &evaluation)
+    {
+        // The report has already gone out, and it is the answer this command
+        // was run for. A checkout nobody can write to, or a database this
+        // build cannot open, costs the next run its comparison point and
+        // nothing else, so it is said on the error stream the way a shallow
+        // history is rather than turning a complete answer into a failure.
+        eprintln!(
+            "warning: this evaluation was not recorded ({error:#}); the counts above stand, but the next run has no earlier generation of them to compare itself with"
+        );
+    }
+    Ok(outcome)
+}
+
+/// Whether this invocation's evaluation becomes the newest recorded generation
+/// of the measurement.
+///
+/// Two ways it does not, beyond `--suggest`, which never reaches here because a
+/// proposal is not a measurement:
+///
+/// - `--until` reads a range somebody deliberately cut short. Recorded as the
+///   newest generation, the next comparison would read the shortened range as a
+///   change in the code rather than as a shorter question.
+/// - `--no-record` is the explicit opt-out.
+const fn records(args: &SeamArgs) -> bool {
+    !args.no_record && args.until.is_none()
+}
+
+/// Record one evaluation as the newest generation of this repository's seam
+/// measurement.
+///
+/// # Errors
+///
+/// Returns an error when the database cannot be resolved, opened or written,
+/// and when a member glob the ledger holds cannot be compiled.
+fn record_evaluation(
+    root: &Path,
+    resolved: &ResolvedConfig,
+    db: Option<&Path>,
+    evaluation: &codehelion_seam::Evaluation,
+) -> Result<i64> {
+    let path = scan::database_path_for(scan::DatabaseUse::Recording, root, db, resolved, false)?;
+    let mut store = scan::open_store(&path)?;
+    // Spelled through the same key a scan records its run under, because that
+    // is what a later report looks this run up by.
+    let root_path = scan::path_key(root);
+    // Findings come from the newest completed scan of this tree, if there is
+    // one. Without a scan there is nothing to map, and every count stays zero
+    // beside a run id that says why.
+    let scan_run_id = store
+        .latest_completed_run(&root_path)?
+        .map(|origin| origin.id);
+    let locations = match scan_run_id {
+        Some(run_id) => store.run_finding_locations(run_id)?,
+        None => Vec::new(),
+    };
+    let entries = evaluation
+        .seams
+        .iter()
+        .map(|metrics| {
+            Ok(SeamEntryRecord {
+                seam_id: metrics.id.clone(),
+                members: metrics.members.clone(),
+                note: metrics.note.clone(),
+                asymmetric_changes: recorded_count(metrics.asymmetric_changes),
+                breaches: recorded_count(metrics.breaches),
+                last_breach: metrics
+                    .last_breach
+                    .as_ref()
+                    .map(|commit| commit.as_str().to_owned()),
+                findings: findings_inside(&metrics.members, &locations)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    store
+        .record_seam_run(&SeamRunRecord {
+            root_path,
+            settings_digest: evaluation.settings_digest.clone(),
+            first_commit: evaluation
+                .range
+                .first
+                .as_ref()
+                .map(|commit| commit.as_str().to_owned()),
+            last_commit: evaluation
+                .range
+                .last
+                .as_ref()
+                .map(|commit| commit.as_str().to_owned()),
+            commit_count: recorded_count(evaluation.range.commits),
+            scan_run_id,
+            recorded_at: scan::rfc3339_now(),
+            entries,
+        })
+        .map_err(Into::into)
+}
+
+/// How many recorded findings sit inside one seam.
+///
+/// A finding is counted once for the seam it falls in however many of that
+/// seam's members cover it: the count answers how much duplication the seam
+/// holds, and a path matched by two globs is not two findings.
+///
+/// # Errors
+///
+/// Returns an error when a member glob cannot be compiled.
+fn findings_inside(members: &[String], locations: &[FindingLocation]) -> Result<i64> {
+    let mut matchers = Vec::with_capacity(members.len());
+    for member in members {
+        matchers.push(
+            Glob::new(member)
+                .with_context(|| format!("seam member glob {member:?}"))?
+                .compile_matcher(),
+        );
+    }
+    Ok(recorded_count(
+        locations
+            .iter()
+            .filter(|location| {
+                matchers
+                    .iter()
+                    .any(|matcher| matcher.is_match(&location.file_path))
+            })
+            .count(),
+    ))
+}
+
+/// A count as a recorded run carries it.
+///
+/// Saturating rather than fallible: a repository with more commits than an
+/// `i64` can hold is past anything a stored comparison would say about it.
+fn recorded_count(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// Judge a change against the ledger, or look up which seam a path sits in.
@@ -146,8 +294,8 @@ pub fn seam(args: &SeamArgs, out: &mut impl Write) -> Result<Outcome> {
 /// or revision cannot be read in the modes that need one, or when the report
 /// cannot be written.
 pub fn guard(args: &GuardArgs, out: &mut impl Write) -> Result<Outcome> {
-    let (root, config) = resolve(&args.common)?;
-    let ledger = config.ledger()?;
+    let (root, resolved) = resolve(&args.common)?;
+    let ledger = resolved.config.ledger()?;
 
     if !args.paths.is_empty() {
         // The lookup mode opens nothing. A person asking which seam a file
@@ -198,11 +346,16 @@ pub fn guard(args: &GuardArgs, out: &mut impl Write) -> Result<Outcome> {
 }
 
 /// Resolve the repository root and its configuration.
-fn resolve(common: &SeamCommonArgs) -> Result<(std::path::PathBuf, Config)> {
+///
+/// The whole resolution is carried rather than the configuration alone: where
+/// the configuration came from is what decides which database `seam` records
+/// into, and loading it a second time to find that out could answer with a
+/// different file than the one these counts were computed under.
+fn resolve(common: &SeamCommonArgs) -> Result<(std::path::PathBuf, ResolvedConfig)> {
     let root = codehelion_core::paths::canonical(&common.path)
         .with_context(|| format!("resolving path {}", common.path.display()))?;
     let resolved = config::load(common.config.as_deref(), &root)?;
-    Ok((root, resolved.config))
+    Ok((root, resolved))
 }
 
 /// Read the history under the configured ceiling, saying when it is cut.

@@ -313,9 +313,17 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
                 recording: (!inputs.reused).then_some(recording_took),
             });
             model.summary.changes.clone_from(&inputs.changes);
-            let hydration_error = if let Some(run_id) = model.run.run_id {
+            let hydration_error = model.run.run_id.and_then(|run_id| {
                 match open_store(&db_path) {
-                    Ok(store) => hydrate_artifact_savings(&store, run_id, &mut model.groups)
+                    // What the seam ledger has cost is read back from the
+                    // database rather than measured here: a scan reads source
+                    // text and no commits, and the recorded seam run already
+                    // settled these counts.
+                    Ok(store) => crate::report_command::recorded_seam(&store, &path_key(&root))
+                        .and_then(|seam| {
+                            model.seam = seam;
+                            hydrate_artifact_savings(&store, run_id, &mut model.groups)
+                        })
                         .and_then(|()| {
                             store
                                 .preceding_compatible_run(run_id)
@@ -342,9 +350,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
                         .map(|error| (run_id, error)),
                     Err(error) => Some((run_id, error)),
                 }
-            } else {
-                None
-            };
+            });
             if let Some((run_id, error)) = hydration_error {
                 for group in &mut model.groups {
                     group.artifact_savings.clear();

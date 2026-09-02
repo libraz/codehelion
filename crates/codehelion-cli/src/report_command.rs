@@ -104,6 +104,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         groups,
         siblings,
         near_misses,
+        seam: recorded_seam(&store, &run.root_path)?,
     };
     let hydration_error = scan::hydrate_artifact_savings(&store, run.id, &mut model.groups)
         .and_then(|()| {
@@ -323,6 +324,69 @@ pub(crate) fn recorded_groups(store: &Store, run_id: i64) -> Result<Vec<report::
             recorded_group(group, &priority)
         })
         .collect()
+}
+
+/// What the newest recorded seam run says, beside the generation before it.
+///
+/// One reader for a fresh scan and for a replay: the counts are read back
+/// rather than recomputed, and two derivations of one comparison would disagree
+/// the moment either of them changed. `root_path` is the key runs are recorded
+/// under, which [`scan::path_key`] produces from a canonical root.
+///
+/// A delta is reported only where the previous run under the same settings
+/// carried the same seam. A seam written into the ledger since then has no
+/// earlier generation, and subtracting against nothing would report the
+/// ledger's growth as movement in the code.
+///
+/// # Errors
+///
+/// Returns any underlying database error.
+pub(crate) fn recorded_seam(store: &Store, root_path: &str) -> Result<Option<report::SeamReport>> {
+    let Some(latest) = store.latest_seam_run(root_path)? else {
+        return Ok(None);
+    };
+    let previous = store.preceding_seam_run(root_path, latest.id, &latest.run.settings_digest)?;
+    let count = |value: i64| u64::try_from(value).unwrap_or(0);
+    let seams = latest
+        .run
+        .entries
+        .iter()
+        .map(|entry| {
+            let earlier = previous.as_ref().and_then(|previous| {
+                previous
+                    .run
+                    .entries
+                    .iter()
+                    .find(|candidate| candidate.seam_id == entry.seam_id)
+            });
+            report::ReportedSeam {
+                id: entry.seam_id.clone(),
+                note: entry.note.clone(),
+                asymmetric_changes: count(entry.asymmetric_changes),
+                breaches: count(entry.breaches),
+                last_breach: entry.last_breach.clone(),
+                findings: count(entry.findings),
+                asymmetric_changes_since: earlier.map(|earlier| {
+                    entry
+                        .asymmetric_changes
+                        .saturating_sub(earlier.asymmetric_changes)
+                }),
+                breaches_since: earlier
+                    .map(|earlier| entry.breaches.saturating_sub(earlier.breaches)),
+                findings_since: earlier
+                    .map(|earlier| entry.findings.saturating_sub(earlier.findings)),
+            }
+        })
+        .collect();
+    Ok(Some(report::SeamReport {
+        seam_run_id: latest.id,
+        settings_digest: latest.run.settings_digest.clone(),
+        first_commit: latest.run.first_commit.clone(),
+        last_commit: latest.run.last_commit.clone(),
+        commits: count(latest.run.commit_count),
+        since_seam_run_id: previous.as_ref().map(|previous| previous.id),
+        seams,
+    }))
 }
 
 #[cfg(test)]

@@ -153,6 +153,17 @@ pub struct SeamArgs {
     /// its own.
     #[arg(long)]
     pub suggest: bool,
+    /// Audit database to record this evaluation in.
+    ///
+    /// Left off, the same database every other command resolves for itself.
+    #[arg(long, value_name = "FILE")]
+    pub db: Option<PathBuf>,
+    /// Report the evaluation without recording it.
+    ///
+    /// The counts still reach the reader; nothing is written, so the next run
+    /// compares itself with whatever generation was recorded before this one.
+    #[arg(long)]
+    pub no_record: bool,
 }
 
 /// Arguments for the `guard` subcommand.

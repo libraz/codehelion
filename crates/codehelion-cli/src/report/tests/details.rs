@@ -472,6 +472,7 @@ fn json_field_names_appear_in_the_shipped_schema() {
         }],
     });
     report.siblings = vec![sample_siblings()];
+    report.seam = Some(sample_seam_report());
     report.groups[0].identity = Some(GroupIdentity {
         origin: IDENTITY_ADOPTED.to_string(),
         compared_with_run: 1,
@@ -561,6 +562,11 @@ fn json_field_names_appear_in_the_shipped_schema() {
         (
             &value["siblings"][0]["siblings"][0]["similarity"],
             &schema["$defs"]["sibling_similarity"]["properties"],
+        ),
+        (&value["seam"], &schema["$defs"]["seam"]["properties"]),
+        (
+            &value["seam"]["seams"][0],
+            &schema["$defs"]["reported_seam"]["properties"],
         ),
     ];
     for (object, properties) in checks {

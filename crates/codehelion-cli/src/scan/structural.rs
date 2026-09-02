@@ -665,8 +665,9 @@ fn run_with(
 }
 
 /// Fill in what the audit database knows about every recorded run of this
-/// invocation: supplemental artifact savings, what became of each group since
-/// the compatible predecessor, and the churn summary.
+/// invocation: supplemental artifact savings, the recorded seam run, what
+/// became of each group since the compatible predecessor, and the churn
+/// summary.
 ///
 /// One derivation for every exit, so a scan's own report and a later
 /// `report --run` of the same run carry the same continuity evidence however
@@ -681,6 +682,16 @@ fn hydrate_recorded_runs(db_path: &Path, cfg: &Config, reports: &mut [Report]) -
             continue;
         };
         crate::scan::hydrate_artifact_savings(&store, run_id, &mut report.groups)?;
+        // What the ledger's seams cost belongs to the repository rather than
+        // to one program in it, and it is attached to every report for the
+        // reason the churn summary is: each is read on its own, and one that
+        // left the section out would read as a repository with nothing
+        // written down. It is filled in before the predecessor is looked for,
+        // because a seam run has generations of its own and a first scan is
+        // not a reason to withhold them.
+        if let Some(summary) = store.run_summary(run_id)? {
+            report.seam = crate::report_command::recorded_seam(&store, &summary.root_path)?;
+        }
         let Some(predecessor) = store.preceding_compatible_run(run_id)? else {
             continue;
         };

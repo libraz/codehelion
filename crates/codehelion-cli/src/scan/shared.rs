@@ -96,6 +96,9 @@ pub(super) fn report(
         groups,
         siblings: Vec::new(),
         near_misses: Vec::new(),
+        // Filled in after recording, by the same pass that hydrates what the
+        // database knows about this run: nothing here has opened one yet.
+        seam: None,
     }
 }
 

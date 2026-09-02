@@ -68,6 +68,15 @@ pub struct Report {
     /// Bounded LSH proposals immediately below the primary near-match estimate
     /// gate. They are diagnostic telemetry, never findings or group members.
     pub near_misses: Vec<NearMiss>,
+    /// What the recorded seam ledger costs this repository, when `codehelion
+    /// seam` has measured it.
+    ///
+    /// Absent rather than empty when no seam run has been recorded for this
+    /// tree: a ledger nobody has evaluated and a ledger whose seams cost
+    /// nothing are different facts, and one shape for both would report the
+    /// first as the second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seam: Option<SeamReport>,
 }
 
 impl Report {
@@ -1130,6 +1139,61 @@ pub struct TreeChanges {
     pub removed: u64,
     /// Paths present with identical contents in both runs.
     pub unchanged: u64,
+}
+
+/// What one recorded evaluation of the seam ledger found, and what moved since
+/// the generation before it.
+///
+/// A seam is a set of paths implementing the same semantics in more than one
+/// place. This is what `codehelion seam` recorded, read back rather than
+/// recomputed: a report reads commits nowhere, and a count taken again here
+/// would be a second derivation of a number the recorded run already settled.
+#[derive(Debug, Clone, Serialize)]
+pub struct SeamReport {
+    /// Recorded seam run these counts come from.
+    pub seam_run_id: i64,
+    /// Digest of the settings that run was computed under.
+    pub settings_digest: String,
+    /// Oldest commit of the range it examined, when the range had one.
+    pub first_commit: Option<String>,
+    /// Newest commit of that range, when the range had one.
+    pub last_commit: Option<String>,
+    /// How many commits it examined.
+    pub commits: u64,
+    /// The seam run the deltas are taken against, when one exists under the
+    /// same settings digest.
+    pub since_seam_run_id: Option<i64>,
+    /// The ledger's seams, in the order the recorded run wrote them.
+    pub seams: Vec<ReportedSeam>,
+}
+
+/// One seam of the ledger as a recorded run measured it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportedSeam {
+    /// The ledger's name for this seam.
+    pub id: String,
+    /// What the ledger says the seam is, when it says anything.
+    pub note: Option<String>,
+    /// Commits that touched some of its members and not the rest.
+    pub asymmetric_changes: u64,
+    /// How many of those were followed by a fix to a member left alone.
+    pub breaches: u64,
+    /// The most recent breaching commit, when there was one.
+    pub last_breach: Option<String>,
+    /// Recorded findings whose location falls inside the seam.
+    pub findings: u64,
+    /// Change in [`Self::asymmetric_changes`] since the previous generation.
+    ///
+    /// Absent when the previous run did not carry this seam at all: a seam
+    /// added to the ledger since then has no earlier generation, and a delta of
+    /// its whole count would report the ledger's growth as the code's.
+    pub asymmetric_changes_since: Option<i64>,
+    /// Change in [`Self::breaches`] since the previous generation, on the same
+    /// terms.
+    pub breaches_since: Option<i64>,
+    /// Change in [`Self::findings`] since the previous generation, on the same
+    /// terms.
+    pub findings_since: Option<i64>,
 }
 
 /// How much of the tree a compiler answered about.

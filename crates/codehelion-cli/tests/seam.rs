@@ -13,7 +13,7 @@
 use std::path::Path;
 
 use assert_cmd::Command;
-use codehelion_fixtures::git::{PlannedCommit, plant};
+use codehelion_fixtures::git::{PlannedCommit, Planter, plant};
 use predicates::prelude::*;
 
 /// The command under test.
@@ -46,35 +46,46 @@ members = ["left/**", "right/**"]
 note = "two spellings of one rule"
 "#;
 
+/// A history that breaches its seam exactly once: a rule taught to the left
+/// side, and carried to the right two commits later.
+const PAIR_HISTORY: &[PlannedCommit] = &[
+    PlannedCommit {
+        subject: "feat: start both sides",
+        writes: &[("left/a.txt", "one\n"), ("right/a.txt", "one\n")],
+        removes: &[],
+    },
+    PlannedCommit {
+        subject: "feat: teach the left side a rule",
+        writes: &[("left/a.txt", "one\ntwo\n")],
+        removes: &[],
+    },
+    PlannedCommit {
+        subject: "docs: say what the rule is",
+        writes: &[("README.md", "a rule\n")],
+        removes: &[],
+    },
+    PlannedCommit {
+        subject: "fix: carry the rule to the right side",
+        writes: &[("right/a.txt", "one\ntwo\n")],
+        removes: &[],
+    },
+];
+
 /// Plant a repository whose history breaches its seam exactly once.
 fn planted(root: &Path) {
-    plant(
-        root,
-        &[
-            PlannedCommit {
-                subject: "feat: start both sides",
-                writes: &[("left/a.txt", "one\n"), ("right/a.txt", "one\n")],
-                removes: &[],
-            },
-            PlannedCommit {
-                subject: "feat: teach the left side a rule",
-                writes: &[("left/a.txt", "one\ntwo\n")],
-                removes: &[],
-            },
-            PlannedCommit {
-                subject: "docs: say what the rule is",
-                writes: &[("README.md", "a rule\n")],
-                removes: &[],
-            },
-            PlannedCommit {
-                subject: "fix: carry the rule to the right side",
-                writes: &[("right/a.txt", "one\ntwo\n")],
-                removes: &[],
-            },
-        ],
-    )
-    .expect("planting a fixture repository");
+    plant(root, PAIR_HISTORY).expect("planting a fixture repository");
     std::fs::write(root.join("codehelion.toml"), LEDGER).expect("writing the ledger");
+}
+
+/// The same repository, with the planter kept so a test can commit again after
+/// the command under test has read the history once.
+fn planted_and_still_open(root: &Path) -> Planter {
+    let mut planter = Planter::initialise(root).expect("initialising a fixture repository");
+    for commit in PAIR_HISTORY {
+        planter.commit(commit).expect("planting a commit");
+    }
+    std::fs::write(root.join("codehelion.toml"), LEDGER).expect("writing the ledger");
+    planter
 }
 
 #[test]
@@ -165,6 +176,160 @@ fn seam_reports_the_ledgers_asymmetric_changes_and_breaches() {
             .as_str()
             .is_some_and(|digest| digest.len() == 64)
     );
+}
+
+/// The database `seam` records into when nothing names another one.
+fn default_database(root: &Path) -> std::path::PathBuf {
+    root.join(".codehelion").join("audit.db")
+}
+
+/// Enough of a database's state to tell whether anything was written to it.
+///
+/// `None` for a database that is not there, which is the state this
+/// repository's own checkout is usually in on a machine that has never scanned
+/// it. Where one does exist it is left over from somebody's scan, so the test
+/// compares it with itself rather than requiring its absence.
+fn recorded_state(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
+}
+
+/// An evaluation is a measurement, and a measurement nobody keeps cannot be
+/// compared with the next one, so the counts that were printed are recorded
+/// where the next run can find them.
+#[test]
+fn seam_records_the_evaluation_it_prints() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    planted(root);
+    assert!(!default_database(root).exists());
+
+    cmd()
+        .args(["seam", "--path", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pair  asymmetric 2, breached 1"));
+
+    assert!(default_database(root).is_file());
+}
+
+/// The report shows the recorded seam run beside the scan it belongs to, and
+/// says what moved between the two generations of it.
+#[test]
+fn report_shows_the_seam_section_for_a_recorded_run() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    let mut planter = planted_and_still_open(root);
+
+    cmd()
+        .args(["scan", root.to_str().unwrap()])
+        .assert()
+        .success();
+    cmd()
+        .args(["seam", "--path", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // One more one-sided change, so the second generation of the measurement
+    // has something to differ by.
+    planter
+        .commit(&PlannedCommit {
+            subject: "feat: teach the left side one more rule",
+            writes: &[("left/a.txt", "one\ntwo\nthree\n")],
+            removes: &[],
+        })
+        .expect("planting one more commit");
+    cmd()
+        .args(["seam", "--path", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    cmd()
+        .args(["report", "--path", root.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "seams: pair 3 asymmetric changes, 1 breach",
+        ))
+        .stdout(predicate::str::contains(
+            "since seam run 1: pair +1 asymmetric change",
+        ));
+
+    let output = cmd()
+        .args([
+            "report",
+            "--path",
+            root.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let document: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    let seam = &document["seam"];
+    assert_eq!(seam["seam_run_id"], 2);
+    assert_eq!(seam["since_seam_run_id"], 1);
+    assert_eq!(seam["seams"][0]["id"], "pair");
+    assert_eq!(seam["seams"][0]["asymmetric_changes"], 3);
+    assert_eq!(seam["seams"][0]["breaches"], 1);
+    assert_eq!(seam["seams"][0]["asymmetric_changes_since"], 1);
+    // Nothing was breached in between, and a count that stood still is a delta
+    // of zero rather than no delta at all.
+    assert_eq!(seam["seams"][0]["breaches_since"], 0);
+}
+
+/// Three ways an invocation records nothing, each for its own reason: a
+/// proposal is not a measurement, a deliberately truncated range is not a
+/// generation of the current one, and `--no-record` is the explicit opt-out.
+#[test]
+fn suggest_until_and_no_record_leave_the_database_untouched() {
+    for arguments in [
+        vec!["--suggest"],
+        vec!["--until", "HEAD"],
+        vec!["--no-record"],
+    ] {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let root = directory.path();
+        planted(root);
+
+        let mut command = cmd();
+        command.args(["seam", "--path", root.to_str().unwrap()]);
+        command.args(&arguments);
+        command.assert().success();
+
+        assert!(
+            !root.join(".codehelion").exists(),
+            "`seam {}` recorded a run",
+            arguments.join(" ")
+        );
+    }
+}
+
+/// An explicitly named database is the one written to, and the default one is
+/// then left alone.
+#[test]
+fn a_named_database_is_the_one_the_evaluation_is_recorded_in() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    planted(root);
+    let elsewhere = directory.path().join("elsewhere").join("audit.db");
+
+    cmd()
+        .args([
+            "seam",
+            "--path",
+            root.to_str().unwrap(),
+            "--db",
+            elsewhere.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert!(elsewhere.is_file());
+    assert!(!default_database(root).exists());
 }
 
 #[test]
@@ -371,6 +536,9 @@ fn the_same_input_produces_the_same_bytes_twice() {
 #[test]
 fn the_measured_frontend_seam_is_reproduced_from_this_repositorys_history() {
     let root = repository_root();
+    // A run over a range somebody cut short is not a generation of the current
+    // measurement, so this reads the repository and writes nothing into it.
+    let before = recorded_state(&default_database(root));
     let output = cmd()
         .args([
             "seam",
@@ -389,6 +557,11 @@ fn the_measured_frontend_seam_is_reproduced_from_this_repositorys_history() {
          shallow checkout cannot reach {MEASURED_AT}, which in GitHub Actions means \
          `actions/checkout` with `fetch-depth: 0`.\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        recorded_state(&default_database(root)),
+        before,
+        "reading this repository's history recorded something into it"
     );
     let document: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
     assert_eq!(document["range"]["commits"], 434);
