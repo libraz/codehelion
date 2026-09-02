@@ -26,6 +26,8 @@ codehelion scan --mode structural
 
 ## Semantic
 
+> **1.0 前の面です。** 文書化もテストもされていますが、約束に値するだけの実利用を経ていないため、リリース間で変わり得ます。
+
 Semantic は、Structural が測るものすべてに加えて、コンパイラが解決した型と名前の情報、および登録済みの semantic ルールを加えます。
 
 ```sh

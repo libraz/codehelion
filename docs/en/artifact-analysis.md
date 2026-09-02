@@ -96,6 +96,9 @@ line information is not required.
 
 ## Comparing two builds
 
+> **Pre-1.0 surface.** This is documented and tested, but has not had the real
+> use that would make it worth a promise, so it can change between releases.
+
 ```sh
 codehelion artifact compare before/binary after/binary
 ```

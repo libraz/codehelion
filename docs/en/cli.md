@@ -147,6 +147,9 @@ needs `--source-run`, `--clone-group` and `--db`. See
 
 ## `history`
 
+> **Pre-1.0 surface.** This is documented and tested, but has not had the real
+> use that would make it worth a promise, so it can change between releases.
+
 Reads the local commit records and nothing else: how many commits the range
 holds, how they classify as fix, feature or other, and which commits it starts
 and ends at. It opens no source file and reads no ledger. `--path <dir>` selects

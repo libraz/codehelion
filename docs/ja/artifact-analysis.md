@@ -60,6 +60,8 @@ codehelion artifact analyze path/to/binary --source-run 1 --build-variant build-
 
 ## 2 つのビルドを比較する
 
+> **1.0 前の面です。** 文書化もテストもされていますが、約束に値するだけの実利用を経ていないため、リリース間で変わり得ます。
+
 ```sh
 codehelion artifact compare before/binary after/binary
 ```

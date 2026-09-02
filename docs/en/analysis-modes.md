@@ -46,6 +46,9 @@ installed beyond the binary.
 
 ## Semantic
 
+> **Pre-1.0 surface.** This is documented and tested, but has not had the real
+> use that would make it worth a promise, so it can change between releases.
+
 Semantic adds compiler-resolved type and name information and the registered
 semantic rules on top of everything Structural measures.
 

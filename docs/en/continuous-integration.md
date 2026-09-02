@@ -1,5 +1,8 @@
 # Continuous integration
 
+> **Pre-1.0 surface.** This is documented and tested, but has not had the real
+> use that would make it worth a promise, so it can change between releases.
+
 Three things codehelion offers an automated check, all of them exit codes from a
 local run. None needs a service, an account or a network call.
 

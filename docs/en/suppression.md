@@ -8,6 +8,11 @@ Every classification is recorded whatever the policy does with it, so
 `--show-suppressed` lists the hidden groups with the reason each was hidden, and
 JSON and SARIF retain suppressed findings regardless of the flag.
 
+> **Pre-1.0 surface.** The defaults are part of what Structural mode reports and
+> are measured with it. The configuration keys that change them are documented
+> and tested, but have not had the real use that would make them worth a
+> promise, so they can change between releases.
+
 ## The three dispositions
 
 Most policies take one of three values:

@@ -1,5 +1,8 @@
 # Seam tracking
 
+> **Pre-1.0 surface.** This is documented and tested, but has not had the real
+> use that would make it worth a promise, so it can change between releases.
+
 A seam is a set of paths that implement the same semantics in more than one place
 and that have actually been changed together. Two frontends carrying the same
 rule, a renderer and the exporter that has to agree with it — the copies are in

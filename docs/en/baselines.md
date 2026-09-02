@@ -1,5 +1,8 @@
 # Baselines
 
+> **Pre-1.0 surface.** This is documented and tested, but has not had the real
+> use that would make it worth a promise, so it can change between releases.
+
 A baseline is the explicit record of the findings a project has accepted. It is a
 file you commit, and later scans read it to say what came after it.
 

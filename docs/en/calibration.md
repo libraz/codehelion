@@ -1,5 +1,8 @@
 # Calibration
 
+> **Pre-1.0 surface.** This is documented and tested, but has not had the real
+> use that would make it worth a promise, so it can change between releases.
+
 Calibration is the answer to "how close was the estimate?". A source scan can
 estimate what a clone group costs; only two real builds can say what removing it
 actually took out of the artifact. Calibration records one against the other.

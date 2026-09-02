@@ -1219,3 +1219,167 @@ fn continuous_integration_documents_state_all_three_gates() {
         assert!(document.contains(page), "{named} does not link to {page}");
     }
 }
+
+/// The pre-1.0 note a page carries when it documents an unsettled surface.
+const PRE_1_0: [&str; 2] = ["> **Pre-1.0 surface.**", "> **1.0 前の面です。**"];
+
+/// The pages documenting a surface the READMEs call unsettled, in both
+/// languages.
+fn unsettled_surface_documents() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        (
+            include_str!("../../../../docs/en/baselines.md"),
+            include_str!("../../../../docs/ja/baselines.md"),
+            "baselines",
+        ),
+        (
+            include_str!("../../../../docs/en/seam-tracking.md"),
+            include_str!("../../../../docs/ja/seam-tracking.md"),
+            "seam tracking",
+        ),
+        (
+            include_str!("../../../../docs/en/calibration.md"),
+            include_str!("../../../../docs/ja/calibration.md"),
+            "calibration",
+        ),
+        (
+            include_str!("../../../../docs/en/continuous-integration.md"),
+            include_str!("../../../../docs/ja/continuous-integration.md"),
+            "continuous integration",
+        ),
+        (
+            include_str!("../../../../docs/en/suppression.md"),
+            include_str!("../../../../docs/ja/suppression.md"),
+            "suppression",
+        ),
+        (
+            include_str!("../../../../docs/en/analysis-modes.md"),
+            include_str!("../../../../docs/ja/analysis-modes.md"),
+            "semantic mode",
+        ),
+        (
+            include_str!("../../../../docs/en/artifact-analysis.md"),
+            include_str!("../../../../docs/ja/artifact-analysis.md"),
+            "comparing two builds",
+        ),
+        (
+            include_str!("../../../../docs/en/cli.md"),
+            include_str!("../../../../docs/ja/cli.md"),
+            "the history command",
+        ),
+    ]
+}
+
+/// The pages documenting what the READMEs call settled, in both languages.
+fn settled_surface_documents() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        (
+            include_str!("../../../../docs/en/reading-a-report.md"),
+            include_str!("../../../../docs/ja/reading-a-report.md"),
+            "reading a report",
+        ),
+        (
+            include_str!("../../../../docs/en/clone-types.md"),
+            include_str!("../../../../docs/ja/clone-types.md"),
+            "clone types",
+        ),
+        (
+            include_str!("../../../../docs/en/grouping.md"),
+            include_str!("../../../../docs/ja/grouping.md"),
+            "grouping",
+        ),
+        (
+            include_str!("../../../../docs/en/stable-ids.md"),
+            include_str!("../../../../docs/ja/stable-ids.md"),
+            "stable identifiers",
+        ),
+    ]
+}
+
+/// Every page documenting an unsettled surface says so itself, and no page
+/// documenting a settled one does.
+///
+/// The note is what a reader arriving from a search engine sees; the README
+/// paragraph is what a reader arriving at the repository sees. Neither is worth
+/// much without the other, and the one that rots is the note, because a page
+/// gets rewritten without anyone rereading the promise it sits under.
+///
+/// The settled half is checked for the same reason in reverse. A surface that
+/// quietly picks up the note has been demoted without the README saying so,
+/// which reads to anyone depending on it as a promise withdrawn in silence.
+#[test]
+fn pages_say_which_side_of_the_pre_1_0_line_they_document() {
+    for (english, japanese, subject) in unsettled_surface_documents() {
+        for (document, note) in [(english, PRE_1_0[0]), (japanese, PRE_1_0[1])] {
+            assert!(
+                document.contains(note),
+                "the page documenting {subject} does not say it is a pre-1.0 surface"
+            );
+        }
+    }
+    for (english, japanese, subject) in settled_surface_documents() {
+        for (document, note) in [(english, PRE_1_0[0]), (japanese, PRE_1_0[1])] {
+            assert!(
+                !document.contains(note),
+                "the page documenting {subject} carries the pre-1.0 note, but the \
+                 READMEs call it settled"
+            );
+        }
+    }
+}
+
+/// Both READMEs draw the line, in the same place, settled side first.
+///
+/// Read in order because that is the promise being made: what a reader can
+/// build on comes before what they should not yet, and a paragraph that opens
+/// with the caveats says something different from the one that opens with the
+/// commitment.
+#[test]
+fn readmes_draw_the_line_between_settled_and_unsettled_surfaces() {
+    for (named, document, settled, unsettled) in [
+        (
+            "README.md",
+            include_str!("../../../../README.md"),
+            "**Settled**",
+            "**Still finding its shape**",
+        ),
+        (
+            "README_ja.md",
+            include_str!("../../../../README_ja.md"),
+            "**固まっている面**",
+            "**まだ形が定まっていない面**",
+        ),
+    ] {
+        let settled = document
+            .find(settled)
+            .unwrap_or_else(|| panic!("{named} does not name the settled surface"));
+        let unsettled = document
+            .find(unsettled)
+            .unwrap_or_else(|| panic!("{named} does not name the unsettled surface"));
+        assert!(
+            settled < unsettled,
+            "{named} must say what is settled before what is not"
+        );
+    }
+
+    // Each unsettled surface is named in both READMEs, so a reader meets the
+    // same list whichever language they arrive in.
+    for (english, japanese) in [
+        ("Semantic mode", "Semantic モード"),
+        ("baselines", "baseline"),
+        ("SARIF", "SARIF"),
+        ("seam tracking", "seam の追跡"),
+        ("`artifact compare`", "`artifact compare`"),
+        ("calibration", "calibration"),
+        ("`history`", "`history`"),
+    ] {
+        assert!(
+            include_str!("../../../../README.md").contains(english),
+            "the English README does not name {english} as an unsettled surface"
+        );
+        assert!(
+            include_str!("../../../../README_ja.md").contains(japanese),
+            "the Japanese README does not name {japanese} as an unsettled surface"
+        );
+    }
+}
