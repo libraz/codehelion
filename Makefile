@@ -65,6 +65,10 @@ verify-pe-artifact-fixtures: ## Build and verify real PE/PDB fixtures (Windows)
 .PHONY: test
 test: ## Run the full test suite
 	$(ONESHOT) $(CARGO) test --workspace --all-targets --all-features --no-fail-fast
+	# `--all-targets` excludes doc examples, so a second run is what actually
+	# compiles them. An example that no longer builds is documentation that is
+	# wrong, and nothing else here would say so.
+	$(ONESHOT) $(CARGO) test --workspace --doc --all-features --no-fail-fast
 
 .PHONY: doc
 doc: ## Build docs, failing on warnings

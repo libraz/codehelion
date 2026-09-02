@@ -93,6 +93,12 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets --all-features --no-fail-fast
 
+      # `--all-targets` excludes doc examples, so a second run is what actually
+      # compiles them. An example that no longer builds is documentation that is
+      # wrong, and no other job here would say so.
+      - name: Test doc examples
+        run: cargo test --workspace --doc --all-features --no-fail-fast
+
   helperless-modes:
     name: Fast and Structural without compiler helpers
     runs-on: ubuntu-latest

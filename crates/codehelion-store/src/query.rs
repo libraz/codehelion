@@ -825,6 +825,7 @@ pub struct SourceUnitIdentity {
 ///
 /// ```
 /// use codehelion_core::stable_id::{CloneGroupFingerprint, FindingId, FragmentFingerprint};
+/// use codehelion_store::BuildVariantFingerprint;
 /// use codehelion_store::query::SourceFragmentIdentity;
 ///
 /// let fragment = SourceFragmentIdentity {
@@ -833,7 +834,7 @@ pub struct SourceUnitIdentity {
 ///     clone_group_fingerprint: CloneGroupFingerprint::from_bytes([3; 16]),
 ///     is_canonical: true,
 ///     clone_confidence: 1.0,
-///     build_variant_fingerprint: [4; 16],
+///     build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
 ///     file_path: "src/lib.rs".to_owned(),
 ///     start_line: Some(10),
 ///     end_line: Some(20),
@@ -845,6 +846,7 @@ pub struct SourceUnitIdentity {
 ///
 /// ```compile_fail,E0308
 /// use codehelion_core::stable_id::{CloneGroupFingerprint, FindingId, FragmentFingerprint};
+/// use codehelion_store::BuildVariantFingerprint;
 /// use codehelion_store::query::SourceFragmentIdentity;
 ///
 /// let fragment = SourceFragmentIdentity {
@@ -854,7 +856,7 @@ pub struct SourceUnitIdentity {
 ///     clone_group_fingerprint: CloneGroupFingerprint::from_bytes([3; 16]),
 ///     is_canonical: true,
 ///     clone_confidence: 1.0,
-///     build_variant_fingerprint: [4; 16],
+///     build_variant_fingerprint: BuildVariantFingerprint::from_bytes([4; 16]),
 ///     file_path: "src/lib.rs".to_owned(),
 ///     start_line: Some(10),
 ///     end_line: Some(20),
