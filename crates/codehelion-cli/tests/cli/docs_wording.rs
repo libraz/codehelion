@@ -1336,6 +1336,10 @@ fn pages_say_which_side_of_the_pre_1_0_line_they_document() {
 /// commitment.
 #[test]
 fn readmes_draw_the_line_between_settled_and_unsettled_surfaces() {
+    // The paragraph itself, not the whole file. Every one of these names also
+    // appears in the documentation index further down, so a search over the
+    // README would pass on a surface that had been dropped from the promise.
+    let mut listed = Vec::new();
     for (named, document, settled, unsettled) in [
         (
             "README.md",
@@ -1360,26 +1364,29 @@ fn readmes_draw_the_line_between_settled_and_unsettled_surfaces() {
             settled < unsettled,
             "{named} must say what is settled before what is not"
         );
+        let paragraph = document[unsettled..]
+            .split_once("\n\n")
+            .map_or(&document[unsettled..], |(first, _)| first);
+        listed.push((named, paragraph));
     }
 
-    // Each unsettled surface is named in both READMEs, so a reader meets the
-    // same list whichever language they arrive in.
-    for (english, japanese) in [
-        ("Semantic mode", "Semantic モード"),
-        ("baselines", "baseline"),
-        ("SARIF", "SARIF"),
-        ("seam tracking", "seam の追跡"),
-        ("`artifact compare`", "`artifact compare`"),
-        ("calibration", "calibration"),
-        ("`history`", "`history`"),
+    // Each unsettled surface is named in both paragraphs, so a reader meets
+    // the same list whichever language they arrive in.
+    for surfaces in [
+        ["Semantic mode", "Semantic モード"],
+        ["baselines", "baseline"],
+        ["SARIF", "SARIF"],
+        ["seam tracking", "seam の追跡"],
+        ["`artifact compare`", "`artifact compare`"],
+        ["calibration", "calibration"],
+        ["`history`", "`history`"],
+        ["suppression", "抑制"],
     ] {
-        assert!(
-            include_str!("../../../../README.md").contains(english),
-            "the English README does not name {english} as an unsettled surface"
-        );
-        assert!(
-            include_str!("../../../../README_ja.md").contains(japanese),
-            "the Japanese README does not name {japanese} as an unsettled surface"
-        );
+        for ((named, paragraph), surface) in listed.iter().zip(surfaces) {
+            assert!(
+                paragraph.contains(surface),
+                "{named} does not name {surface} among the unsettled surfaces"
+            );
+        }
     }
 }
