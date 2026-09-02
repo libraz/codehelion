@@ -91,7 +91,7 @@ codehelion artifact calibration --source-run 1  # 特定のソーススキャン
 codehelion artifact calibration --baseline earlier.json  # 以前の集計と並べる
 ```
 
-`--input-format` は magic byte 検出が満たすべきフォーマットを表明し、`--arch` は universal Mach-O のスライスを選びます。`--build-variant`・`--source-run`・`--linker-map` はソース相関のための入力です。[成果物解析](artifact-analysis.md)と [calibration](calibration.md) を参照してください。
+`--input-format` は magic byte 検出が満たすべきフォーマットを表明し、`--arch` は universal Mach-O のスライスを選びます。`analyze` では `--build-variant`・`--source-run`・`--linker-map` がソース相関のための入力です。`compare` では `--before-build-variant` と `--after-build-variant` によりビルド条件の違いを報告できます。比較から制御済みの calibration を記録するには、さらに `--source-run`・`--clone-group`・`--db` が必要です。[成果物解析](artifact-analysis.md)と [calibration](calibration.md) を参照してください。
 
 ## `history`
 

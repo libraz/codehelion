@@ -138,8 +138,11 @@ codehelion artifact calibration --baseline earlier.json  # set the summary besid
 ```
 
 `--input-format` asserts the format magic-byte detection must find, and `--arch`
-selects the slice of a universal Mach-O binary. `--build-variant`, `--source-run`
-and `--linker-map` are the source-correlation inputs. See
+selects the slice of a universal Mach-O binary. `analyze` takes `--build-variant`,
+`--source-run` and `--linker-map` as source-correlation inputs. `compare` can take
+`--before-build-variant` and `--after-build-variant` to report differing build
+conditions. To record a controlled calibration from a comparison, it additionally
+needs `--source-run`, `--clone-group` and `--db`. See
 [Artifact analysis](artifact-analysis.md) and [Calibration](calibration.md).
 
 ## `history`
