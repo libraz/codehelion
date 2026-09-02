@@ -36,14 +36,14 @@ codehelion scan · structural mode · ~/src/project
      └─   corpus/synthetic/rust/type1.rs:35-54                  values_equal
 
  #2  0.53  type-1 run ×2  101 tokens  5d7e5cd2
-     ├─ ◆ crates/codehelion-cli/src/scan/structural.rs:205-211  run_with
-     └─   crates/codehelion-cli/src/scan.rs:70-76               run
+     ├─ ◆ crates/codehelion-cli/src/scan/structural.rs:177-183  run_with
+     └─   crates/codehelion-cli/src/scan.rs:62-68               run
 
-... and 1185 more groups (--limit 0 lists every one)
+... and 1184 more groups (--limit 0 lists every one)
 
-1,539 groups (type-1 78, type-2 199, type-3 1262) · 352 suppressed · sorted by priority
-supplemental: 493 siblings (--show-siblings; 60 dropped by search ceilings), 1,000 near misses (--show-near-misses; 5,624 dropped by the retention cap)
-552 files, 199,199 lines, 1,040,264 tokens · run 6 (209 file(s) changed; replay: codehelion report --run 6)
+1,538 groups (type-1 78, type-2 198, type-3 1262) · 352 suppressed · sorted by priority
+supplemental: 492 siblings (--show-siblings; 60 dropped by search ceilings), 1,000 near misses (--show-near-misses; 5,633 dropped by the retention cap)
+553 files, 199,546 lines, 1,042,197 tokens · run 9 (0 file(s) changed; replay: codehelion report --run 9)
 ◆ the occurrence a group is measured against · "run" a repeated stretch of statements, not a whole unit · ×N the number of occurrences
 open one: codehelion explain b92c1297 · list every group: --limit 0
 ```

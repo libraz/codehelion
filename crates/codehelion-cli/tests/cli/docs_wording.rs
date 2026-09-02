@@ -848,7 +848,7 @@ fn occurrence_text(root: &std::path::Path, occurrence: &SampleOccurrence<'_>) ->
     let file = root.join(occurrence.path);
     let source = std::fs::read_to_string(&file).unwrap_or_else(|error| {
         panic!(
-            "a README sample names {}, which cannot be read: {error}. \
+            "a sample report names {}, which cannot be read: {error}. \
              Regenerate the block with `make readme-sample`",
             occurrence.path
         )
@@ -856,7 +856,7 @@ fn occurrence_text(root: &std::path::Path, occurrence: &SampleOccurrence<'_>) ->
     let lines: Vec<&str> = source.lines().collect();
     assert!(
         occurrence.start >= 1 && occurrence.end <= lines.len(),
-        "a README sample names {}:{}-{}, but that file has {} lines. \
+        "a sample report names {}:{}-{}, but that file has {} lines. \
          Regenerate the block with `make readme-sample`",
         occurrence.path,
         occurrence.start,
@@ -865,7 +865,7 @@ fn occurrence_text(root: &std::path::Path, occurrence: &SampleOccurrence<'_>) ->
     );
     assert!(
         occurrence.symbol.is_empty() || source.contains(occurrence.symbol),
-        "a README sample names {} in {}, and that identifier is not written \
+        "a sample report names {} in {}, and that identifier is not written \
          anywhere in the file. Regenerate the block with `make readme-sample`",
         occurrence.symbol,
         occurrence.path
@@ -876,14 +876,7 @@ fn occurrence_text(root: &std::path::Path, occurrence: &SampleOccurrence<'_>) ->
         .collect()
 }
 
-/// The sample report both READMEs show still describes this tree.
-///
-/// Checked mechanically because the sample is a self-scan, and a self-scan's
-/// line references are invalidated by any edit above the lines they name —
-/// including a refactor that changes no output at all. Refreshing it by hand
-/// goes stale the same day, so this is what the reader is actually promised:
-/// the groups it shows are groups, and the occurrences it names still hold the
-/// code it claims they share.
+/// One sample report, checked against the tree it was produced from.
 ///
 /// A Type-1 group carries the check that means something. Its occurrences are
 /// the same tokens by definition, so reading both ranges out of the tree and
@@ -891,93 +884,114 @@ fn occurrence_text(root: &std::path::Path, occurrence: &SampleOccurrence<'_>) ->
 /// range lands on unrelated code and the texts stop matching. Type-2 and
 /// Type-3 groups are only checked for shape, because what they claim is a
 /// similarity this test has no business recomputing.
+fn check_sample(root: &std::path::Path, document: &str, named: &str) -> Vec<String> {
+    let groups = sample_groups(sample_report(document));
+    assert!(!groups.is_empty(), "the sample in {named} shows no group");
+
+    for group in &groups {
+        assert!(
+            group.id.len() == 8 && group.id.chars().all(|it| it.is_ascii_hexdigit()),
+            "the sample in {named} heads a group with {}, which is not a clone id",
+            group.id
+        );
+        assert!(
+            group.occurrences.len() >= 2,
+            "the sample in {named} shows group {} with fewer than two occurrences, \
+             which is not a clone group",
+            group.id
+        );
+
+        let texts: Vec<Vec<String>> = group
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence_text(root, occurrence))
+            .collect();
+
+        if group.clone_type != "type-1" {
+            continue;
+        }
+        for (occurrence, text) in group.occurrences.iter().zip(&texts) {
+            assert_eq!(
+                text,
+                &texts[0],
+                "the sample in {named} calls group {} type-1, but {}:{}-{} does not \
+                 hold the same code as {}:{}-{}. Regenerate the block with \
+                 `make readme-sample`",
+                group.id,
+                occurrence.path,
+                occurrence.start,
+                occurrence.end,
+                group.occurrences[0].path,
+                group.occurrences[0].start,
+                group.occurrences[0].end
+            );
+            assert_eq!(
+                occurrence.lines(),
+                group.occurrences[0].lines(),
+                "the sample in {named} gives the occurrences of group {} different \
+                 line counts",
+                group.id
+            );
+        }
+    }
+
+    // The footer offers one of the groups above it to open, so a reader who
+    // copies that line lands on a group the report actually showed.
+    let opened = sample_report(document)
+        .lines()
+        .find_map(|line| line.split("codehelion explain ").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("the sample in {named} must offer a group to open"));
+    assert!(
+        groups.iter().any(|group| group.id == opened),
+        "the sample in {named} offers {opened}, which is not one of the groups it shows"
+    );
+
+    groups.iter().map(|group| group.id.to_owned()).collect()
+}
+
+/// Every document showing a sample report still describes this tree.
+///
+/// Checked mechanically because the samples are self-scans, and a self-scan's
+/// line references are invalidated by any edit above the lines they name —
+/// including a refactor that changes no output at all. Refreshing them by hand
+/// goes stale the same day, so this is what the reader is actually promised:
+/// the groups shown are groups, and the occurrences named still hold the code
+/// the sample claims they share.
+///
+/// Each English page is paired with its Japanese mirror, which has to show the
+/// same run: a sample refreshed in one language and not the other is the
+/// failure this catches that reading either page alone would not.
 ///
 /// The summary counts are deliberately left unpinned: they move with every
 /// commit, and asserting them would fail the suite on an axis that has nothing
 /// to do with detection. `make readme-sample` regenerates the block when the
 /// numbers are worth refreshing.
 #[test]
-fn readme_sample_reports_describe_the_tree_they_were_run_against() {
+fn sample_reports_describe_the_tree_they_were_run_against() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
 
-    for (readme, language) in [
-        (include_str!("../../../../README.md"), "English"),
-        (include_str!("../../../../README_ja.md"), "Japanese"),
+    for [(english, english_name), (japanese, japanese_name)] in [
+        [
+            (include_str!("../../../../README.md"), "README.md"),
+            (include_str!("../../../../README_ja.md"), "README_ja.md"),
+        ],
+        [
+            (
+                include_str!("../../../../docs/en/getting-started.md"),
+                "docs/en/getting-started.md",
+            ),
+            (
+                include_str!("../../../../docs/ja/getting-started.md"),
+                "docs/ja/getting-started.md",
+            ),
+        ],
     ] {
-        let groups = sample_groups(sample_report(readme));
-        assert!(
-            !groups.is_empty(),
-            "the {language} README sample report shows no group"
+        assert_eq!(
+            check_sample(&root, english, english_name),
+            check_sample(&root, japanese, japanese_name),
+            "{english_name} and {japanese_name} show one sample run, \
+             so they must name the same groups"
         );
-
-        for group in &groups {
-            assert!(
-                group.id.len() == 8 && group.id.chars().all(|it| it.is_ascii_hexdigit()),
-                "the {language} README sample heads a group with {}, which is not a clone id",
-                group.id
-            );
-            assert!(
-                group.occurrences.len() >= 2,
-                "the {language} README sample shows group {} with fewer than two \
-                 occurrences, which is not a clone group",
-                group.id
-            );
-
-            let texts: Vec<Vec<String>> = group
-                .occurrences
-                .iter()
-                .map(|occurrence| occurrence_text(&root, occurrence))
-                .collect();
-
-            if group.clone_type != "type-1" {
-                continue;
-            }
-            for (occurrence, text) in group.occurrences.iter().zip(&texts) {
-                assert_eq!(
-                    text,
-                    &texts[0],
-                    "the {language} README sample calls group {} type-1, but {}:{}-{} \
-                     does not hold the same code as {}:{}-{}. Regenerate the block with \
-                     `make readme-sample`",
-                    group.id,
-                    occurrence.path,
-                    occurrence.start,
-                    occurrence.end,
-                    group.occurrences[0].path,
-                    group.occurrences[0].start,
-                    group.occurrences[0].end
-                );
-                assert_eq!(
-                    occurrence.lines(),
-                    group.occurrences[0].lines(),
-                    "the {language} README sample gives the occurrences of group {} \
-                     different line counts",
-                    group.id
-                );
-            }
-        }
     }
-
-    let english = sample_groups(sample_report(include_str!("../../../../README.md")));
-    let japanese = sample_groups(sample_report(include_str!("../../../../README_ja.md")));
-    let named = |groups: &[SampleGroup<'_>]| -> Vec<String> {
-        groups.iter().map(|group| group.id.to_owned()).collect()
-    };
-    assert_eq!(
-        named(&english),
-        named(&japanese),
-        "the two READMEs show the same sample run, so they must name the same groups"
-    );
-
-    // The footer offers one of the groups above it to open, so a reader who
-    // copies that line lands on a group the report actually showed.
-    let opened = sample_report(include_str!("../../../../README.md"))
-        .lines()
-        .find_map(|line| line.split("codehelion explain ").nth(1))
-        .and_then(|rest| rest.split_whitespace().next())
-        .expect("the English README sample must offer a group to open");
-    assert!(
-        english.iter().any(|group| group.id == opened),
-        "the English README sample offers {opened}, which is not one of the groups it shows"
-    );
 }
