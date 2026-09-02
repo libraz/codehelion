@@ -1,6 +1,6 @@
 use super::*;
-use crate::report::FunnelCause;
 use crate::report::tests::{sample_near_miss, sample_report, sample_siblings, structural_group};
+use crate::report::{CompilerCoverage, FunnelCause};
 
 fn sarif(report: &Report) -> serde_json::Value {
     serde_json::from_str(&report.to_sarif().unwrap()).unwrap()
