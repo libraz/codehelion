@@ -153,7 +153,7 @@ fn sibling_signature_unit_count_rejects_a_negative_count() {
 fn baseline_creation_records_the_version_this_build_writes() {
     let conn = seeded();
     assert_eq!(version(&conn).unwrap(), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 5);
+    assert_eq!(SCHEMA_VERSION, 6);
 }
 
 /// A database recorded before this baseline is refused rather than read.
@@ -167,9 +167,8 @@ fn a_database_recorded_before_this_baseline_is_refused_rather_than_read() {
     let conn = seeded();
     // The previous layout, reproduced by removing exactly what this one added.
     conn.execute_batch(
-        "DROP TABLE artifact_analysis_source_map_resolution_source;
-         DROP TABLE artifact_analysis_source_map_resolution;
-         DROP TABLE artifact_analysis_containment;",
+        "DROP TABLE seam_run_entry;
+         DROP TABLE seam_run;",
     )
     .unwrap();
     conn.execute("UPDATE schema_meta SET version = ?1", [SCHEMA_VERSION - 1])
@@ -181,11 +180,8 @@ fn a_database_recorded_before_this_baseline_is_refused_rather_than_read() {
         "{error:?}"
     );
     assert!(
-        conn.prepare(
-            "SELECT ordinal FROM artifact_analysis_source_map_resolution
-             WHERE artifact_analysis_id = ?1",
-        )
-        .is_err(),
+        conn.prepare("SELECT ordinal FROM seam_run_entry WHERE seam_run_id = ?1")
+            .is_err(),
         "the previous layout answered a read only this baseline can answer"
     );
 }

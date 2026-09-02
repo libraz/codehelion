@@ -17,6 +17,8 @@
 //! - [`lifecycle`] — which rows survive: the one recency order, the retention
 //!   contract, and the recording paths that stay safe when a measurement is
 //!   taken twice,
+//! - [`seam`] — recorded evaluations of the seam ledger against the git
+//!   history, and the one thing a seam mapping reads of a finding,
 //!
 //! Opening a new database creates the current baseline. Any incompatible
 //! layout is deliberately rejected; its findings should be recreated by a
@@ -29,6 +31,7 @@ pub mod lifecycle;
 pub mod path_key;
 pub mod query;
 pub mod schema;
+pub mod seam;
 pub mod snapshot;
 
 mod preflight;
@@ -241,6 +244,12 @@ pub enum StoreError {
     #[error("invalid clone-group lineage evidence: {reason}")]
     InvalidLineageEvidence {
         /// Why this connection cannot be committed.
+        reason: String,
+    },
+    /// A seam run named a seam that cannot be recorded as one.
+    #[error("invalid seam run entry: {reason}")]
+    InvalidSeamEntry {
+        /// Why the entry cannot become a stored row.
         reason: String,
     },
     /// A measurement named an artifact analysis this database does not hold.
@@ -603,6 +612,8 @@ mod tests {
             "semantic_operation_graph",
             "semantic_group_evidence",
             "semantic_node_mapping",
+            "seam_run",
+            "seam_run_entry",
         ] {
             let count: i64 = store
                 .conn

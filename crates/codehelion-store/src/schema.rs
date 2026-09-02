@@ -52,6 +52,10 @@
 //! - A lineage edge records the population it was decided on, not only the
 //!   part of it that was shared, so evidence for a connection can be read as
 //!   the fraction it actually was.
+//! - A seam run is measured against the git history rather than against a
+//!   scan, so it references the scan run whose findings it mapped without
+//!   depending on it: the reference is cleared when that run is removed, and
+//!   the recorded seam figures stay readable.
 //!
 //! The current local baseline is intentionally self-contained.
 //! `schema_meta` records which baseline a database holds. A database from any
@@ -72,7 +76,7 @@ use crate::artifact::{
 /// A database recorded under another one is rejected rather than migrated.
 /// The audit database holds derived scan state, so re-running the scan on a
 /// fresh path reproduces it without mutating the incompatible file.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Full current local database layout. Existing incompatible databases are
 /// not transformed; create a fresh database when this contract changes.
@@ -803,6 +807,37 @@ CREATE TABLE scanned_file (
     byte_len      INTEGER NOT NULL,
     PRIMARY KEY (scan_run_id, relative_path)
 ) STRICT;
+CREATE TABLE seam_run (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    root_path       TEXT NOT NULL,
+    settings_digest TEXT NOT NULL,
+    first_commit    TEXT,
+    last_commit     TEXT,
+    commit_count    INTEGER NOT NULL CHECK (commit_count >= 0),
+    -- Nullable, and cleared rather than cascaded: a seam run's own figures are
+    -- read from the git history and outlive the scan run whose findings it
+    -- happened to map. Losing that run loses where the finding counts came
+    -- from, not the seam figures.
+    scan_run_id     INTEGER REFERENCES scan_run (id) ON DELETE SET NULL,
+    recorded_at     TEXT NOT NULL
+) STRICT;
+CREATE TABLE seam_run_entry (
+    seam_run_id        INTEGER NOT NULL REFERENCES seam_run (id) ON DELETE CASCADE,
+    -- The position the ledger wrote this seam in, so a report lists seams as
+    -- the ledger spells them rather than alphabetically.
+    ordinal            INTEGER NOT NULL,
+    seam_id            TEXT NOT NULL,
+    -- The seam's globs, joined by newline. A glob cannot contain a newline in
+    -- this tool's configuration, so the join is lossless, and a table of its
+    -- own would buy nothing a reader of one row wants.
+    members            TEXT NOT NULL,
+    note               TEXT,
+    asymmetric_changes INTEGER NOT NULL CHECK (asymmetric_changes >= 0),
+    breaches           INTEGER NOT NULL CHECK (breaches >= 0),
+    last_breach        TEXT,
+    findings           INTEGER NOT NULL CHECK (findings >= 0),
+    PRIMARY KEY (seam_run_id, seam_id)
+) STRICT;
 CREATE TABLE semantic_group_evidence (
     clone_group_id  INTEGER PRIMARY KEY REFERENCES clone_group (id) ON DELETE CASCADE,
     schema_version  TEXT NOT NULL,
@@ -928,6 +963,7 @@ CREATE INDEX idx_cross_language_comparison_identity
     ON cross_language_comparison (comparison_id, started_at DESC);
 CREATE INDEX idx_cross_language_semantic_group_comparison
     ON cross_language_semantic_group (comparison_id);
+CREATE INDEX idx_seam_run_root ON seam_run (root_path, recorded_at DESC, id DESC);
 ";
 
 /// The layout with every generated vocabulary filled in.

@@ -302,6 +302,8 @@ fn sample_summary() -> SummaryRow {
 mod build_variants;
 #[path = "store/feature_and_run_metadata.rs"]
 mod feature_and_run_metadata;
+#[path = "store/seam_runs.rs"]
+mod seam_runs;
 #[path = "store/semantic_snapshots.rs"]
 mod semantic_snapshots;
 #[path = "store/snapshot_atomicity.rs"]
