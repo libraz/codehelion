@@ -425,3 +425,76 @@ fn the_measured_frontend_seam_is_reproduced_from_this_repositorys_history() {
         4
     );
 }
+
+/// `--suggest` does not propose a directory that is no longer in the tree.
+///
+/// A pair of crates since folded into one moved together in every commit
+/// either of them appeared in, so it reads as a perfect coupling forever. The
+/// proposal is arithmetically sound and useless: there is nothing left to
+/// write a seam about.
+#[test]
+fn a_suggestion_leaves_out_units_the_tree_no_longer_has() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    plant(
+        root,
+        &[
+            PlannedCommit {
+                subject: "feat: three parts that move together",
+                writes: &[
+                    ("crates/live-a/x.txt", "a\n"),
+                    ("crates/live-b/x.txt", "b\n"),
+                    ("crates/gone/x.txt", "g\n"),
+                ],
+                removes: &[],
+            },
+            PlannedCommit {
+                subject: "feat: move all three again",
+                writes: &[
+                    ("crates/live-a/x.txt", "aa\n"),
+                    ("crates/live-b/x.txt", "bb\n"),
+                    ("crates/gone/x.txt", "gg\n"),
+                ],
+                removes: &[],
+            },
+            PlannedCommit {
+                subject: "feat: and once more",
+                writes: &[
+                    ("crates/live-a/x.txt", "aaa\n"),
+                    ("crates/live-b/x.txt", "bbb\n"),
+                    ("crates/gone/x.txt", "ggg\n"),
+                ],
+                removes: &[],
+            },
+            PlannedCommit {
+                subject: "refactor: fold the third part away",
+                writes: &[],
+                removes: &["crates/gone/x.txt"],
+            },
+        ],
+    )
+    .expect("planting a fixture repository");
+
+    let output = cmd()
+        .args([
+            "seam",
+            "--path",
+            root.to_str().unwrap(),
+            "--suggest",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let document: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    let candidates = document["candidates"].as_array().expect("candidates");
+    // The two directories still there are proposed; neither pair naming the
+    // removed one survives, though the history remembers all three moving as
+    // one.
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["left"], "crates/live-a");
+    assert_eq!(candidates[0]["right"], "crates/live-b");
+}

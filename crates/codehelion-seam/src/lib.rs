@@ -592,6 +592,33 @@ pub struct Suggestion {
     pub candidates: Vec<Candidate>,
 }
 
+impl Suggestion {
+    /// Drop every candidate naming a unit the caller cannot find.
+    ///
+    /// A history remembers directories that no longer exist. Two crates folded
+    /// into one leave behind a pair that moved together in every commit either
+    /// of them appeared in, which is a coupling of one over a support of three
+    /// and a proposal nobody can act on: there is nothing left to write a seam
+    /// about. Left in, these crowd out the pairs a reader could do something
+    /// with, and they crowd hardest at the floors, where a young repository has
+    /// the least evidence to spare.
+    ///
+    /// Filtering afterwards rather than before counting is not an
+    /// approximation. Each pair's support and both its confidences are counts
+    /// over that pair's own units, so removing a pair changes no other pair's
+    /// figures, and the floors are applied per pair.
+    ///
+    /// The question is asked through a closure so this crate keeps reading
+    /// nothing but the history it was handed. What counts as still existing is
+    /// the caller's to decide, and the caller is the one holding the tree.
+    #[must_use]
+    pub fn retaining(mut self, exists: impl Fn(&str) -> bool) -> Self {
+        self.candidates
+            .retain(|candidate| exists(&candidate.left) && exists(&candidate.right));
+        self
+    }
+}
+
 /// Propose unit pairs from co-change alone.
 ///
 /// Nothing here consults the ledger to decide *what* to propose — the whole

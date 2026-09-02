@@ -111,6 +111,12 @@ figures, because a sweeping rename or a formatting pass hands support to every
 pair it happened to include. They are not left out of breach detection: a large
 commit that broke a seam still broke it.
 
+A pair naming a directory that is no longer in the tree is not proposed. Two
+crates since folded into one moved together in every commit either of them
+appeared in, which reads as a perfect coupling forever and is a proposal nobody
+can act on. Checking that the directory is still there is the only thing
+`--suggest` reads outside the history, and it opens nothing.
+
 `--suggest` never writes to the ledger. Promoting a candidate is a statement
 about what the code is supposed to mean, and keeping that statement a human one
 is what holds the guard's subject still while the history keeps growing.

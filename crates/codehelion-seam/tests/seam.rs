@@ -742,3 +742,73 @@ fn a_ledger_that_would_watch_nothing_is_refused() {
         "{message}"
     );
 }
+
+/// A candidate naming a directory that is no longer there is dropped, and the
+/// pairs that survive keep the figures they were counted with.
+///
+/// The case this is for is two crates folded into one. Every commit that
+/// touched either of them touched both, so the pair reads as a perfect
+/// coupling forever, and there is nothing left to write a seam about. Left in,
+/// these sit at the top of the list and push down the pairs a reader could act
+/// on.
+#[test]
+fn a_candidate_naming_a_unit_that_no_longer_exists_is_dropped() {
+    let history = history(&[
+        (
+            "c01",
+            "feat: split the work three ways",
+            &[
+                "crates/live-a/src/lib.rs",
+                "crates/live-b/src/lib.rs",
+                "crates/gone/src/lib.rs",
+            ],
+        ),
+        (
+            "c02",
+            "feat: again",
+            &[
+                "crates/live-a/src/lib.rs",
+                "crates/live-b/src/lib.rs",
+                "crates/gone/src/lib.rs",
+            ],
+        ),
+        (
+            "c03",
+            "feat: and again",
+            &[
+                "crates/live-a/src/lib.rs",
+                "crates/live-b/src/lib.rs",
+                "crates/gone/src/lib.rs",
+            ],
+        ),
+    ]);
+    let ledger = Ledger::new(Vec::new()).expect("an empty ledger");
+    let unfiltered = suggest(&ledger, &history, &Settings::default());
+    // Three units that always moved together make all three pairs.
+    assert_eq!(unfiltered.candidates.len(), 3);
+
+    let surviving = unfiltered.clone().retaining(|unit| unit != "crates/gone");
+    assert_eq!(surviving.candidates.len(), 1);
+    let kept = &surviving.candidates[0];
+    assert_eq!(kept.left, "crates/live-a");
+    assert_eq!(kept.right, "crates/live-b");
+
+    // Filtering afterwards is not an approximation: each pair's figures are
+    // counts over its own two units, so dropping a third pair cannot move them.
+    let before = unfiltered
+        .candidates
+        .iter()
+        .find(|candidate| candidate.left == "crates/live-a" && candidate.right == "crates/live-b")
+        .expect("the surviving pair was there before the filter");
+    assert_eq!(kept.support, before.support);
+    assert!((kept.coupling - before.coupling).abs() < f64::EPSILON);
+
+    // A filter that finds nothing leaves nothing, rather than falling back to
+    // reporting everything.
+    assert!(
+        suggest(&ledger, &history, &Settings::default())
+            .retaining(|_| false)
+            .candidates
+            .is_empty()
+    );
+}

@@ -107,7 +107,17 @@ pub fn seam(args: &SeamArgs, out: &mut impl Write) -> Result<Outcome> {
     let history = read_history(&root, &config, args.until.as_deref())?;
 
     let text = if args.suggest {
-        let suggestion = codehelion_seam::suggest(&ledger, &history, &settings);
+        // A candidate naming a directory that is no longer there is a proposal
+        // nobody can act on, and the history is full of them: a pair of crates
+        // since folded into one moved together in every commit either appeared
+        // in, which reads as a perfect coupling. This is the one place a
+        // suggestion consults the tree, and it consults it for existence
+        // alone — no file is opened and nothing is parsed.
+        let suggestion = codehelion_seam::suggest(&ledger, &history, &settings).retaining(|unit| {
+            // A unit is spelled with forward slashes whatever the platform,
+            // which is a shape `Path::join` accepts everywhere.
+            root.join(unit).exists()
+        });
         match args.common.format {
             SeamFormat::Json => json(&SuggestReport {
                 schema_version: SEAM_SCHEMA_VERSION,
