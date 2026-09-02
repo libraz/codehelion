@@ -907,6 +907,7 @@ fn fast_group_scope(group: &CloneGroup, lexed: &[LexedSource]) -> CloneScope {
 
 pub(crate) mod output;
 
+pub(crate) use output::write_output;
 pub(crate) use output::{
     ReportOutput, hydrate_artifact_savings, hydrate_group_identity, top_group_churn,
     write_partitioned_reports, write_partitioned_reports_without_artifact_guidance, write_report,

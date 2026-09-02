@@ -431,6 +431,84 @@ pub struct SemanticRules {
     pub disabled: Vec<String>,
 }
 
+/// One seam, as the ledger in `codehelion.toml` writes it.
+///
+/// A seam is a set of paths that implement the same semantics and have been
+/// changed together, and this is where a project writes down that it has one.
+/// Nothing here is inferred: the ledger is the source of truth for what `guard`
+/// judges, because a subject recomputed from history each day would make the
+/// same change pass today and fail tomorrow with nothing between the two but
+/// somebody else's commits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SeamLedgerEntry {
+    /// Name this seam is reported under. Chosen by a person, and stable.
+    pub id: String,
+    /// Path globs, in the syntax `[suppression] paths` already uses. At least
+    /// two: a seam of one member has nothing to be asymmetric about.
+    pub members: Vec<String>,
+    /// What the seam is, for whoever reads the report. Nothing reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Thresholds the seam analysis is computed under.
+///
+/// Spelled `[seam-tracking]` rather than `[seam]` because the ledger above
+/// already claims that name as an array of tables, and TOML gives one name to
+/// one shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SeamTracking {
+    /// How many commits after an asymmetric change a `fix` still counts as a
+    /// breach of it. Counted in commits rather than in time: it is meant to
+    /// cover one piece of work, and a clock would make the answer depend on
+    /// when somebody took a weekend.
+    pub breach_window: usize,
+    /// Ceiling on how many commits are read, newest first.
+    pub history_limit: usize,
+    /// Commits touching more paths than this are left out of coupling. They
+    /// stay in breach detection: a sweeping commit that broke a seam broke it.
+    pub max_commit_size: usize,
+    /// Lowest coupling `--suggest` will propose a pair at.
+    pub min_coupling: f64,
+    /// Fewest shared commits `--suggest` will propose a pair on.
+    pub min_support: usize,
+    /// How many leading path components make the unit `--suggest` counts
+    /// co-change over. A file is too fine to see a pair of parallel
+    /// implementations in; the whole tree is too coarse to see anything.
+    pub suggest_depth: usize,
+}
+
+impl Default for SeamTracking {
+    fn default() -> Self {
+        let settings = codehelion_seam::Settings::default();
+        Self {
+            breach_window: settings.breach_window,
+            history_limit: settings.history_limit,
+            max_commit_size: settings.max_commit_size,
+            min_coupling: settings.min_coupling,
+            min_support: settings.min_support,
+            suggest_depth: settings.suggest_depth,
+        }
+    }
+}
+
+impl SeamTracking {
+    /// These settings as the seam analysis reads them.
+    #[must_use]
+    pub const fn settings(&self) -> codehelion_seam::Settings {
+        codehelion_seam::Settings {
+            breach_window: self.breach_window,
+            history_limit: self.history_limit,
+            max_commit_size: self.max_commit_size,
+            min_coupling: self.min_coupling,
+            min_support: self.min_support,
+            suggest_depth: self.suggest_depth,
+        }
+    }
+}
+
 /// How much of a run the report states about a run before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
@@ -758,6 +836,12 @@ pub struct Config {
     pub helpers: Helpers,
     /// Audit-database location, relative to the repository root unless absolute.
     pub database: PathBuf,
+    /// The seam ledger: which sets of paths this project says are one thing
+    /// implemented in more than one place.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seam: Vec<SeamLedgerEntry>,
+    /// Thresholds the seam analysis is computed under.
+    pub seam_tracking: SeamTracking,
     /// What a report states about the run before it.
     pub report: ReportSettings,
     /// Frontend read-and-lex worker count; `None` selects it automatically.
@@ -786,6 +870,8 @@ impl Default for Config {
             semantic: SemanticRules::default(),
             helpers: Helpers::default(),
             database: PathBuf::from(".codehelion/audit.db"),
+            seam: Vec::new(),
+            seam_tracking: SeamTracking::default(),
             report: ReportSettings::default(),
             jobs: None,
         }
@@ -826,7 +912,30 @@ impl Config {
         if !(0.0..=1.0).contains(&self.entropy_ratio_floor) {
             bail!("entropy-ratio-floor must be in 0..=1");
         }
+        self.seam_tracking.settings().validate()?;
+        // Compiling the ledger is what checks it: a malformed glob or a seam
+        // written with one member is a mistake worth naming here rather than
+        // at the moment a guard silently judges nothing.
+        self.ledger()?;
         Ok(())
+    }
+
+    /// The seam ledger, compiled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the seam whose entry is malformed.
+    pub fn ledger(&self) -> Result<codehelion_seam::Ledger> {
+        let entries = self
+            .seam
+            .iter()
+            .map(|entry| codehelion_seam::SeamEntry {
+                id: entry.id.clone(),
+                members: entry.members.clone(),
+                note: entry.note.clone(),
+            })
+            .collect();
+        Ok(codehelion_seam::Ledger::new(entries)?)
     }
 
     /// Serialize this configuration to TOML.
@@ -1015,6 +1124,11 @@ pub(crate) fn configured_paths(resolved: &ResolvedConfig) -> ConfiguredPaths<'_>
         semantic: _,
         report: _,
         jobs: _,
+        // The ledger names path globs and thresholds. A glob decides which of
+        // the repository's own commits a count is taken over; none of it is
+        // opened, joined onto a directory, or started as a program.
+        seam: _,
+        seam_tracking: _,
         // Places on disk: one the tool writes, two it starts as programs.
         database,
         helpers: Helpers { rust, clang },
@@ -1336,6 +1450,44 @@ pub const TEMPLATE: &str = "\
 # max-alignment-cells = 4000000
 # Largest set of related units compared as one piece when forming groups.
 # max-component = 1024
+
+# The seam ledger: sets of paths this project says are one thing implemented in
+# more than one place, and that have to be changed together. `codehelion guard`
+# judges a change against these and nothing else, because a subject recomputed
+# from history every day would make the same change pass today and fail
+# tomorrow. `codehelion seam --suggest` proposes candidates from co-change; it
+# never writes here, and promoting one is a decision a person makes.
+# Members are path globs in the syntax [suppression] paths uses. A seam needs at
+# least two of them.
+# [[seam]]
+# id = \"frontend-c-cpp\"
+# members = [\"crates/frontend-c/**\", \"crates/frontend-cpp/**\"]
+# note = \"same semantics implemented twice across the two frontends\"
+
+# Thresholds the seam analysis is computed under. Spelled \"seam-tracking\"
+# rather than \"seam\" because the ledger above already claims that name.
+# [seam-tracking]
+# How many commits after an asymmetric change a fix still counts as a breach of
+# it. Counted in commits rather than in time, so the answer does not depend on
+# when somebody took a weekend.
+# breach-window = 20
+# Ceiling on how many commits are read, newest first. A resource ceiling and a
+# determinism tool at once: without a fixed range, a repository that grew
+# between two runs cannot be compared with itself.
+# history-limit = 2000
+# Commits touching more paths than this are left out of coupling, because a
+# commit that touches most of the tree hands support to every pair of paths in
+# it. They stay in breach detection: a sweeping commit that broke a seam broke
+# it.
+# max-commit-size = 30
+# The floors --suggest proposes a pair at: the smaller of the two directional
+# confidences, and the number of commits behind it.
+# min-coupling = 0.60
+# min-support = 3
+# How many leading path components make the unit --suggest counts co-change
+# over. A file is too fine to see a pair of parallel implementations in; the
+# whole tree is too coarse to see anything.
+# suggest-depth = 2
 
 # What a report states about the run before it.
 # [report]

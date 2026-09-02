@@ -30,6 +30,8 @@ codehelion-helper = { version = "0.5.0", path = "../codehelion-helper" }
 codehelion-frontend-c = { version = "0.5.0", path = "../codehelion-frontend-c" }
 codehelion-frontend-cpp = { version = "0.5.0", path = "../codehelion-frontend-cpp" }
 codehelion-frontend-rust = { version = "0.5.0", path = "../codehelion-frontend-rust" }
+codehelion-history = { version = "0.5.0", path = "../codehelion-history" }
+codehelion-seam = { version = "0.5.0", path = "../codehelion-seam" }
 codehelion-store = { version = "0.5.0", path = "../codehelion-store" }
 globset = "0.4"
 fs2 = "0.4"

@@ -1,0 +1,14 @@
+# codehelion, configured for codehelion.
+#
+# Only the seam ledger is set here. Everything else stays at the built-in
+# defaults, because a tool whose own repository needs the defaults tuned to be
+# readable has the wrong defaults.
+
+# The two frontends implement the same semantics against two grammars, and the
+# history says so: a rule added to one has repeatedly reached the other only
+# after a later fix. This entry is what makes that visible at the moment it
+# happens rather than in the next audit.
+[[seam]]
+id = "frontend-c-cpp"
+members = ["crates/codehelion-frontend-c/**", "crates/codehelion-frontend-cpp/**"]
+note = "same semantics implemented twice across the two frontends"

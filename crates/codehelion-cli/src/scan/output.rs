@@ -191,7 +191,17 @@ fn validate_presentation_options(
     Ok(())
 }
 
-fn write_output(path: &Path, text: &[u8], force: bool) -> Result<()> {
+/// Write a completed report to a file, refusing to replace one that is
+/// already there unless the caller said to.
+///
+/// Shared by every command that offers `--output`: one spelling of the refusal
+/// means a reader who has met it once has met it everywhere.
+///
+/// # Errors
+///
+/// Returns an error when the file exists and `force` is unset, or when the
+/// write fails.
+pub(crate) fn write_output(path: &Path, text: &[u8], force: bool) -> Result<()> {
     if force {
         std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
         return Ok(());

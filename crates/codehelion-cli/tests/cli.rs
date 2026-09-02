@@ -2120,3 +2120,127 @@ fn cache_status_breaks_down_valid_storage_and_prune_compacts_it() {
         .success()
         .stdout(predicate::str::contains("pruned"));
 }
+
+/// The seam feature's four limitations are stated, in both languages, in the
+/// words the implementation actually holds to.
+///
+/// Pinned rather than left to prose because the limitations are the part of
+/// this feature nobody discovers by using it: an asymmetric change that was
+/// the right change looks exactly like one that was not, and a reader who has
+/// not been told that will read the first report as a defect list. If the
+/// implementation stops being able to make one of these statements, this fails
+/// until the document says so too.
+#[test]
+fn limitation_documents_state_what_seam_tracking_cannot_tell_apart() {
+    let english = include_str!("../../../docs/en/limitations.md");
+    for snippet in [
+        "A correct one-sided change cannot be told from a broken one.",
+        "History does not survive a rename.",
+        "Duplication inside a single file carries no time axis, because co-change is",
+        "A repository without Conventional Commits prefixes reports no breaches, while",
+    ] {
+        assert!(
+            english.contains(snippet),
+            "English limitation document is missing {snippet}"
+        );
+    }
+
+    let japanese = include_str!("../../../docs/ja/limitations.md");
+    for snippet in [
+        "片側だけを直した正しい変更と、壊れた変更とを区別できません。",
+        "履歴はリネームをまたぎません。",
+        "共変更はパス単位で測るため、同一ファイル内の重複には時間軸が付きません。",
+        "Conventional Commits の prefix を持たないリポジトリでは breach が 1 件も出ませんが、非対称変更は変わらず検出できます。",
+    ] {
+        assert!(
+            japanese.contains(snippet),
+            "Japanese limitation document is missing {snippet}"
+        );
+    }
+}
+
+/// Both seam-tracking pages state the ledger's shape, the three commands, and
+/// why a candidate is promoted by hand.
+#[test]
+fn seam_tracking_documents_state_the_ledger_the_commands_and_manual_promotion() {
+    for document in [
+        include_str!("../../../docs/en/seam-tracking.md"),
+        include_str!("../../../docs/ja/seam-tracking.md"),
+    ] {
+        for snippet in [
+            "[[seam]]",
+            "[seam-tracking]",
+            "codehelion history",
+            "codehelion seam --suggest",
+            "codehelion guard --paths",
+            "--deny-asymmetric",
+            "fetch-depth: 0",
+            "coupling(a, b)    = min(confidence(a\u{2192}b), confidence(b\u{2192}a))",
+        ] {
+            assert!(
+                document.contains(snippet),
+                "a seam-tracking document is missing {snippet}"
+            );
+        }
+    }
+}
+
+/// The command-line documents name every seam-tracking subcommand and the
+/// flags that change what one of them does.
+#[test]
+fn command_line_documents_state_the_history_seam_and_guard_surfaces() {
+    for document in [
+        include_str!("../../../docs/en/cli.md"),
+        include_str!("../../../docs/ja/cli.md"),
+    ] {
+        for snippet in [
+            "codehelion history",
+            "codehelion seam",
+            "codehelion guard",
+            "--suggest",
+            "--until <rev>",
+            "--since <rev>",
+            "--paths <p>",
+            "--deny-asymmetric",
+        ] {
+            assert!(
+                document.contains(snippet),
+                "the command-line document is missing {snippet}"
+            );
+        }
+    }
+}
+
+/// Both configuration documents state every `[seam-tracking]` key with the
+/// default this build applies.
+///
+/// Read out of the built-in settings rather than copied from them: a default
+/// changed in the code fails here until the document says the same number.
+#[test]
+fn configuration_documents_state_every_seam_setting_and_its_default() {
+    let defaults = codehelion_seam::Settings::default();
+    let documents = [
+        include_str!("../../../docs/en/configuration.md"),
+        include_str!("../../../docs/ja/configuration.md"),
+    ];
+    let expected = [
+        ("breach-window", defaults.breach_window.to_string()),
+        ("history-limit", defaults.history_limit.to_string()),
+        ("max-commit-size", defaults.max_commit_size.to_string()),
+        ("min-coupling", format!("{:.2}", defaults.min_coupling)),
+        ("min-support", defaults.min_support.to_string()),
+        ("suggest-depth", defaults.suggest_depth.to_string()),
+    ];
+    for document in documents {
+        for (key, default) in &expected {
+            assert!(
+                document.contains(key),
+                "a configuration document does not name {key}"
+            );
+            assert!(
+                document.contains(&format!("{key} = {default}")),
+                "a configuration document does not give {key} its default of {default}"
+            );
+        }
+    }
+}

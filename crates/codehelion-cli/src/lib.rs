@@ -28,6 +28,7 @@ pub mod report;
 pub mod scan;
 #[doc(hidden)]
 pub mod scan_lock;
+pub mod seam;
 pub mod semantic;
 pub mod suppress;
 
@@ -390,6 +391,9 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
             ArtifactAction::Compare(args) => artifact::compare(args, out),
             ArtifactAction::Calibration(args) => artifact::calibration(args, out),
         },
+        Command::History(args) => seam::history(args, out),
+        Command::Seam(args) => seam::seam(args, out),
+        Command::Guard(args) => seam::guard(args, out),
     }
 }
 

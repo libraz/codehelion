@@ -59,7 +59,13 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     steps:
+      # The whole history, not the default single commit. The seam tests count
+      # co-changes and breaches over this repository's own commits, and a
+      # shallow checkout would leave them measuring one commit and reporting
+      # the emptiness as an answer.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       # `rust-toolchain.toml` names the components, `rust-src` among them.
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -116,6 +122,29 @@ jobs:
         run: corpus/scripts/materialize-labeled.sh
       - name: Measure
         run: make eval
+
+  seam:
+    name: seam report
+    runs-on: ubuntu-latest
+    steps:
+      # Reading co-change needs the commits it is computed over, so this job
+      # is one of the two that checks the tree out in full.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Reported, not enforced. `--deny-asymmetric` is deliberately absent: a
+      # change touching one member of a seam is often the right change, and a
+      # check that cannot tell those apart belongs in the log where a reviewer
+      # reads it rather than in a status that blocks the branch.
+      - name: Report seam metrics
+        run: cargo run -p codehelion -- seam
+      # `HEAD~1` rather than a branch name: a pull request is checked out as a
+      # merge commit whose first parent is the base, so this reads the change
+      # under review, and on a push it reads the commit that was pushed.
+      - name: Report what this change touched
+        run: cargo run -p codehelion -- guard --since HEAD~1
 
   packaging:
     name: publishable crates build from their own package
