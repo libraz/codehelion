@@ -52,7 +52,12 @@ jobs:
       - name: Take the sources as they were committed
         if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
+      # The whole history, because the suite reads this repository's own: the
+      # seam measurement is reproduced from pinned commits, and a shallow
+      # checkout cannot reach them. The CI workflow's test job says the same.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The same prerequisite the CI suite states: the Semantic tests are part
@@ -128,7 +133,10 @@ jobs:
     name: coverage
     runs-on: ubuntu-latest
     steps:
+      # The whole history, for the reason the test job above states.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
