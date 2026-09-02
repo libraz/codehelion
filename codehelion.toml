@@ -12,3 +12,23 @@
 id = "frontend-c-cpp"
 members = ["crates/codehelion-frontend-c/**", "crates/codehelion-frontend-cpp/**"]
 note = "same semantics implemented twice across the two frontends"
+
+# The two READMEs are one document written twice. Nothing enforces that an
+# edit to one reaches the other, and the co-change figures say they have moved
+# together for almost every change either has ever had.
+[[seam]]
+id = "readme-en-ja"
+members = ["README.md", "README_ja.md"]
+note = "one overview in two languages"
+
+# One job per operating system: build the artifact fixtures and check what the
+# reader makes of them. A rule added to the ELF script usually belongs in the
+# other two, and nothing but a reader's memory says so.
+[[seam]]
+id = "artifact-fixture-scripts"
+members = [
+    "scripts/verify-artifact-fixtures.sh",
+    "scripts/verify-macho-artifact-fixtures.sh",
+    "scripts/verify-pe-artifact-fixtures.ps1",
+]
+note = "the same fixture verification written once per platform"
