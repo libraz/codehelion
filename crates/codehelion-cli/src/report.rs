@@ -24,9 +24,6 @@ use std::io::{self, Write};
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::{CloneClass, CloneScope};
 use codehelion_core::priority::{self, GroupFacts, Weights};
-use codehelion_core::semantic::SemanticOperationGraph;
-use codehelion_core::test_code::TestCodeEvidence;
-use codehelion_store::artifact::MappingEvidence;
 use serde::Serialize;
 
 use crate::config::Suppression as SuppressionConfig;
@@ -38,11 +35,7 @@ pub use schema::{
     FINDING_DETAIL_SCHEMA_VERSION, GROUP_CONTINUING, GROUP_EXPANDED, GROUP_NEW, JSON_SCHEMA,
     SCHEMA_VERSION,
 };
-use schema::{
-    EXPLAIN_RESPONSE_CLONE_GROUP, EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP,
-    EXPLAIN_RESPONSE_CROSS_VARIANT_GROUP, EXPLAIN_RESPONSE_OCCURRENCE, EXPLAIN_RESPONSE_SIBLING,
-    GONE_LISTED, SCOPE_FRAGMENT, SHORT_ID_CHARS, TEXT_GROUP_LIMIT, TEXT_MEMBER_LIMIT, detail_json,
-};
+use schema::{GONE_LISTED, SCOPE_FRAGMENT, SHORT_ID_CHARS, TEXT_GROUP_LIMIT, TEXT_MEMBER_LIMIT};
 
 /// A complete scan result: run metadata, summary counts and every group.
 #[derive(Debug, Serialize)]
@@ -141,8 +134,6 @@ pub use ranking::{
 pub(crate) use ranking::append_stored_identity_stage;
 
 mod render;
-
-use render::{GroupColumns, Palette, render_group, signature_note};
 
 pub(crate) fn render_partition_artifact_guidance(
     reports: &[Report],

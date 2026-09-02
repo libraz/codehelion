@@ -5,15 +5,22 @@
     reason = "the implementation module shares store helpers across scan modes"
 )]
 
-use super::{
-    BTreeMap, BuildInputs, BuildVariant, Config, ContentHash, ContentNorm, Context, EngineReport,
-    FP_SCHEMA_VERSION, FileContext, FileRow, GroupIds, GroupRow, LexedSource, LiteralNorm,
-    MemberRow, NORMALIZATION_VERSION, Path, Result, Snapshot, SourceUnit, Store, SummaryRow,
-    UnitRow, build_group, engine, fast_group_scope, literal_norm, path_key, priority_row, report,
-    shared, stable_id,
-};
+use super::build::{BuildInputs, LexedSource, build_group, fast_group_scope};
+use super::run_info::priority_row;
+use super::runtime::literal_norm;
+use super::shared;
+use crate::config::Config;
+use crate::report;
+use anyhow::{Context, Result};
+use codehelion_core::discovery::{BuildVariant, ContentHash, NORMALIZATION_VERSION, SourceUnit};
+use codehelion_core::engine::{self, EngineReport, LiteralNorm};
+use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, FileContext, GroupIds};
 use codehelion_store::snapshot::SuppressionRuleRow;
+use codehelion_store::snapshot::{FileRow, GroupRow, MemberRow, Snapshot, SummaryRow, UnitRow};
+use codehelion_store::{Store, path_key};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::path::Path;
 
 /// The tree a scan read, as rows to record beside its findings.
 ///

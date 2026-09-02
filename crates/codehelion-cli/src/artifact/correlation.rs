@@ -1,15 +1,17 @@
 //! Source-to-artifact correlation and evidence aggregation.
 
-use super::{
+use codehelion_artifact::{ArtifactIr, metrics};
+use codehelion_store::artifact::{
     ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION, ArtifactAnalysisCorrelation,
-    ArtifactAnalysisMapping, ArtifactAnalysisSourceKind, ArtifactAnalysisUnmappedReason,
-    ArtifactAnalysisUnmappedSource, ArtifactAnalysisUnmappedSourceReason,
-    ArtifactAnalysisUnmappedSymbol, ArtifactIr, BTreeMap, BTreeSet, BuildVariantEvidence, Context,
-    FilePath, MAX_LINKER_MAP_BYTES, MappingEvidence, MappingEvidenceFact, Result,
-    SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION, Serialize, SourceFragmentIdentity, SourceInstantiation,
-    SourceResolvedCall, SourceResolvedSymbol, SourceUnitIdentity, Store, bail, fingerprint_hex, fs,
-    metrics,
+    ArtifactAnalysisMapping, ArtifactAnalysisSourceKind, ArtifactAnalysisUnmappedSource,
+    ArtifactAnalysisUnmappedSymbol, MappingEvidenceFact,
 };
+use codehelion_store::fingerprint_hex;
+use codehelion_store::query::{
+    SourceFragmentIdentity, SourceInstantiation, SourceResolvedSymbol, SourceUnitIdentity,
+};
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Mapping rows established by one explicit source-run correlation request.
 #[derive(Debug, Clone, PartialEq, Default)]

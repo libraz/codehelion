@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::cli::{DEFAULT_ARTIFACT_MAX_BYTES, DEFAULT_ARTIFACT_TIMEOUT_SECONDS};
+use std::fs;
 
 /// A format is one word, on the command line and in the report alike.
 ///

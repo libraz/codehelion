@@ -1,28 +1,45 @@
 //! Conversion of structural analysis results into public report models.
 
-use super::{
-    BTreeMap, BTreeSet, CloneScope, DiscoveryReport, GroupDetail, LiteralNorm, REGION_SIMILARITY,
-    Report, ReportInputs, Result, SemanticDetection, SemanticUnitGraph, StructuralGroup,
-    StructuralRegion, StructuralUnit, SummaryRow, VerifiedPair, WEIGHT_VERSION,
-    aggregate_test_code_evidence, as_u64, engine, region_identifier_jaccard,
-    region_test_code_evidence, report, semantic_group_member_fingerprints, semantic_member_ranks,
-    semantic_scope, shared, stable_id, structural, unit_token_span,
+use super::REGION_SIMILARITY;
+use super::inputs::ReportInputs;
+use super::model::{SemanticDetection, SemanticUnitGraph};
+use super::semantic_analysis::{
+    semantic_group_member_fingerprints, semantic_member_ranks, semantic_scope,
 };
+use super::suppression::{
+    aggregate_test_code_evidence, region_identifier_jaccard, region_test_code_evidence,
+    unit_token_span,
+};
+use crate::report::{self, Report};
+use crate::scan::build::as_u64;
+use crate::scan::shared;
+use anyhow::Result;
 use codehelion_core::boilerplate::BOILERPLATE_VERSION;
+use codehelion_core::clone_class::CloneScope;
 use codehelion_core::config::Stage;
+use codehelion_core::discovery::DiscoveryReport;
 use codehelion_core::discovery::{AnalysisMode, NORMALIZATION_VERSION};
+use codehelion_core::engine::{self, LiteralNorm};
 use codehelion_core::features::FEATURE_SCHEMA_VERSION;
 use codehelion_core::grouping::GROUPING_VERSION;
+use codehelion_core::grouping::StructuralGroup;
 use codehelion_core::maximal::MAXIMAL_VERSION;
 use codehelion_core::semantic::{
     SEMANTIC_CANDIDATE_INDEX_VERSION, SEMANTIC_RULE_REGISTRY_VERSION, SEMANTIC_WINDOWING_VERSION,
     SOG_SCHEMA_VERSION,
 };
+use codehelion_core::stable_id;
 use codehelion_core::stable_id::{ContentNorm, FP_SCHEMA_VERSION, UnitFingerprint};
+use codehelion_core::structural::{
+    self, GroupDetail, StructuralRegion, StructuralUnit, VerifiedPair,
+};
 use codehelion_core::substitution::SUBSTITUTION_VERSION;
 use codehelion_core::test_code::TEST_CODE_VERSION;
 use codehelion_core::verify::SimilarityBreakdown;
+use codehelion_core::verify::WEIGHT_VERSION;
+use codehelion_store::snapshot::SummaryRow;
 use codehelion_store::snapshot::UnparsedRow;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::scan::{RunInfoInputs, common_run_info, display_path, file_counts, guardrails_row};
 

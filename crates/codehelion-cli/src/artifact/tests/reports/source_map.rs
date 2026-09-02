@@ -1,6 +1,7 @@
 //! WASM source-map resolution and the outcome each reference reports.
 
 use super::*;
+use std::fs;
 
 #[test]
 fn wasm_source_maps_are_read_only_from_the_artifact_directory() {

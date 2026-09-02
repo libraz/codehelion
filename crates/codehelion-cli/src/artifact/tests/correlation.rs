@@ -1,4 +1,6 @@
 use super::*;
+use codehelion_store::Store;
+use codehelion_store::artifact::ArtifactAnalysisUnmappedSymbol;
 
 #[test]
 fn linker_map_recovers_an_unmapped_unit_without_basename_guessing() {

@@ -7,6 +7,7 @@ use codehelion_core::semantic::{
     OperationAttributes, OperationEdge, OperationEdgeKind, OperationKind, OperationNode,
     SemanticOperationGraph,
 };
+use codehelion_core::test_code::TestCodeEvidence;
 use codehelion_store::artifact::MappingEvidenceFact;
 use codehelion_store::snapshot::SummaryRow;
 

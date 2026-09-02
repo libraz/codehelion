@@ -1,5 +1,7 @@
 use super::report_command::*;
 use super::*;
+use crate::cli::DetailFormat;
+use crate::cli::ExplainArgs;
 use crate::cli::{BaselineMode, ColorChoice, DecorationChoice, SortAxis};
 use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::Language;
@@ -11,6 +13,9 @@ use codehelion_core::stable_id::{
     CrossLanguageComparisonId, CrossLanguageGroupId, CrossLanguageMemberId,
     CrossVariantComparisonId, CrossVariantGroupId, CrossVariantMemberId,
 };
+use codehelion_store::Store;
+use codehelion_store::query::IdKind;
+use codehelion_store::query::IdMatch;
 use codehelion_store::snapshot::{
     CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
     CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow,

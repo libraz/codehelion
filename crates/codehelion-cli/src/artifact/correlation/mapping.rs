@@ -1,21 +1,32 @@
 //! Source-run loading, linker-map evidence, and debug-location correlation.
 
+use super::CorrelationRows;
 use super::matching::{
     InstantiationIndex, ResolvedSymbolIndex, SourceLocationIndex,
     assign_unambiguous_fragment_bytes, canonical_symbol_name, combine_fallback_mappings,
     correlate_generic_origin, correlate_symbol_name, enrich_call_graph_evidence,
     uniformly_separated,
 };
-use super::{
+use super::ratio::{source_kind_order, unmapped_reason_label};
+use crate::artifact::MAX_LINKER_MAP_BYTES;
+use crate::artifact::SourceMapLocation;
+use crate::artifact::model::BuildVariantEvidence;
+use anyhow::{Context, Result, bail};
+use codehelion_artifact::ArtifactIr;
+use codehelion_store::Store;
+use codehelion_store::artifact::{
     ArtifactAnalysisMapping, ArtifactAnalysisSourceKind, ArtifactAnalysisUnmappedReason,
     ArtifactAnalysisUnmappedSource, ArtifactAnalysisUnmappedSourceReason,
-    ArtifactAnalysisUnmappedSymbol, ArtifactIr, BTreeMap, BTreeSet, BuildVariantEvidence, Context,
-    CorrelationRows, FilePath, MAX_LINKER_MAP_BYTES, MappingEvidence, MappingEvidenceFact, Result,
-    SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION, SourceFragmentIdentity, SourceInstantiation,
-    SourceResolvedCall, SourceResolvedSymbol, SourceUnitIdentity, Store, bail, fs,
-    source_kind_order, unmapped_reason_label,
+    ArtifactAnalysisUnmappedSymbol, MappingEvidence, MappingEvidenceFact,
+    SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION,
 };
-use crate::artifact::SourceMapLocation;
+use codehelion_store::query::{
+    SourceFragmentIdentity, SourceInstantiation, SourceResolvedCall, SourceResolvedSymbol,
+    SourceUnitIdentity,
+};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path as FilePath;
 
 /// Reference to the build configuration a correlated identity was minted under.
 ///

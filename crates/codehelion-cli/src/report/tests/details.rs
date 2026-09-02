@@ -1,4 +1,11 @@
 use super::*;
+use crate::report::schema::EXPLAIN_RESPONSE_CLONE_GROUP;
+use crate::report::schema::EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP;
+use crate::report::schema::EXPLAIN_RESPONSE_CROSS_VARIANT_GROUP;
+use crate::report::schema::EXPLAIN_RESPONSE_OCCURRENCE;
+use crate::report::schema::EXPLAIN_RESPONSE_SIBLING;
+use codehelion_core::test_code::TestCodeEvidence;
+use codehelion_store::artifact::MappingEvidence;
 
 #[test]
 fn semantic_finding_detail_keeps_graphs_and_mappings_readable() {

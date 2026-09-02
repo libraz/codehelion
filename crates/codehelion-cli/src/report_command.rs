@@ -6,11 +6,13 @@
     reason = "the implementation module exposes command helpers to crate-local tests and reconstructs one persisted report schema in one place"
 )]
 
-use super::{
-    Context, DetailFormat, ExplainArgs, FULL_ID_CHARS, IdKind, IdMatch, Outcome, Path, PathBuf,
-    ReportArgs, Result, RunOrigin, Store, Write, bail, config, fingerprint_hex, report,
-    resolve_db_at, scan, suppress,
-};
+use super::cli::ReportArgs;
+use super::{Outcome, config, report, scan};
+use anyhow::{Context, Result, bail};
+use codehelion_store::Store;
+use codehelion_store::query::RunOrigin;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<Outcome> {
     let (root, resolved_config, path) = report_database(args)?;

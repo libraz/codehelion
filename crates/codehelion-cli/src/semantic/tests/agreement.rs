@@ -1,4 +1,5 @@
 use super::*;
+use codehelion_core::ir::ByteRange;
 
 fn read(unit: &str, symbols: Vec<ResolvedSymbol>, types: Vec<ResolvedType>) -> Gathered {
     read_with_instantiations(unit, symbols, types, Vec::new())

@@ -1,27 +1,33 @@
-use super::{
-    CategoryAction, Compilers, Config, CrossLanguageCandidateInput, ExecutionPolicy, Language,
-    LanguageSelection, SandboxRequest, ScanArgs, SemanticOperationGraph, StructuralConfig,
-    VerifiedPair, copy_guardrails, coverage, detector_versions, enabled_cross_language_matches,
-    extract_cross_language_candidates, helper_timeout, installed_helper, pair_shape_suppression,
-    presentation_suppression, report, run_with, semantic_sandbox, structural_config,
-    unanimous_boilerplate, unavailable_execution_message, verify_cross_language_candidates,
+use super::comparison::cross_language_funnel;
+use super::helpers::{
+    Compilers, helper_timeout, installed_helper, semantic_sandbox, unavailable_execution_message,
 };
-use super::{SourceMeta, compile_rules, evaluate_suppression, reportable_regions};
+use super::model::{CfgShape, SemanticConfidenceEvidence, SemanticDetection, SourceMeta};
+use super::reporting::{DiscoveryExclusions, detector_versions, discovery_exclusions, funnel};
+use super::semantic_analysis::{
+    cfg_confidence, data_flow_confidence, interaction_confidence, normalization_confidence,
+    semantic_confidence, semantic_partitions, semantic_window_cfg_shape,
+    semantic_window_data_flows, unconfigured_cpp_partition,
+};
+use super::suppression::{
+    compile_rules, evaluate_suppression, pair_shape_suppression, presentation_suppression,
+    reportable_regions, structural_config, unanimous_boilerplate,
+};
+use super::{coverage, run_with};
+use crate::cli::ScanArgs;
+use crate::config::{CategoryAction, Config};
+use crate::report;
+use codehelion_core::discovery::{Language, LanguageSelection};
+use codehelion_core::execution::ExecutionPolicy;
+use codehelion_core::structural::{StructuralConfig, VerifiedPair};
+use codehelion_helper::SandboxRequest;
 // Named here so the sibling test modules reach them as `super::`, the way the
 // bodies moved out of this file already spell them.
-use super::{
-    CfgShape, DiscoveryExclusions, SemanticConfidenceEvidence, SemanticDetection, cfg_confidence,
-    cross_language_funnel, data_flow_confidence, discovery_exclusions, funnel,
-    interaction_confidence, normalization_confidence, semantic_confidence, semantic_partitions,
-    semantic_window_cfg_shape, semantic_window_data_flows, unconfigured_cpp_partition,
-};
 use crate::cli::{Format, Mode, SortAxis};
 use codehelion_core::boilerplate::Boilerplate;
 use codehelion_core::clone_class::CloneClass;
 use codehelion_core::discovery::BuildVariant;
 use codehelion_core::doctor::{CLANG_HELPER, Greeting, HelperFacts, HelperState, RUST_HELPER};
-use codehelion_core::semantic::SemanticCandidateConfig;
-use codehelion_core::semantic::{OperationAttributes, OperationKind, OperationNode};
 use codehelion_core::stable_id::CloneGroupFingerprint;
 use codehelion_core::stable_id::{FragmentFingerprint, UnitFingerprint};
 use codehelion_core::structural::{

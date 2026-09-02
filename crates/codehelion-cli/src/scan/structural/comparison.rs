@@ -1,19 +1,45 @@
 //! Cross-build-variant and cross-language semantic comparisons.
 
-use super::{
-    BTreeSet, BuildVariant, Config, Context, CrossComparisonUnit, CrossLanguageCandidateInput,
-    CrossLanguageComparisonSnapshot, CrossLanguageComparisonUnit, CrossLanguageSemanticGroupRow,
-    CrossLanguageSemanticMemberRow, CrossVariantComparisonSnapshot, CrossVariantGroupRow,
-    CrossVariantMemberRow, CrossVariantUnit, DiscoveryReport, Installed, Language,
-    PartitionOutcome, Path, Report, ReportInputs, Result, ScanArgs, ScanBaseline,
-    SemanticDetection, SemanticProgram, SourceMeta, StructuralReport, SyntaxIrFile, as_u64,
-    build_groups, build_report, compile_rules, coverage, detector_versions, directory_partitions,
-    evaluate_suppression, extract_cross_language_candidates, literal_norm, map_sources,
-    mark_test_modules, mark_test_paths, parse_one, path_key, presentation_suppression, record,
-    registered_semantic_pairs, remove_signature_sibling_funnel_stage, report, reportable_regions,
-    resolve, rfc3339_now, semantic_confidence, stable_id, structural, structural_config,
-    summary_row, suppress, verify_cross_language_candidates,
+use super::helpers::Installed;
+use super::inputs::ReportInputs;
+use super::model::{
+    CrossComparisonUnit, CrossLanguageComparisonUnit, PartitionOutcome, SemanticDetection,
+    SourceMeta,
 };
+use super::reporting::{build_groups, build_report, detector_versions, summary_row};
+use super::semantic_analysis::{
+    SemanticProgram, registered_semantic_pairs, resolve, semantic_confidence,
+};
+use super::store::record;
+use super::suppression::{
+    compile_rules, evaluate_suppression, mark_test_modules, mark_test_paths,
+    presentation_suppression, reportable_regions, structural_config,
+};
+use super::{coverage, directory_partitions, parse_one, remove_signature_sibling_funnel_stage};
+use crate::cli::ScanArgs;
+use crate::config::Config;
+use crate::report::{self, Report};
+use crate::scan::baseline::ScanBaseline;
+use crate::scan::build::as_u64;
+use crate::scan::run_info::rfc3339_now;
+use crate::scan::runtime::{literal_norm, map_sources};
+use crate::suppress;
+use anyhow::{Context, Result};
+use codehelion_core::discovery::{BuildVariant, DiscoveryReport, Language};
+use codehelion_core::ir::SyntaxIrFile;
+use codehelion_core::semantic::{
+    CrossLanguageCandidateInput, extract_cross_language_candidates,
+    verify_cross_language_candidates,
+};
+use codehelion_core::stable_id;
+use codehelion_core::structural::{self, CrossVariantUnit, StructuralReport};
+use codehelion_store::path_key;
+use codehelion_store::snapshot::{
+    CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
+    CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow,
+};
+use std::collections::BTreeSet;
+use std::path::Path;
 
 /// The normal partitions are the source of truth for whether a comparison
 /// could start. An absent status therefore never means an empty comparison.

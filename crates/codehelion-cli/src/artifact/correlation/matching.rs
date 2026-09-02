@@ -1,9 +1,9 @@
 //! Correlation fallback matching and attribution.
 
 use super::{
-    BTreeMap, FilePath, SourceFragmentIdentity, SourceInstantiation, SourceResolvedSymbol,
-    SourceUnitIdentity,
+    BTreeMap, SourceFragmentIdentity, SourceInstantiation, SourceResolvedSymbol, SourceUnitIdentity,
 };
+use std::path::Path as FilePath;
 
 mod correlate;
 mod name;

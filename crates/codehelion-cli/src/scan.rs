@@ -21,22 +21,14 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::conditional::ArmPath;
-use codehelion_core::discovery::{
-    self, BuildVariant, ContentHash, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport,
-    GeneratedMarkers, Language, LanguageSelection, NORMALIZATION_VERSION, SourceUnit,
-};
-use codehelion_core::engine::{self, EngineConfig, EngineReport, InputFile, LiteralNorm};
+use codehelion_core::discovery::{BuildVariant, ContentHash};
+use codehelion_core::engine::{self, InputFile};
 use codehelion_core::execution::ExecutionPolicy;
-use codehelion_core::frontend::Frontend;
-use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, FileContext, GroupIds};
-use codehelion_store::snapshot::{FileRow, GroupRow, MemberRow, Snapshot, SummaryRow, UnitRow};
-use codehelion_store::{Store, fingerprint_hex};
-use globset::{Glob, GlobSet, GlobSetBuilder};
-use serde_json::Value;
+use codehelion_core::stable_id::{self, FileContext};
 
 use crate::Outcome;
-use crate::cli::{BaselineMode, Format, Mode, ScanArgs, SortAxis, ViewArgs};
-use crate::config::{self, Config, LiteralNormalization};
+use crate::cli::{BaselineMode, Mode, ScanArgs, SortAxis};
+use crate::config::{self};
 use crate::report::{self, Report};
 use crate::suppress;
 
@@ -356,10 +348,7 @@ pub(crate) fn outcome(args: &ScanArgs, model: &Report) -> Outcome {
 
 mod build;
 
-use build::{
-    BuildInputs, LexedSource, Suppression, as_u64, build_group, build_report, evaluate_suppression,
-    fast_group_scope, summary_row,
-};
+use build::{BuildInputs, Suppression, as_u64, build_report, evaluate_suppression, summary_row};
 
 pub(crate) mod run_info;
 
@@ -373,17 +362,16 @@ pub(crate) mod output;
 pub(crate) use output::write_output;
 pub(crate) use output::{
     ReportOutput, hydrate_artifact_savings, hydrate_group_identity, top_group_churn,
-    write_partitioned_reports, write_partitioned_reports_without_artifact_guidance, write_report,
-    write_report_options, write_report_options_without_artifact_guidance,
-    write_report_without_artifact_guidance,
+    write_partitioned_reports_without_artifact_guidance, write_report, write_report_options,
+    write_report_options_without_artifact_guidance, write_report_without_artifact_guidance,
 };
 
 pub(crate) mod runtime;
 
 pub(crate) use runtime::{
-    DatabaseUse, FileOutcome, build_globset, database_path, database_path_for, discover_sources,
-    effective_jobs, filter_globs, guarded, incompatible_database_replacement, literal_norm,
-    map_sources, read_within_budget, readable_here, scan_database_path,
+    DatabaseUse, build_globset, database_path, database_path_for, discover_sources, effective_jobs,
+    filter_globs, guarded, incompatible_database_replacement, literal_norm, readable_here,
+    scan_database_path,
 };
 use runtime::{engine_config, lex_sources};
 

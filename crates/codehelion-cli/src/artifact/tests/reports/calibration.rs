@@ -1,7 +1,11 @@
 //! Calibration summaries, baseline comparison, and calibration selectors.
 
 use super::*;
+use crate::artifact::calibration_report::CalibrationStratumReport;
+use crate::artifact::calibration_report::CalibrationSummaryReport;
 use crate::cli::{DEFAULT_ARTIFACT_MAX_BYTES, DEFAULT_ARTIFACT_TIMEOUT_SECONDS};
+use codehelion_store::artifact::ArtifactSavingsCalibrationStatistics;
+use std::fs;
 
 #[test]
 fn calibration_summary_keeps_absolute_and_relative_statistics_separate() {

@@ -1,6 +1,7 @@
 //! Coverage counts and the reasons an unmapped side reports.
 
 use super::*;
+use codehelion_store::artifact::ArtifactAnalysisUnmappedSymbol;
 
 #[test]
 fn correlation_report_keeps_unmapped_bytes_and_reasons_visible() {

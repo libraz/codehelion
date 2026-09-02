@@ -1,5 +1,11 @@
 use super::*;
+use codehelion_core::ir::ByteRange;
+use codehelion_core::semantic::DirectPropagation as CoreDirectPropagation;
+use codehelion_core::semantic::FallibleKind as CoreFallibleKind;
 use codehelion_core::semantic::OperationEdgeKind;
+use codehelion_core::semantic::OperationKind;
+use codehelion_core::types::TypeTag;
+use codehelion_helper::ir::DirectPropagation as HelperDirectPropagation;
 use codehelion_helper::ir::{
     Anchor, CallTarget, FallibleKind as HelperFallibleKind, ResolvedExpression, ResolvedSymbol,
     ResolvedType, SemanticConstruct, SemanticConstructKind, SourceRange, SymbolKind, TypeCategory,

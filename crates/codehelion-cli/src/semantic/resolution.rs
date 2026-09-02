@@ -5,11 +5,17 @@
     reason = "the implementation module exposes resolution helpers to semantic scan code"
 )]
 
-use super::{
-    ApiNormalization, ByteRange, CallTarget, CompilerIr, ConstructObservation,
-    CoreDirectPropagation, CoreFallibleKind, HelperDirectPropagation, HelperFallibleKind, Language,
-    OperationKind, OperationObservation, SemanticConstructKind, SemanticGraphError,
-    SemanticSourceRange, TypeTag, normalize_registered_observations_with_ranges,
+use codehelion_core::discovery::Language;
+use codehelion_core::ir::ByteRange;
+use codehelion_core::semantic::{
+    ApiNormalization, ConstructObservation, DirectPropagation as CoreDirectPropagation,
+    FallibleKind as CoreFallibleKind, OperationKind, OperationObservation, SemanticGraphError,
+    SemanticSourceRange, normalize_registered_observations_with_ranges,
+};
+use codehelion_core::types::TypeTag;
+use codehelion_helper::ir::{
+    CallTarget, CompilerIr, DirectPropagation as HelperDirectPropagation,
+    FallibleKind as HelperFallibleKind, SemanticConstructKind,
 };
 
 /// The types `ir` resolved inside `file`, at the bytes they were written at.

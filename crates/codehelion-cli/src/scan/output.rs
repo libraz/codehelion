@@ -5,10 +5,14 @@
     reason = "the implementation module shares report helpers across scan modes"
 )]
 
-use super::{
-    Context, Format, PARTITIONED_REPORT_SCHEMA_URI, PARTITIONED_REPORT_SCHEMA_VERSION, Path,
-    Report, Result, ScanArgs, Store, Value, ViewArgs, Write, bail, fingerprint_hex, report,
-};
+use super::{PARTITIONED_REPORT_SCHEMA_URI, PARTITIONED_REPORT_SCHEMA_VERSION};
+use crate::cli::{Format, ScanArgs, ViewArgs};
+use crate::report::{self, Report};
+use anyhow::{Context, Result, bail};
+use codehelion_store::{Store, fingerprint_hex};
+use serde_json::Value;
+use std::io::Write;
+use std::path::Path;
 
 /// Render the model in the requested format, to `--output` when given,
 /// otherwise to `out`. Colour is used only for text going to a terminal.

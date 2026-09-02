@@ -49,18 +49,9 @@ use std::time::Duration;
 
 use codehelion_core::discovery::{Language, SourceUnit};
 use codehelion_core::engine::normalize::Resolution;
-use codehelion_core::ir::ByteRange;
-use codehelion_core::semantic::{
-    ApiNormalization, ConstructObservation, DirectPropagation as CoreDirectPropagation,
-    FallibleKind as CoreFallibleKind, OperationKind, OperationObservation, SemanticGraphError,
-    SemanticSourceRange, normalize_registered_observations_with_ranges,
-};
-use codehelion_core::types::TypeTag;
 use codehelion_helper::ir::{
-    CallSite, CallTarget, CompilerIr, DirectPropagation as HelperDirectPropagation, EffectSummary,
-    FallibleKind as HelperFallibleKind, Instantiation, ResolvedExpression, ResolvedSymbol,
-    ResolvedType, SemanticConstruct, SemanticConstructKind, Unavailability, UnexpandedMacro,
-    UnitRef,
+    CallSite, CompilerIr, EffectSummary, Instantiation, ResolvedExpression, ResolvedSymbol,
+    ResolvedType, SemanticConstruct, Unavailability, UnexpandedMacro, UnitRef,
 };
 use codehelion_helper::protocol::{Capability, CompileCommandSelector, Execution, HelperIdentity};
 use codehelion_helper::{Analysis, SandboxRequest, Supervisor};

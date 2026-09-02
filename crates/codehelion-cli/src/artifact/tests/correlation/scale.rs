@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::cli::DEFAULT_ARTIFACT_TIMEOUT_SECONDS;
+use codehelion_store::query::SourceResolvedSymbol;
 
 /// Sizes of one correlation input, taken from an optimized real binary.
 struct CorrelationScale {

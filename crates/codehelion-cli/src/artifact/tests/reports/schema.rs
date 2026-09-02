@@ -1,6 +1,8 @@
 //! Reported JSON against the shipped schema declarations.
 
 use super::*;
+use crate::artifact::calibration_report::CalibrationSummaryReport;
+use codehelion_store::artifact::artifact_savings_calibration_statistics;
 
 #[test]
 fn artifact_and_calibration_json_reports_validate_against_shipped_schemas() {

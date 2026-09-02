@@ -1,13 +1,21 @@
 //! Calibration summaries and baseline comparisons for measured artifact savings.
 
-use super::{
-    ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION, ArtifactAnalysisSavingsCalibration,
-    ArtifactCalibrationArgs, ArtifactFormat, ArtifactSavingsCalibrationStatistics, BTreeMap,
-    BTreeSet, CalibrationBaselineReport, CalibrationComparisonReport, CalibrationStatisticsDelta,
-    CalibrationStratumComparison, CalibrationStratumReport, CalibrationSummaryReport, Context,
-    FilePath, Outcome, Result, Store, Write, artifact_savings_calibration_statistics, bail,
-    fingerprint_hex,
+use super::ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION;
+use super::calibration_report::{
+    CalibrationBaselineReport, CalibrationComparisonReport, CalibrationStatisticsDelta,
+    CalibrationStratumComparison, CalibrationStratumReport, CalibrationSummaryReport,
 };
+use crate::Outcome;
+use crate::cli::{ArtifactCalibrationArgs, ArtifactFormat};
+use anyhow::{Context, Result, bail};
+use codehelion_store::artifact::{
+    ArtifactAnalysisSavingsCalibration, ArtifactSavingsCalibrationStatistics,
+    artifact_savings_calibration_statistics,
+};
+use codehelion_store::{Store, fingerprint_hex};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::path::Path as FilePath;
 
 /// Summarize controlled before/after calibration measurements for one run.
 ///

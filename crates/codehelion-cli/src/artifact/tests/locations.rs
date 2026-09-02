@@ -1,4 +1,6 @@
 use super::*;
+use codehelion_store::artifact::ArtifactAnalysisUnmappedSource;
+use codehelion_store::query::SourceResolvedSymbol;
 
 #[test]
 fn clang_template_display_names_match_only_demangled_function_templates() {

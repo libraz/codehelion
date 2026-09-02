@@ -1,16 +1,30 @@
 //! Semantic partitioning, compiler-evidence resolution, and confidence composition.
 
-use super::{
-    BTreeMap, BTreeSet, BuildConfiguration, BuildVariant, ByteRange, CfgShape, CloneScope,
-    CompileCommandSelector, Config, Context, ControlFlowGraph, DataFlowSummary, DiscoveryReport,
-    EdgeKind, Installed, Language, LanguageSelection, Path, PathBuf, Result,
-    SemanticCandidateStats, SemanticConfidenceEvidence, SemanticDetection, SemanticGroup,
-    SemanticGroupingStats, SemanticGroupingUnit, SemanticOperationGraph, SemanticPair,
-    SemanticUnitGraph, SourceMeta, SourceUnit, StructuralReport, StructuralUnit, SyntaxIrFile,
-    VerifiedSemanticPair, bail, extract_registered_candidates, group_verified_semantic_pairs,
-    path_key, registered_semantic_windows, semantic, stable_id, structural,
-    verify_registered_candidates,
+use super::helpers::Installed;
+use super::model::{
+    CfgShape, SemanticConfidenceEvidence, SemanticDetection, SemanticGroup, SemanticPair,
+    SemanticUnitGraph, SourceMeta,
 };
+use super::semantic;
+use crate::config::Config;
+use anyhow::{Context, Result, bail};
+use codehelion_core::clone_class::CloneScope;
+use codehelion_core::discovery::{
+    BuildConfiguration, BuildVariant, DiscoveryReport, Language, LanguageSelection, SourceUnit,
+};
+use codehelion_core::ir::{ByteRange, SyntaxIrFile};
+use codehelion_core::semantic::{
+    SemanticCandidateStats, SemanticGroupingStats, SemanticGroupingUnit, SemanticOperationGraph,
+    VerifiedSemanticPair, extract_registered_candidates, group_verified_semantic_pairs,
+    registered_semantic_windows, verify_registered_candidates,
+};
+use codehelion_core::stable_id;
+use codehelion_core::structural::{self, StructuralReport, StructuralUnit};
+use codehelion_helper::ir::{ControlFlowGraph, DataFlowSummary, EdgeKind};
+use codehelion_helper::protocol::CompileCommandSelector;
+use codehelion_store::path_key;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 /// What a file's compiler answer is looked up under.
 ///

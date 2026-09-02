@@ -1,12 +1,19 @@
 //! Cross-build-variant and cross-language comparison.
 
-use super::{
-    Compilers, Config, CrossLanguageCandidateInput, ExecutionPolicy, Format, Language, Mode,
-    OperationAttributes, OperationKind, OperationNode, SandboxRequest, ScanArgs,
-    SemanticCandidateConfig, SemanticOperationGraph, SortAxis, copy_guardrails,
-    enabled_cross_language_matches, extract_cross_language_candidates, report, run_with,
+use crate::cli::{Format, Mode, ScanArgs, SortAxis};
+use crate::config::Config;
+use crate::report;
+use crate::scan::structural::comparison::{copy_guardrails, enabled_cross_language_matches};
+use crate::scan::structural::helpers::Compilers;
+use crate::scan::structural::run_with;
+use codehelion_core::discovery::Language;
+use codehelion_core::execution::ExecutionPolicy;
+use codehelion_core::semantic::{
+    CrossLanguageCandidateInput, OperationAttributes, OperationKind, OperationNode,
+    SemanticCandidateConfig, SemanticOperationGraph, extract_cross_language_candidates,
     verify_cross_language_candidates,
 };
+use codehelion_helper::SandboxRequest;
 
 #[test]
 fn partitioned_reports_copy_every_untrusted_guardrail() {

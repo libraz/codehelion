@@ -13,64 +13,39 @@
 //! dimension the mode cannot measure (types) is reported as absent rather
 //! than guessed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use codehelion_core::boilerplate::Boilerplate;
-use codehelion_core::clone_class::CloneScope;
 use codehelion_core::discovery::{
-    BuildConfiguration, BuildVariant, ContentHash, CppBuild, DiscoveryReport, Language,
-    LanguageSelection, RustBuild, SourceUnit, content_hash,
+    BuildVariant, ContentHash, Language, LanguageSelection, SourceUnit,
 };
-use codehelion_core::engine::{self, LiteralNorm};
-use codehelion_core::grouping::StructuralGroup;
-use codehelion_core::ir::{ByteRange, StructuralFrontend, SyntaxIrFile};
-use codehelion_core::semantic::{
-    CrossLanguageCandidateInput, SemanticCandidateStats, SemanticGroupingStats,
-    SemanticGroupingUnit, SemanticOperationGraph, VerifiedSemanticPair,
-    extract_cross_language_candidates, extract_registered_candidates,
-    group_verified_semantic_pairs, registered_semantic_windows, verify_cross_language_candidates,
-    verify_registered_candidates,
-};
-use codehelion_core::stable_id;
-use codehelion_core::structural::{
-    self, CrossVariantUnit, DirectoryPartition, GroupDetail, RegionOccurrence, SourceTokenSpan,
-    StructuralConfig, StructuralRegion, StructuralReport, StructuralUnit, VerifiedPair,
-};
-use codehelion_core::test_code::{self, TestCodeEvidence};
-use codehelion_core::verify::WEIGHT_VERSION;
-use codehelion_store::snapshot::{
-    CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
-    CrossVariantComparisonSnapshot, CrossVariantGroupRow, CrossVariantMemberRow,
-    SnapshotComparisons, StagedSnapshotPart, SummaryRow,
-};
+use codehelion_core::ir::StructuralFrontend;
+use codehelion_core::structural::DirectoryPartition;
+use codehelion_store::snapshot::{SnapshotComparisons, StagedSnapshotPart, SummaryRow};
 
-use super::{
-    FileOutcome, ScanBaseline, as_u64, discover_sources, effective_jobs, filter_globs,
-    literal_norm, map_sources, open_store, path_key, read_within_budget, rfc3339_now,
-    scan_database_path, shared, write_partitioned_reports,
+use super::build::as_u64;
+use super::output::write_partitioned_reports;
+use super::run_info::rfc3339_now;
+use super::runtime::{
+    FileOutcome, discover_sources, effective_jobs, filter_globs, read_within_budget,
+    scan_database_path,
 };
+use super::store::open_store;
+use codehelion_store::path_key;
 
 use crate::Outcome;
 use crate::cli::ScanArgs;
-use crate::config::{self, BoilerplatePolicy, CategoryAction, Config};
+use crate::config::{self, Config};
 use crate::report::{self, Report};
 use crate::semantic;
-use crate::suppress;
-use codehelion_core::doctor;
 use codehelion_core::execution::{Execution as PermittedExecution, ExecutionPolicy};
-use codehelion_helper::ir::{ControlFlowGraph, DataFlowSummary, EdgeKind};
-use codehelion_helper::protocol::{CompileCommandSelector, Execution};
-use codehelion_helper::{Helper, SandboxRequest};
 
 mod model;
 
 use model::{
-    CfgShape, CrossComparisonUnit, CrossLanguageComparisonUnit, ParsedSource, PartitionOutcome,
-    SemanticConfidenceEvidence, SemanticDetection, SemanticGroup, SemanticPair, SemanticUnitGraph,
-    SourceMeta,
+    ParsedSource, SemanticDetection, SemanticGroup, SemanticPair, SemanticUnitGraph, SourceMeta,
 };
 
 /// Intern repository-relative parent directory keys deterministically before
@@ -185,9 +160,6 @@ pub fn semantic(
 mod helpers;
 
 use helpers::{Compilers, Installed, asking_about, helper_timeout, semantic_sandbox};
-
-#[cfg(test)]
-use helpers::{installed_helper, unavailable_execution_message};
 
 #[allow(clippy::too_many_lines)]
 fn run_with(
@@ -511,9 +483,6 @@ use comparison::{
     prepare_cross_variant_comparison,
 };
 
-#[cfg(test)]
-use comparison::{copy_guardrails, cross_language_funnel, enabled_cross_language_matches};
-
 /// What the results belong to.
 ///
 /// Discovery reports the Fast variant; these results belong to the Structural
@@ -548,17 +517,8 @@ mod semantic_analysis;
 
 use comparison::{ProgramContext, run_program};
 use semantic_analysis::{
-    SemanticPartition, SemanticProgram, registered_semantic_pairs, resolve, semantic_confidence,
-    semantic_group_member_fingerprints, semantic_member_ranks, semantic_partitions, semantic_scope,
-};
-
-#[cfg(test)]
-use semantic_analysis::unconfigured_cpp_partition;
-
-#[cfg(test)]
-use semantic_analysis::{
-    cfg_confidence, data_flow_confidence, interaction_confidence, normalization_confidence,
-    semantic_window_cfg_shape, semantic_window_data_flows,
+    SemanticPartition, SemanticProgram, semantic_group_member_fingerprints, semantic_member_ranks,
+    semantic_partitions, semantic_scope,
 };
 
 /// What the compilers managed to say about the tree, as the report puts it.
@@ -688,13 +648,8 @@ fn parse_one(
 mod suppression;
 
 use suppression::{
-    aggregate_test_code_evidence, compile_rules, evaluate_suppression, mark_test_modules,
-    mark_test_paths, presentation_suppression, region_identifier_jaccard,
-    region_test_code_evidence, reportable_regions, structural_config, unit_token_span,
+    aggregate_test_code_evidence, region_identifier_jaccard, region_test_code_evidence,
 };
-
-#[cfg(test)]
-use suppression::{pair_shape_suppression, unanimous_boilerplate};
 
 mod inputs;
 
@@ -719,13 +674,7 @@ const REGION_SIMILARITY: f64 = 1.0;
 /// whichever shape it has.
 mod reporting;
 
-#[cfg(test)]
-use reporting::{DiscoveryExclusions, discovery_exclusions, funnel};
-use reporting::{build_groups, build_report, detector_versions, summary_row};
-
 mod store;
-
-use store::record;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -1,10 +1,16 @@
 //! Compiler-helper discovery, capability checks, and sandbox requests.
 
-use super::{
-    BuildConfiguration, Config, Context, CppBuild, Execution, ExecutionPolicy, Helper, Language,
-    LanguageSelection, Path, PathBuf, PermittedExecution, Result, RustBuild, SandboxRequest,
-    ScanArgs, SourceUnit, bail, content_hash, doctor,
+use crate::cli::ScanArgs;
+use crate::config::Config;
+use anyhow::{Context, Result, bail};
+use codehelion_core::discovery::{
+    BuildConfiguration, CppBuild, Language, LanguageSelection, RustBuild, SourceUnit, content_hash,
 };
+use codehelion_core::doctor;
+use codehelion_core::execution::{Execution as PermittedExecution, ExecutionPolicy};
+use codehelion_helper::protocol::Execution;
+use codehelion_helper::{Helper, SandboxRequest};
+use std::path::{Path, PathBuf};
 
 pub(super) fn semantic_sandbox(args: &ScanArgs) -> Result<SandboxRequest> {
     if !args.untrusted {

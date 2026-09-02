@@ -1,13 +1,26 @@
 //! Structural scan classification, suppression, and reportable-region selection.
 
+use super::inputs::ReportInputs;
+use super::model::{SemanticGroup, SemanticPair, SemanticUnitGraph, SourceMeta};
 use super::reporting::{member_hosts, ranks_after};
-use super::{
-    BTreeMap, BTreeSet, Boilerplate, BoilerplatePolicy, BuildVariant, CategoryAction, Config,
-    Context, Path, RegionOccurrence, ReportInputs, Result, SemanticGroup, SemanticPair,
-    SemanticUnitGraph, SourceMeta, SourceTokenSpan, StructuralConfig, StructuralRegion,
-    StructuralReport, StructuralUnit, SyntaxIrFile, TestCodeEvidence, as_u64, config, literal_norm,
-    semantic_group_member_fingerprints, shared, stable_id, structural, suppress, test_code,
+use super::semantic_analysis::semantic_group_member_fingerprints;
+use crate::config::{self, BoilerplatePolicy, CategoryAction, Config};
+use crate::scan::build::as_u64;
+use crate::scan::runtime::literal_norm;
+use crate::scan::shared;
+use crate::suppress;
+use anyhow::{Context, Result};
+use codehelion_core::boilerplate::Boilerplate;
+use codehelion_core::discovery::BuildVariant;
+use codehelion_core::ir::SyntaxIrFile;
+use codehelion_core::stable_id;
+use codehelion_core::structural::{
+    self, RegionOccurrence, SourceTokenSpan, StructuralConfig, StructuralRegion, StructuralReport,
+    StructuralUnit,
 };
+use codehelion_core::test_code::{self, TestCodeEvidence};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 pub(super) fn mark_test_modules(files: &[SourceMeta], irs: &mut [SyntaxIrFile]) {
     let inputs: Vec<test_code::ModuleFile<'_>> = files

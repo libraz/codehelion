@@ -1,6 +1,7 @@
 //! Fallback matching: name candidates, path spelling, and fragment extents.
 
 use super::*;
+use codehelion_store::query::SourceResolvedSymbol;
 
 #[test]
 fn conflicting_generic_origin_and_name_candidates_remain_ambiguous() {

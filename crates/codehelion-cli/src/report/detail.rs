@@ -1,13 +1,19 @@
 //! Standalone finding-detail serialization and text rendering.
 
-use super::{
-    Decoration, EXPLAIN_RESPONSE_CLONE_GROUP, EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP,
+use super::model::{Group, SemanticEvidence, Sibling, Similarity};
+use super::options::{Decoration, TextOptions};
+use super::ranking::{Member, Suppression};
+use super::render::{GroupColumns, Palette, render_group, signature_note};
+use super::schema::{
+    EXPLAIN_RESPONSE_CLONE_GROUP, EXPLAIN_RESPONSE_CROSS_LANGUAGE_GROUP,
     EXPLAIN_RESPONSE_CROSS_VARIANT_GROUP, EXPLAIN_RESPONSE_OCCURRENCE, EXPLAIN_RESPONSE_SIBLING,
-    FINDING_DETAIL_SCHEMA_VERSION, Group, GroupColumns, MappingEvidence, Member, Palette,
-    SCOPE_FRAGMENT, SemanticEvidence, SemanticOperationGraph, Serialize, Sibling, Similarity,
-    Suppression, TestCodeEvidence, TextOptions, Write, detail_json, io, render_group,
-    signature_note,
+    FINDING_DETAIL_SCHEMA_VERSION, SCOPE_FRAGMENT, detail_json,
 };
+use codehelion_core::semantic::SemanticOperationGraph;
+use codehelion_core::test_code::TestCodeEvidence;
+use codehelion_store::artifact::MappingEvidence;
+use serde::Serialize;
+use std::io::{self, Write};
 
 /// Where a stored run ranked a finding, as it was recorded.
 ///

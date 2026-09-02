@@ -5,7 +5,6 @@
 //! loads, instantiates, or otherwise executes the inspected artifact.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 #[cfg(test)]
 use std::io::Read;
 use std::io::Write;
@@ -23,28 +22,21 @@ use codehelion_artifact::{
     metrics::{EstimatedRefactorSavingsBytes, EvidenceConfidence, VerifiedSavingsBytes},
 };
 use codehelion_store::artifact::{
-    ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION,
-    ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION, ArtifactAnalysisCloneGroupSavings,
-    ArtifactAnalysisCorrelation, ArtifactAnalysisMapping, ArtifactAnalysisSavingsCalibration,
-    ArtifactAnalysisSavingsConfidence, ArtifactAnalysisSourceKind, ArtifactAnalysisUnmappedReason,
-    ArtifactAnalysisUnmappedSource, ArtifactAnalysisUnmappedSourceReason,
-    ArtifactAnalysisUnmappedSymbol, ArtifactSavingsCalibrationStatistics, MappingEvidence,
+    ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION, ArtifactAnalysisCloneGroupSavings,
+    ArtifactAnalysisMapping, ArtifactAnalysisSavingsConfidence, ArtifactAnalysisSourceKind,
+    ArtifactAnalysisUnmappedReason, ArtifactAnalysisUnmappedSourceReason, MappingEvidence,
     MappingEvidenceFact, SOURCE_ARTIFACT_MAPPING_SCHEMA_VERSION,
-    artifact_savings_calibration_statistics,
 };
 #[cfg(test)]
 use codehelion_store::artifact::{ArtifactAnalysisSnapshot, ArtifactAnalysisSymbol};
+use codehelion_store::fingerprint_hex;
 use codehelion_store::query::{
-    SourceFragmentIdentity, SourceInstantiation, SourceResolvedCall, SourceResolvedSymbol,
-    SourceUnitIdentity,
+    SourceFragmentIdentity, SourceInstantiation, SourceResolvedCall, SourceUnitIdentity,
 };
-use codehelion_store::{Store, fingerprint_hex};
 use serde::Serialize;
 
 use crate::Outcome;
-use crate::cli::{
-    ArtifactArgs, ArtifactCalibrationArgs, ArtifactCompareArgs, ArtifactFormat, ArtifactReportArgs,
-};
+use crate::cli::{ArtifactArgs, ArtifactCompareArgs, ArtifactFormat, ArtifactReportArgs};
 #[cfg(test)]
 use crate::cli::{
     ArtifactInputFormat, UNTRUSTED_ARTIFACT_MAX_BYTES, UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES,
@@ -104,11 +96,7 @@ mod input;
 mod output;
 mod recorded;
 
-use calibration_report::{
-    CalibrationBaselineReport, CalibrationComparisonReport, CalibrationStatisticsDelta,
-    CalibrationStratumComparison, CalibrationStratumReport, CalibrationSummaryReport,
-    calibration_database, read_build_variant, record_comparison_calibration,
-};
+use calibration_report::{calibration_database, read_build_variant, record_comparison_calibration};
 use input::{
     compare_untrusted_containment, inspect, read_artifact_input, resolve_wasm_source_maps,
     untrusted_containment,

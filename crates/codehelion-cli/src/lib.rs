@@ -39,12 +39,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::doctor;
-use codehelion_store::query::{IdKind, IdMatch, RunOrigin};
-use codehelion_store::{Store, fingerprint_hex};
 
-use crate::cli::{
-    ArtifactAction, Cli, Command, DetailFormat, ExplainArgs, Mode, ReportArgs, ScanArgs,
-};
+use crate::cli::{ArtifactAction, Cli, Command, Mode, ScanArgs};
 
 pub(crate) mod provenance;
 

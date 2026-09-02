@@ -2,10 +2,13 @@
 //! detail document.
 
 use super::recorded::{recorded_group, recorded_priority, recorded_sibling, recorded_suppression};
-use super::{
-    Context, DetailFormat, ExplainArgs, FULL_ID_CHARS, IdKind, IdMatch, Outcome, Path, Result,
-    RunOrigin, Store, Write, bail, fingerprint_hex, report, resolve_db_at, scan, suppress,
-};
+use crate::cli::{DetailFormat, ExplainArgs};
+use crate::{FULL_ID_CHARS, Outcome, report, resolve_db_at, scan, suppress};
+use anyhow::{Context, Result, bail};
+use codehelion_store::query::{IdKind, IdMatch, RunOrigin};
+use codehelion_store::{Store, fingerprint_hex};
+use std::io::Write;
+use std::path::Path;
 
 /// Look up one recorded id and print what it identifies.
 ///

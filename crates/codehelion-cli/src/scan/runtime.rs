@@ -11,13 +11,21 @@ use codehelion_core::config::{
     DiscoveryLimits, GroupingLimits, PairingLimits, ProcessLimits, StageLimits, VerificationLimits,
 };
 
-use super::{
-    Config, Context, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport, EngineConfig, Frontend,
-    GeneratedMarkers, Glob, GlobSet, GlobSetBuilder, Language, LanguageSelection, LexedSource,
-    LiteralNorm, LiteralNormalization, Path, Result, ScanArgs, SourceUnit, bail, discovery,
-    path_key, report, suppress,
-};
+use super::build::LexedSource;
+use crate::cli::ScanArgs;
+use crate::config::{Config, LiteralNormalization};
 use crate::provenance::FromScannedTree;
+use crate::{report, suppress};
+use anyhow::{Context, Result, bail};
+use codehelion_core::discovery::{
+    self, DEFAULT_SCAN_LINES, DiscoveryConfig, DiscoveryReport, GeneratedMarkers, Language,
+    LanguageSelection, SourceUnit,
+};
+use codehelion_core::engine::{EngineConfig, LiteralNorm};
+use codehelion_core::frontend::Frontend;
+use codehelion_store::path_key;
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use std::path::Path;
 
 mod database;
 

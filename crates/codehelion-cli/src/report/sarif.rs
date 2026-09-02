@@ -51,11 +51,13 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use super::{
+use super::Report;
+use super::model::{
     ArtifactSavings, BodyMateriality, BuildVariantInfo, ConfigurationInfo, DetectorVersion, Group,
-    GroupSiblings, Member, Priority, RankingInfo, Report, SCOPE_FRAGMENT, Sibling, Similarity,
-    Summary, Suppression, SuppressionKind, canonical_position,
+    GroupSiblings, Priority, Sibling, Similarity, Summary,
 };
+use super::ranking::{Member, RankingInfo, Suppression, SuppressionKind, canonical_position};
+use super::schema::SCOPE_FRAGMENT;
 
 /// SARIF version this reporter emits.
 pub const SARIF_VERSION: &str = "2.1.0";
