@@ -3,6 +3,7 @@ use super::runtime::*;
 use super::*;
 use crate::cli::SortAxis;
 use boon::{Compiler, Schemas};
+use std::path::PathBuf;
 
 fn assert_valid_partitioned_schema(value: &Value) {
     let mut schemas = Schemas::new();

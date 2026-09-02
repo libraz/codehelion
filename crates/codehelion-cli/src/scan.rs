@@ -17,7 +17,7 @@ pub mod structural;
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::conditional::ArmPath;
@@ -36,7 +36,7 @@ use serde_json::Value;
 
 use crate::Outcome;
 use crate::cli::{BaselineMode, Format, Mode, ScanArgs, SortAxis, ViewArgs};
-use crate::config::{self, Config, LiteralNormalization, ResolvedConfig};
+use crate::config::{self, Config, LiteralNormalization};
 use crate::report::{self, Report};
 use crate::suppress;
 
