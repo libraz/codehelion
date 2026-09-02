@@ -15,6 +15,12 @@
 //! cannot be understood without running its build script", "this header means
 //! two different things" — and a claim that quietly stops being true takes the
 //! tests built on it with it, without any of them failing.
+//!
+//! Not every fixture can be a directory of files. A history is a fixture too,
+//! and one made of commit ids cannot be committed as a tree; [`git`] plants it
+//! instead, from a table, with everything a commit id depends on pinned.
+
+pub mod git;
 
 use std::path::{Path, PathBuf};
 
@@ -75,6 +81,28 @@ pub enum FixtureError {
         path: PathBuf,
         /// The underlying failure.
         source: std::io::Error,
+    },
+    /// The `git` binary could not be run at all.
+    ///
+    /// Separate from a command that ran and failed, because a missing tool is
+    /// not a wrong answer, and a test that reports one as the other sends its
+    /// reader looking for a bug that is not there.
+    #[error("cannot run `{command}`: {source}")]
+    GitUnavailable {
+        /// The command that was attempted.
+        command: String,
+        /// Why it could not be started.
+        source: std::io::Error,
+    },
+    /// A git command ran and refused.
+    #[error("`{command}` failed{}: {stderr}", .status.map_or_else(String::new, |code| format!(" with status {code}")))]
+    Git {
+        /// The command that failed.
+        command: String,
+        /// Its exit status, when it had one.
+        status: Option<i32>,
+        /// What git wrote to its standard error.
+        stderr: String,
     },
 }
 

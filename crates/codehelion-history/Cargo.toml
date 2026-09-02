@@ -1,0 +1,28 @@
+[package]
+name = "codehelion-history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Reads a local git history into the commit records the codehelion seam analysis is computed from."
+
+[dependencies]
+# Not gix's default features. The default set reaches `pack-cache-lru-static`,
+# which pulls in an MPL-2.0 crate that the permissive-only allow list in
+# `deny.toml` rejects; the LRU pack cache is taken from the MIT-licensed
+# alternative instead. What is enabled is the smallest set that reads commits,
+# diffs two trees, and reports a working-tree status: no credential handling
+# and none of the network clients, which a fully local tool has no use for.
+gix = { version = "0.87", default-features = false, features = ["sha1", "basic", "status", "parallel", "pack-cache-lru-dynamic"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+codehelion-fixtures = { path = "../codehelion-fixtures" }
+serde_json = "1"
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
