@@ -263,15 +263,45 @@ fn one_pair() -> tempfile::TempDir {
     dir
 }
 
+/// The text and JSON `explain` views of one clone group, from one database.
+fn explain_group(root: &Path, group: &str) -> (String, serde_json::Value) {
+    let text = cmd()
+        .current_dir(root)
+        .args(["explain", group])
+        .output()
+        .expect("run explain");
+    assert!(text.status.success(), "{text:?}");
+    let json = cmd()
+        .current_dir(root)
+        .args(["explain", group, "--format", "json"])
+        .output()
+        .expect("run explain as JSON");
+    assert!(json.status.success(), "{json:?}");
+    (
+        String::from_utf8(text.stdout).expect("explain text is UTF-8"),
+        serde_json::from_slice(&json.stdout).expect("stdout is one JSON document"),
+    )
+}
+
+#[path = "scan/artifact_savings.rs"]
+mod artifact_savings;
 #[path = "scan/baselines_and_vendoring.rs"]
 mod baselines_and_vendoring;
+#[path = "scan/explain.rs"]
+mod explain;
 #[path = "scan/headers_and_limits.rs"]
 mod headers_and_limits;
-#[path = "scan/lifecycle_and_suppression.rs"]
-mod lifecycle_and_suppression;
-#[path = "scan/reporting_and_paths.rs"]
-mod reporting_and_paths;
+#[path = "scan/history.rs"]
+mod history;
+#[path = "scan/lifecycle.rs"]
+mod lifecycle;
+#[path = "scan/paths.rs"]
+mod paths;
+#[path = "scan/reporting.rs"]
+mod reporting;
 #[path = "scan/semantic.rs"]
 mod semantic;
 #[path = "scan/sorting_and_comparison.rs"]
 mod sorting_and_comparison;
+#[path = "scan/suppression.rs"]
+mod suppression;

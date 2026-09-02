@@ -105,11 +105,13 @@ fn scan_json(root: &Path) -> serde_json::Value {
 mod boilerplate_and_suppression;
 #[path = "scan_structural/deduplication_and_limits.rs"]
 mod deduplication_and_limits;
-#[path = "scan_structural/pipeline_and_evidence.rs"]
-mod pipeline_and_evidence;
+#[path = "scan_structural/pipeline.rs"]
+mod pipeline;
 #[path = "scan_structural/ranking_and_folding.rs"]
 mod ranking_and_folding;
 #[path = "scan_structural/runs_and_suppressions.rs"]
 mod runs_and_suppressions;
+#[path = "scan_structural/signature_evidence.rs"]
+mod signature_evidence;
 #[path = "scan_structural/test_code.rs"]
 mod test_code;
