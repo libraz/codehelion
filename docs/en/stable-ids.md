@@ -34,8 +34,8 @@ printed as `[finding <ID>]` under `-v`.
 Either kind can be opened:
 
 ```sh
-codehelion explain 0f5065d5
-codehelion explain 0f5065d5 --format json
+codehelion explain b92c1297
+codehelion explain b92c1297 --format json
 ```
 
 A prefix is accepted as long as it is unambiguous; the report prints one short

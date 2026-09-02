@@ -24,8 +24,8 @@
 どちらの ID も開けます。
 
 ```sh
-codehelion explain 0f5065d5
-codehelion explain 0f5065d5 --format json
+codehelion explain b92c1297
+codehelion explain b92c1297 --format json
 ```
 
 一意に定まるかぎり prefix でも受け付けます。レポートが表示するのは、打ちやすく、かつその実行の中で一意になる長さのもので、`-vv` では完全な識別子を表示します。

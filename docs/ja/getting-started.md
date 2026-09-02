@@ -31,27 +31,27 @@ codehelion scan --mode structural
 ```text
 codehelion scan · structural mode · ~/src/project
 
- #1  0.67  type-1 ×2  240 tokens  0f5065d5
-     ├─ ◆ crates/codehelion-cli/src/scan/store.rs:221-249  tree_changes
-     └─   crates/codehelion-cli/src/scan/structural/store.rs:161-189  tree_changes
+ #1  0.56  type-1 ×2      109 tokens  b92c1297
+     ├─ ◆ corpus/synthetic/rust/seed.rs:30-49                   values_equal
+     └─   corpus/synthetic/rust/type1.rs:35-54                  values_equal
 
- #2  0.63  type-1 ×2  192 tokens  cabfd679 [narrower cut of baf4e127]
-     ├─ ◆ crates/codehelion-cli/src/scan/structural/reporting.rs:584-605
-     └─   crates/codehelion-cli/src/scan/structural/reporting.rs:691-712
+ #2  0.53  type-1 run ×2  101 tokens  5d7e5cd2
+     ├─ ◆ crates/codehelion-cli/src/scan/structural.rs:205-211  run_with
+     └─   crates/codehelion-cli/src/scan.rs:70-76               run
 
-... and 1173 more groups (--limit 0 lists every one)
+... and 1185 more groups (--limit 0 lists every one)
 
-1,511 groups (type-1 86, type-2 196, type-3 1229) · 335 suppressed · sorted by priority
-supplemental: 517 siblings (--show-siblings), 1,000 near misses (--show-near-misses)
-396 files, 190,744 lines, 1,001,215 tokens · run 1 (replay: codehelion report --run 1)
-◆ the occurrence a group is measured against · ×N the number of occurrences
-open one: codehelion explain 0f5065d5 · list every group: --limit 0
+1,539 groups (type-1 78, type-2 199, type-3 1262) · 352 suppressed · sorted by priority
+supplemental: 493 siblings (--show-siblings; 60 dropped by search ceilings), 1,000 near misses (--show-near-misses; 5,624 dropped by the retention cap)
+552 files, 199,199 lines, 1,040,264 tokens · run 6 (209 file(s) changed; replay: codehelion report --run 6)
+◆ the occurrence a group is measured against · "run" a repeated stretch of statements, not a whole unit · ×N the number of occurrences
+open one: codehelion explain b92c1297 · list every group: --limit 0
 ```
 
 見出しの各フィールドの意味は[レポートの読み方](reading-a-report.md)にあります。末尾の短い 16 進文字列がグループの安定 ID で、これは `codehelion explain` が受け付ける最短の prefix です。
 
 ```sh
-codehelion explain 0f5065d5
+codehelion explain b92c1297
 ```
 
 上限の発火や何にも一致しなかったルールなど、実行そのものを限定する情報は標準エラー出力に回るため、標準出力のレポートはパイプに流せる状態を保ちます。

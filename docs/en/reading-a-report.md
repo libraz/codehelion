@@ -17,9 +17,9 @@ of its own in the ordering.
 ## What the totals say
 
 ```text
-1,511 groups (type-1 86, type-2 196, type-3 1229) · 335 suppressed · sorted by priority
-supplemental: 517 siblings (--show-siblings; 7,332 dropped by search ceilings), 1,000 near misses (--show-near-misses; 5,199 dropped by the retention cap)
-396 files, 190,744 lines, 1,001,215 tokens · run 1 (replay: codehelion report --run 1)
+1,539 groups (type-1 78, type-2 199, type-3 1262) · 352 suppressed · sorted by priority
+supplemental: 493 siblings (--show-siblings; 60 dropped by search ceilings), 1,000 near misses (--show-near-misses; 5,624 dropped by the retention cap)
+552 files, 199,199 lines, 1,040,264 tokens · run 6 (209 file(s) changed; replay: codehelion report --run 6)
 ```
 
 The first line is the report itself: how many groups, of which classes, and how
@@ -82,14 +82,14 @@ presents the partial answer as a complete one.
 running mode could not measure:
 
 ```text
- #1  0.67  type-1 ×2  240 tokens  0f5065d5
-     across directories, identifiers 1.00
-     confidence 0.86, maintenance risk 0.44, refactoring difficulty 0.19 (2 instances, 240-240 tokens, 240 repeated, 1.00 similarity, 2 file(s))
+ #1  0.56  type-1 ×2      109 tokens  b92c1297
+     within one directory, identifiers 1.00
+     confidence 0.73, maintenance risk 0.37, refactoring difficulty 0.12 (2 instances, 109-109 tokens, 109 repeated, 1.00 similarity, 2 file(s))
      similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v1]
-     content entropy: 4.91 bits
-     body evidence: loop no, recognised allocation no, at least 26 call site(s)
-     ├─ ◆ crates/codehelion-cli/src/scan/store.rs:221-249  tree_changes  [finding c8c5aae7]
-     └─   crates/codehelion-cli/src/scan/structural/store.rs:161-189  tree_changes  [finding 63fd17f8]
+     content entropy: 4.82 bits
+     body evidence: loop yes, recognised allocation no, at least 4 call site(s)
+     ├─ ◆ corpus/synthetic/rust/seed.rs:30-49   values_equal  [finding 091306f3]
+     └─   corpus/synthetic/rust/type1.rs:35-54  values_equal  [finding 3ba37a4c]
 ```
 
 - **similarity** is reported per dimension — lexical, structural, control-flow,

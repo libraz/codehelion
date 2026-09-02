@@ -22,10 +22,10 @@ savings は別々の量として報告し、ひとつの数値にまとめるこ
 計測を記録するのは `artifact compare` で、`--source-run` と `--clone-group` を `--before-build-variant` / `--after-build-variant` と併せて渡したときです。そのグループについて保存済みの見積もりと、2 つの成果物が実際に示したサイズ差を並べます。ここで必要になる見積もりは、先に `--source-run` と `--build-variant` を付けて実行した `artifact analyze` が残します。
 
 ```sh
-codehelion artifact analyze before/app.wasm --source-run 1 --build-variant build-variant.json
+codehelion artifact analyze before/app.wasm --source-run 6 --build-variant build-variant.json
 # ... 重複を取り除いてビルドし直す ...
 codehelion artifact compare before/app.wasm after/app.wasm \
-  --source-run 1 --clone-group 0f5065d5 \
+  --source-run 6 --clone-group b92c1297 \
   --before-build-variant build-variant.json \
   --after-build-variant build-variant.json
 ```

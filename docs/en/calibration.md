@@ -30,10 +30,10 @@ difference the two artifacts actually show. The estimate it needs comes from an
 earlier `artifact analyze` run with `--source-run` and `--build-variant`.
 
 ```sh
-codehelion artifact analyze before/app.wasm --source-run 1 --build-variant build-variant.json
+codehelion artifact analyze before/app.wasm --source-run 6 --build-variant build-variant.json
 # ... remove the duplication and rebuild ...
 codehelion artifact compare before/app.wasm after/app.wasm \
-  --source-run 1 --clone-group 0f5065d5 \
+  --source-run 6 --clone-group b92c1297 \
   --before-build-variant build-variant.json \
   --after-build-variant build-variant.json
 ```
