@@ -3,7 +3,6 @@ use super::correlation::matching::*;
 use super::correlation::*;
 use super::model::*;
 use super::*;
-use crate::cli::{DEFAULT_ARTIFACT_MAX_BYTES, DEFAULT_ARTIFACT_TIMEOUT_SECONDS};
 use boon::{Compiler, Schemas};
 use codehelion_core::stable_id::{
     CloneGroupFingerprint, FindingId, FragmentFingerprint, UnitFingerprint,
