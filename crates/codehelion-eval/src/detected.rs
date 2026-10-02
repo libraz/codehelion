@@ -92,6 +92,9 @@ impl From<serde_json::Error> for Error {
 /// The scan report, reduced to what scoring reads.
 #[derive(Debug, Deserialize)]
 struct ScanReport {
+    /// Compared before the rest of the document is read; typed here so a
+    /// version that is not an integer fails to parse.
+    #[allow(dead_code)]
     schema_version: u32,
     summary: Summary,
     groups: Vec<Group>,
@@ -321,13 +324,17 @@ pub fn from_report_json_with_siblings(
     json: &str,
 ) -> Result<(DetectionResult, u32, Vec<DetectedSiblingGroup>), Error> {
     let value: Value = serde_json::from_str(json)?;
+    // A report of another version is refused as such, before its fields are
+    // checked against a shape it was never written in.
+    let found = value
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok());
+    if let Some(found) = found.filter(|&found| found != SUPPORTED_REPORT_SCHEMA) {
+        return Err(Error::Version { found });
+    }
     validate_current_report_contract(&value)?;
     let report: ScanReport = serde_json::from_value(value)?;
-    if report.schema_version != SUPPORTED_REPORT_SCHEMA {
-        return Err(Error::Version {
-            found: report.schema_version,
-        });
-    }
 
     // A suppressed group is not something the report puts in front of anyone,
     // so scoring it would credit or blame the tool for a finding it withheld.
@@ -1008,6 +1015,23 @@ mod tests {
         let moved_on = REPORT.replace("\"schema_version\": 2", "\"schema_version\": 3");
         let error = from_report_json(&moved_on).expect_err("a later version is refused");
         assert!(matches!(error, Error::Version { found: 3 }));
+    }
+
+    #[test]
+    fn a_report_of_another_version_is_refused_as_such_whatever_else_it_lacks() {
+        for version in [1, 3] {
+            let json = format!("{{\"schema_version\": {version}}}");
+            let error = from_report_json(&json).expect_err("another version is refused");
+            assert!(
+                matches!(error, Error::Version { found } if found == version),
+                "{error:?}"
+            );
+        }
+        let stale = REPORT
+            .replace("\"schema_version\": 2", "\"schema_version\": 1")
+            .replacen("\"width_family\": false,", "", 1);
+        let error = from_report_json(&stale).expect_err("a v1 report is refused");
+        assert!(matches!(error, Error::Version { found: 1 }), "{error:?}");
     }
 
     #[test]

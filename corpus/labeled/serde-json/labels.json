@@ -15,6 +15,7 @@
     "src/value/de.rs",
     "src/value/index.rs",
     "src/value/mod.rs",
+    "src/value/partial_eq.rs",
     "src/value/ser.rs"
   ],
   "clone_pairs": [

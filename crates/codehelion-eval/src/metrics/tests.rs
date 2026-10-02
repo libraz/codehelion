@@ -487,6 +487,25 @@ fn mean_average_precision_reads_the_whole_order_and_is_zero_without_a_hit() {
     assert!(RankedVerdicts::default().mean_average_precision().abs() < f64::EPSILON);
 }
 
+/// A band that judged nothing has no precision, which is not a precision of zero.
+#[test]
+fn a_band_with_nothing_judged_shows_no_precision() {
+    let mut split = BandSplit::default();
+    split.bands.insert("high".to_string(), (3, 1));
+    split.bands.insert("low".to_string(), (0, 0));
+    let table = split.to_string();
+    let row = |name: &str| {
+        table
+            .lines()
+            .find(|line| line.starts_with(name))
+            .expect("the band has a row")
+            .to_owned()
+    };
+    assert!(row("high").ends_with("0.7500"), "{table}");
+    assert!(row("low").ends_with("n/a"), "{table}");
+    assert!(!table.contains("0.0000"), "{table}");
+}
+
 /// The band table accounts for every judged finding, including the ones the
 /// detector never scored a band for.
 #[test]

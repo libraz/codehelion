@@ -156,7 +156,42 @@ impl LabelSet {
                 labels.schema_version
             )));
         }
+        labels.check_fragments()?;
         Ok(labels)
+    }
+
+    /// Reject any fragment with a line range that is not 1-based and ordered,
+    /// or that names a file outside [`Self::files`].
+    fn check_fragments(&self) -> serde_json::Result<()> {
+        let pairs = self.clone_pairs.iter().map(|l| (&l.id, l.fragments.iter()));
+        let negatives = self.non_clones.iter().map(|l| (&l.id, l.fragments.iter()));
+        for (id, fragments) in pairs.chain(negatives) {
+            for fragment in fragments {
+                self.check_fragment(id, fragment)?;
+            }
+        }
+        for known in &self.known_siblings {
+            for fragment in known.primary_fragments.iter().chain([&known.sibling]) {
+                self.check_fragment(&known.id, fragment)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_fragment(&self, id: &str, fragment: &Fragment) -> serde_json::Result<()> {
+        if fragment.start_line < 1 || fragment.end_line < fragment.start_line {
+            return Err(serde_json::Error::custom(format!(
+                "label {id}: invalid line range {}..{} in {} (lines are 1-based and end >= start)",
+                fragment.start_line, fragment.end_line, fragment.file
+            )));
+        }
+        if !self.files.contains(&fragment.file) {
+            return Err(serde_json::Error::custom(format!(
+                "label {id}: fragment file {} is not listed in files",
+                fragment.file
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -356,5 +391,74 @@ mod tests {
         let error =
             LabelSet::from_json(json).expect_err("three-fragment negative label is invalid");
         assert!(error.to_string().contains("exactly two fragments"));
+    }
+
+    /// A one-pair document whose second fragment is the given JSON.
+    fn with_second_fragment(fragment: &str) -> String {
+        format!(
+            r#"{{
+              "schema_version": 1,
+              "language": "rust",
+              "files": ["seed.rs", "type2.rs"],
+              "clone_pairs": [{{
+                "id": "cp-001",
+                "type": "type-1",
+                "fragments": [
+                  {{"file":"seed.rs","start_line":1,"end_line":2}},
+                  {fragment}
+                ]
+              }}]
+            }}"#
+        )
+    }
+
+    #[test]
+    fn fragments_with_invalid_ranges_or_unknown_files_are_rejected_at_import() {
+        for (fragment, expected) in [
+            (
+                r#"{"file":"type2.rs","start_line":0,"end_line":2}"#,
+                "invalid line range",
+            ),
+            (
+                r#"{"file":"type2.rs","start_line":5,"end_line":4}"#,
+                "invalid line range",
+            ),
+            (
+                r#"{"file":"other.rs","start_line":1,"end_line":2}"#,
+                "not listed in files",
+            ),
+        ] {
+            let error = LabelSet::from_json(&with_second_fragment(fragment))
+                .expect_err("invalid fragment must not import");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        LabelSet::from_json(&with_second_fragment(
+            r#"{"file":"type2.rs","start_line":3,"end_line":3}"#,
+        ))
+        .expect("a one-line range in a listed file imports");
+    }
+
+    #[test]
+    fn negative_and_sibling_fragments_are_checked_like_positive_ones() {
+        let negative = r#"{
+          "schema_version": 1, "language": "rust", "files": ["seed.rs"],
+          "clone_pairs": [],
+          "non_clones": [{"id":"nc-001","reason":"getter-boilerplate","fragments":[
+            {"file":"seed.rs","start_line":1,"end_line":2},
+            {"file":"gone.rs","start_line":1,"end_line":2}]}]
+        }"#;
+        let error = LabelSet::from_json(negative).expect_err("unknown file in a negative label");
+        assert!(error.to_string().contains("not listed in files"), "{error}");
+
+        let sibling = r#"{
+          "schema_version": 1, "language": "cpp", "files": ["seed.cpp"],
+          "clone_pairs": [],
+          "known_siblings": [{"id":"ks-001","basis":"signature","primary_fragments":[
+            {"file":"seed.cpp","start_line":1,"end_line":2},
+            {"file":"seed.cpp","start_line":3,"end_line":4}],
+            "sibling": {"file":"seed.cpp","start_line":9,"end_line":8}}]
+        }"#;
+        let error = LabelSet::from_json(sibling).expect_err("inverted sibling range");
+        assert!(error.to_string().contains("invalid line range"), "{error}");
     }
 }

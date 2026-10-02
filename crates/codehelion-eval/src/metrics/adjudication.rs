@@ -374,14 +374,8 @@ impl fmt::Display for BandSplit {
                     .filter(|(name, _)| !order.contains(&name.as_str())),
             );
         for (name, &(confirmed, refuted)) in ranked {
-            let judged = confirmed + refuted;
-            #[allow(clippy::cast_precision_loss)] // counts this size are exact in f64
-            let precision = if judged == 0 {
-                0.0
-            } else {
-                confirmed as f64 / judged as f64
-            };
-            writeln!(f, "{name:<12}{confirmed:>10}{refuted:>9}{precision:>11.4}")?;
+            let precision = display_measure(ratio(confirmed, confirmed + refuted));
+            writeln!(f, "{name:<12}{confirmed:>10}{refuted:>9}{precision:>11}")?;
         }
         Ok(())
     }

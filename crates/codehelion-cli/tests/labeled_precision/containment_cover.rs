@@ -27,16 +27,17 @@ const CASE: &str = "serde-json";
 
 /// One scan of [`CASE`], with the labels written against it.
 ///
-/// `None` when the snapshot is not on this machine. The sources belong to the
-/// project they were cut from and are not committed, so a machine without them
-/// measures nothing here rather than passing on an empty result.
-fn scanned(scratch: &Path) -> Option<(DetectionResult, LabelSet)> {
+/// Fails when the snapshot is not on this machine, the way the verdict
+/// regression does for a corpus with a reproducible origin: the sources belong
+/// to the project they were cut from and are not committed, and a case that
+/// scanned nothing must not end green.
+fn scanned(scratch: &Path) -> (DetectionResult, LabelSet) {
     let corpus = repo_root().join("corpus/labeled").join(CASE);
     let snapshot = corpus.join("snapshot");
-    if !snapshot.is_dir() {
-        println!("{CASE} has no materialized snapshot, so nothing was measured");
-        return None;
-    }
+    assert!(
+        snapshot.is_dir(),
+        "{CASE} has a reproducible origin but no materialized snapshot"
+    );
     let labels_path = corpus.join("labels.json");
     let labels_text = std::fs::read_to_string(&labels_path)
         .unwrap_or_else(|error| panic!("reading {}: {error}", labels_path.display()));
@@ -44,7 +45,7 @@ fn scanned(scratch: &Path) -> Option<(DetectionResult, LabelSet)> {
     let report = scan(&snapshot, "structural", &scratch.join("containment.db"));
     let (result, _lines) = detected::from_report_json(&report)
         .unwrap_or_else(|error| panic!("reading the report for {CASE}: {error}"));
-    Some((result, labels))
+    (result, labels)
 }
 
 /// The labelled pairs no finding's bounds match.
@@ -106,9 +107,7 @@ fn region(fragment: &Fragment) -> Fragment {
 #[test]
 fn a_label_shown_inside_one_longer_finding_counts_as_confirmed() {
     let scratch = tempfile::tempdir().expect("temp dir");
-    let Some((result, labels)) = scanned(scratch.path()) else {
-        return;
-    };
+    let (result, labels) = scanned(scratch.path());
     let nested: Vec<&LabelPair> = unmatched_labels(&result, &labels)
         .into_iter()
         .filter(|pair| confirms(&result, pair, DEFAULT_MATCH_THRESHOLD))
@@ -143,9 +142,7 @@ fn a_label_shown_inside_one_longer_finding_counts_as_confirmed() {
 #[test]
 fn a_label_whose_regions_sit_in_two_findings_is_not_confirmed() {
     let scratch = tempfile::tempdir().expect("temp dir");
-    let Some((result, labels)) = scanned(scratch.path()) else {
-        return;
-    };
+    let (result, labels) = scanned(scratch.path());
     let nested: Vec<&LabelPair> = unmatched_labels(&result, &labels)
         .into_iter()
         .filter(|pair| confirms(&result, pair, DEFAULT_MATCH_THRESHOLD))
@@ -191,9 +188,7 @@ fn a_label_whose_regions_sit_in_two_findings_is_not_confirmed() {
 #[test]
 fn a_label_only_a_weaker_clone_class_holds_is_not_confirmed() {
     let scratch = tempfile::tempdir().expect("temp dir");
-    let Some((result, labels)) = scanned(scratch.path()) else {
-        return;
-    };
+    let (result, labels) = scanned(scratch.path());
     let nested: Vec<&LabelPair> = unmatched_labels(&result, &labels)
         .into_iter()
         .filter(|pair| confirms(&result, pair, DEFAULT_MATCH_THRESHOLD))
@@ -227,9 +222,7 @@ fn a_label_only_a_weaker_clone_class_holds_is_not_confirmed() {
 #[test]
 fn a_finding_that_merely_spans_a_labels_lines_does_not_confirm_it() {
     let scratch = tempfile::tempdir().expect("temp dir");
-    let Some((result, _labels)) = scanned(scratch.path()) else {
-        return;
-    };
+    let (result, _labels) = scanned(scratch.path());
     // The longest member the report has: whatever it is, it spans plenty of
     // lines nobody claimed were duplicated within it.
     let longest = result
