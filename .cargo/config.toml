@@ -1,0 +1,13 @@
+# The incremental cache is the fastest-growing part of `target`. A run that
+# compiles every target once and exits is the case it cannot pay off in: it
+# splits each crate into far more codegen units and leaves a per-crate cache
+# behind, and nothing ever removes the caches a later run supersedes. Those are
+# most of the runs here -- the checks, the test suite, the corpus evaluation.
+#
+# This lives here rather than in the Makefile because a recipe-level variable
+# only reaches cargo when make is the one invoking it, and much of the growth
+# came from `cargo test` and `cargo clippy` typed directly. The environment
+# still wins over this file, so `make run` opts back in for the edit-run loop
+# incremental compilation actually exists for.
+[build]
+incremental = false
