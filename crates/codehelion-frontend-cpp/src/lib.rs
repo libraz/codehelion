@@ -20,7 +20,7 @@ use codehelion_frontend_c::{fast_pass, lexer, units};
 
 /// Version tag of this frontend, used as a fingerprint input. The C++ dialect
 /// revision and the shared C-family lexer revision are both part of it.
-pub const FRONTEND_VERSION: &str = "cpp-lexer-v1+c-family-lexer-v1";
+pub const FRONTEND_VERSION: &str = "cpp-lexer-v2+c-family-lexer-v2";
 
 /// C++ keywords (C++23). Contextual keywords (`override`, `final`, `import`,
 /// `module`) lex as identifiers, matching how the grammar treats them.
@@ -365,8 +365,8 @@ mod tests {
             .filter(|u| u.kind == UnitKind::Method)
             .map(|u| u.name.as_deref().unwrap_or(""))
             .collect();
-        assert!(methods.contains(&"operator"), "{methods:?}");
-        assert!(methods.contains(&"V"), "destructor: {methods:?}");
+        assert!(methods.contains(&"operator+"), "{methods:?}");
+        assert!(methods.contains(&"~V"), "destructor: {methods:?}");
         assert!(methods.contains(&"size"), "trailing return: {methods:?}");
     }
 

@@ -275,7 +275,17 @@ pub(super) fn declarator_identifier<'s>(declarator: Node<'_>, source: &'s str) -
         match current.kind() {
             "identifier" | "field_identifier" | "type_identifier" | "operator_name"
             | "destructor_name" => return node_text(&current, source),
-            "qualified_identifier" => current = current.child_by_field_name("name")?,
+            // The grammar folds the parameter list into a conversion
+            // operator, so the name stops at its opening parenthesis.
+            "operator_cast" => {
+                let text = node_text(&current, source)?;
+                return Some(text.split('(').next().unwrap_or(text).trim_end());
+            }
+            // An explicit specialisation is named by the template it
+            // specialises, as the Fast frontend names it.
+            "qualified_identifier" | "template_function" | "template_method" => {
+                current = current.child_by_field_name("name")?;
+            }
             "pointer_declarator"
             | "function_declarator"
             | "parenthesized_declarator"

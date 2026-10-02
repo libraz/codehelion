@@ -54,10 +54,12 @@ mod signature;
 use navigate::{declarator_identifier, node_range, node_text};
 use signature::c_family_signature;
 
+use crate::declarator::canonical_declared_name;
+
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
 /// it whenever a change alters the token stream or the IR tree for unchanged
 /// input.
-pub const STRUCTURAL_FRONTEND_VERSION: &str = "c-ir-v1";
+pub const STRUCTURAL_FRONTEND_VERSION: &str = "c-ir-v2";
 
 /// Grammar kinds lexed as one atomic token: the walker emits a single token
 /// for the whole node and never descends into its children (escape sequences,
@@ -99,8 +101,8 @@ pub trait IrMapping {
     /// Decide how one CST node maps onto the IR. This table is the
     /// granularity contract of a frontend; changing it changes fingerprint
     /// input, which invalidates every result recorded under the old table.
-    /// Such a change is settled by rescanning the recorded results, not by
-    /// raising the frontend version, which stays at v1.
+    /// Such a change raises the structural frontend version, so results from
+    /// different tables never share a fingerprint space.
     fn classify(&self, node: &Node<'_>) -> Mapping;
 
     /// Recover the declared name of a node that emits a named shape.
@@ -258,15 +260,17 @@ fn classify_grammar_kind(kind: &str, is_named: bool, text: &str) -> TokenKind {
 }
 
 /// Float/integer split for a `number_literal`, mirroring the Fast lexer's
-/// rule: a decimal point, a decimal (`e`) or hexadecimal (`p`) exponent, or a
-/// float suffix makes it a float.
+/// rule: a decimal point or a decimal (`e`) or hexadecimal (`p`) exponent in
+/// the numeric part makes it a float. A user-defined suffix, which starts at
+/// `_`, does not take part.
 fn number_literal_kind(text: &str) -> LiteralKind {
+    let text = text.split('_').next().unwrap_or(text);
     let hex = text.starts_with("0x") || text.starts_with("0X");
     let float = text.contains('.')
         || if hex {
             text.contains(['p', 'P'])
         } else {
-            text.contains(['e', 'E']) || text.ends_with(['f', 'F'])
+            text.contains(['e', 'E'])
         };
     if float {
         LiteralKind::Float
@@ -437,7 +441,7 @@ impl<'s, 'm> IrBuilder<'s, 'm> {
                 let name = self
                     .mapping
                     .node_name(&cst, source)
-                    .map(|text| self.assembly.intern(text));
+                    .map(|text| self.assembly.intern(&canonical_declared_name(text)));
                 if matches!(shape, Shape::Function | Shape::Method)
                     && cst.kind() == "function_definition"
                     && let Some(signature) = self.mapping.signature(&cst, source, self.language)

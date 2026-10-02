@@ -541,11 +541,28 @@ fn parsing_twice_is_deterministic() {
 fn file_carries_language_and_versions() {
     let frontend = CStructuralFrontend;
     assert_eq!(frontend.language(), Language::C);
-    assert_eq!(frontend.frontend_version(), "c-ir-v1");
+    assert_eq!(frontend.frontend_version(), "c-ir-v2");
 
     let file = parse("int a;");
     assert_eq!(file.language, Language::C);
     assert_eq!(file.frontend_version, STRUCTURAL_FRONTEND_VERSION);
     assert_eq!(file.ir_schema_version, IR_SCHEMA_VERSION);
     assert!(file.diagnostics.is_empty());
+}
+
+#[test]
+fn a_numeric_suffix_does_not_decide_the_literal_kind_in_either_mode() {
+    use crate::dialect;
+    use crate::lexer::lex;
+
+    for text in [
+        "5_sec", "7_min", "10_f", "1.5_deg", "1e3_x", "0x1F", "0x1p3", "2.5f", "42", "1e5f",
+    ] {
+        let fast = lex(text, &dialect::C).0[0].kind;
+        assert_eq!(
+            TokenKind::Literal(number_literal_kind(text)),
+            fast,
+            "modes disagree on {text}"
+        );
+    }
 }

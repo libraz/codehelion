@@ -461,51 +461,71 @@ impl<'d, 's> Lexer<'d, 's> {
     /// encoding prefix). An unescaped line break ends the literal with a
     /// diagnostic, so a missing quote never swallows the rest of the file.
     fn consume_string_from(&mut self, start: Mark) {
-        // Opening `"`.
-        self.bump();
-        loop {
-            match self.peek(0) {
-                None | Some('\n') => {
-                    self.push(TokenKind::Literal(LiteralKind::String), start);
-                    self.diagnose(DiagnosticKind::UnterminatedString, start);
-                    return;
-                }
-                Some('\\') => {
-                    self.bump();
-                    self.bump();
-                }
-                Some('"') => {
-                    self.bump();
-                    self.push(TokenKind::Literal(LiteralKind::String), start);
-                    return;
-                }
-                Some(_) => self.bump(),
-            }
-        }
+        self.consume_quoted(
+            start,
+            '"',
+            LiteralKind::String,
+            DiagnosticKind::UnterminatedString,
+        );
     }
 
     /// Consume a character literal (multi-character constants included); the
     /// current character is the opening `'`.
     fn consume_char_from(&mut self, start: Mark) {
-        // Opening `'`.
+        self.consume_quoted(
+            start,
+            '\'',
+            LiteralKind::Char,
+            DiagnosticKind::UnterminatedChar,
+        );
+    }
+
+    /// Consume a quoted literal whose opening `quote` is the current
+    /// character. Line continuations are transparent, so the token carries the
+    /// spliced spelling, and an escape applies to the character that follows
+    /// the continuations rather than to the backslash of one.
+    fn consume_quoted(
+        &mut self,
+        start: Mark,
+        quote: char,
+        kind: LiteralKind,
+        unterminated: DiagnosticKind,
+    ) {
+        let mut normalized = String::from(self.text_from(start));
         self.bump();
+        normalized.push(quote);
         loop {
+            if self.try_line_splice() {
+                continue;
+            }
             match self.peek(0) {
                 None | Some('\n') => {
-                    self.push(TokenKind::Literal(LiteralKind::Char), start);
-                    self.diagnose(DiagnosticKind::UnterminatedChar, start);
+                    self.push_normalized(TokenKind::Literal(kind), start, &normalized);
+                    self.diagnose(unterminated, start);
                     return;
                 }
                 Some('\\') => {
+                    normalized.push('\\');
                     self.bump();
-                    self.bump();
+                    while self.try_line_splice() {}
+                    match self.peek(0) {
+                        None | Some('\n') => {}
+                        Some(escaped) => {
+                            normalized.push(escaped);
+                            self.bump();
+                        }
+                    }
                 }
-                Some('\'') => {
+                Some(c) if c == quote => {
+                    normalized.push(c);
                     self.bump();
-                    self.push(TokenKind::Literal(LiteralKind::Char), start);
+                    self.push_normalized(TokenKind::Literal(kind), start, &normalized);
                     return;
                 }
-                Some(_) => self.bump(),
+                Some(c) => {
+                    normalized.push(c);
+                    self.bump();
+                }
             }
         }
     }
@@ -574,6 +594,9 @@ impl<'d, 's> Lexer<'d, 's> {
         let start = self.mark();
         let hex = self.spliced_match("0x").is_some() || self.spliced_match("0X").is_some();
         let mut is_float = false;
+        // A user-defined suffix starts at `_` and is not numeric: an `e` or a
+        // `.` in it says nothing about the value.
+        let mut in_suffix = false;
         let mut normalized = String::new();
         loop {
             if self.try_line_splice() {
@@ -582,7 +605,16 @@ impl<'d, 's> Lexer<'d, 's> {
             let Some(ch) = self.peek(0) else {
                 break;
             };
-            if ch == '.' {
+            if ch == '_' {
+                in_suffix = true;
+            }
+            if in_suffix {
+                if !is_ident_continue(ch) {
+                    break;
+                }
+                normalized.push(ch);
+                self.bump();
+            } else if ch == '.' {
                 // Do not swallow a `...` (GNU case ranges like `1 ... 5`).
                 if self.spliced_char_at(1) == Some('.') {
                     break;
@@ -1137,6 +1169,54 @@ mod tests {
                 .map(|token| (token.kind, token.text.to_string()))
                 .collect();
             assert_eq!(observed, expected, "{spliced:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_continuation_inside_a_quoted_literal_is_transparent() {
+        for (spliced, joined) in [
+            ("char *s = \"abc\\\ndef\";", "char *s = \"abcdef\";"),
+            ("char *s = \"abc\\\r\ndef\";", "char *s = \"abcdef\";"),
+            ("char *s = \"abc??/\ndef\";", "char *s = \"abcdef\";"),
+            ("char *s = \"abc\\\\\ndef\";", "char *s = \"abc\\def\";"),
+            ("char *s = \"a\\\\\\\ndef\";", "char *s = \"a\\\\def\";"),
+            ("char *s = \"a\\\n\\\nb\";", "char *s = \"ab\";"),
+            ("char *s = \"a\\\\\\\"\";", "char *s = \"a\\\\\\\"\";"),
+            ("int c = '\\\n\\n';", "int c = '\\n';"),
+            ("char *s = L\"w\\\nx\";", "char *s = L\"wx\";"),
+        ] {
+            let (observed_tokens, observed_diags) = lex_c(spliced);
+            let (expected_tokens, expected_diags) = lex_c(joined);
+            let observed: Vec<_> = observed_tokens
+                .iter()
+                .map(|token| (token.kind, token.text.to_string()))
+                .collect();
+            let expected: Vec<_> = expected_tokens
+                .iter()
+                .map(|token| (token.kind, token.text.to_string()))
+                .collect();
+            assert_eq!(observed, expected, "{spliced:?}");
+            assert_eq!(observed_diags.len(), expected_diags.len(), "{spliced:?}");
+            assert!(observed_diags.is_empty(), "{spliced:?}");
+        }
+    }
+
+    #[test]
+    fn a_user_defined_suffix_does_not_decide_the_numeric_kind() {
+        let kind_of = |source: &str| lex_c(source).0[0].kind;
+        for source in ["5_sec", "7_min", "3_e", "0x1F_x", "10_f", "2_pm"] {
+            assert_eq!(
+                kind_of(source),
+                TokenKind::Literal(LiteralKind::Integer),
+                "{source}"
+            );
+        }
+        for source in ["1.5_deg", "1e3_x", "2.5e-3_e", "0x1p3_x"] {
+            assert_eq!(
+                kind_of(source),
+                TokenKind::Literal(LiteralKind::Float),
+                "{source}"
+            );
         }
     }
 

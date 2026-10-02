@@ -131,6 +131,14 @@ fn function_unit(
             TokenKind::Keyword if declarator::is_trailer_keyword(&token.text) => {
                 j = j.checked_sub(1)?;
             }
+            // A template argument list in a trailing return type is stepped
+            // over whole: a comma inside it is not trailer punctuation.
+            TokenKind::Punctuation if matches!(token.text.as_str(), ">" | ">>") => {
+                j = match group_open(tokens, pairs, j) {
+                    Some(open) => open.checked_sub(1)?,
+                    None => j.checked_sub(1)?,
+                };
+            }
             TokenKind::Punctuation if declarator::is_trailer_punct(&token.text) => {
                 j = j.checked_sub(1)?;
             }
@@ -180,6 +188,23 @@ fn resolve_signature(
     let mut close = close;
     for _ in 0..32 {
         let open = group_open(tokens, pairs, close)?;
+
+        // An operator function is named by its whole symbol, which no
+        // identifier walk can read; it must be recognised before one runs.
+        if tokens[close].text == ")"
+            && let Some(keyword) = declarator::operator_keyword_before(tokens, open)
+        {
+            return Some(make_function(
+                tokens,
+                pairs,
+                records,
+                keyword,
+                keyword,
+                declarator::operator_name(tokens, keyword, open),
+                body_open,
+            ));
+        }
+
         let name_i = declarator::declarator_name(tokens, open)?;
         let name_token = &tokens[name_i];
 
@@ -208,7 +233,27 @@ fn resolve_signature(
                         close = prev_i;
                         continue;
                     }
-                    return None;
+                    // `Ctor() noexcept : member(x)`: qualifiers sit between
+                    // the parameter list and the entries.
+                    if prev.kind == TokenKind::Keyword && declarator::is_trailer_keyword(&prev.text)
+                    {
+                        let list_end = (0..=prev_i).rev().find(|&k| {
+                            !(tokens[k].kind == TokenKind::Keyword
+                                && declarator::is_trailer_keyword(&tokens[k].text))
+                        })?;
+                        if tokens[list_end].text != ")" {
+                            return None;
+                        }
+                        close = list_end;
+                        continue;
+                    }
+                    // An access label (`public:`, `signals:`) ends before the
+                    // declaration it precedes, so the name is not an entry.
+                    if sep.text != ":"
+                        || !matches!(prev.kind, TokenKind::Keyword | TokenKind::Identifier)
+                    {
+                        return None;
+                    }
                 }
             }
             // The parameter list itself must be parenthesised.
@@ -219,6 +264,14 @@ fn resolve_signature(
             // invocation, not a C/C++ function definition. Apply this only
             // after walking constructor-initialiser entries back to the
             // actual parameter list.
+            // No declaration follows a statement keyword, in a record's
+            // method body as much as outside one.
+            if name_i
+                .checked_sub(1)
+                .is_some_and(|p| is_statement_keyword(&tokens[p]))
+            {
+                return None;
+            }
             let inside_record = records
                 .iter()
                 .any(|record| record.token_start < name_i && name_i < record.token_end);
@@ -235,34 +288,28 @@ fn resolve_signature(
                 records,
                 unit_start,
                 name_i,
-                name_token.text.to_string(),
+                if tilde {
+                    format!("~{}", name_token.text)
+                } else {
+                    name_token.text.to_string()
+                },
                 body_open,
             ));
         }
 
-        // Operator overloads: `operator` plus symbol tokens directly before
-        // the parameter list (`operator+`, `operator()`, `operator bool`).
-        if tokens[close].text == ")" {
-            for back in 1..=3 {
-                let Some(k) = open.checked_sub(back) else {
-                    break;
-                };
-                if tokens[k].kind == TokenKind::Keyword && tokens[k].text == "operator" {
-                    return Some(make_function(
-                        tokens,
-                        pairs,
-                        records,
-                        k,
-                        k,
-                        "operator".to_string(),
-                        body_open,
-                    ));
-                }
-            }
-        }
         return None;
     }
     None
+}
+
+/// Whether `token` is a keyword that starts or continues a statement, so that
+/// `NAME(args) {` after it is a macro or call, never a declarator.
+fn is_statement_keyword(token: &Token) -> bool {
+    token.kind == TokenKind::Keyword
+        && matches!(
+            token.text.as_str(),
+            "else" | "do" | "return" | "case" | "goto" | "throw" | "co_return" | "co_yield"
+        )
 }
 
 /// Whether tokens before a candidate name can introduce a function declarator.
@@ -358,6 +405,9 @@ fn lambda_unit(tokens: &[Token], pairs: &DelimPairs, i: usize) -> Option<Unit> {
                     token_end: close + 1,
                     span: span_of(tokens, i, close),
                 });
+            }
+            TokenKind::Punctuation if token.text == "<" => {
+                k = declarator::angle_group_close(tokens, k).map_or(k + 1, |close| close + 1);
             }
             TokenKind::Punctuation if declarator::is_trailer_punct(&token.text) => k += 1,
             TokenKind::Punctuation if token.text == "(" => {

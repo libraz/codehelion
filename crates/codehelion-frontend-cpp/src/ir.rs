@@ -31,7 +31,7 @@ use tree_sitter::Node;
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
 /// it whenever a change alters the token stream or the IR tree for unchanged
 /// input.
-pub const STRUCTURAL_FRONTEND_VERSION: &str = "cpp-ir-v1";
+pub const STRUCTURAL_FRONTEND_VERSION: &str = "cpp-ir-v2";
 
 /// The C++ node-mapping table: C++-only kinds first, then the shared C table.
 #[derive(Debug, Clone, Copy, Default)]
@@ -1226,7 +1226,7 @@ int S::out_of_class() { return 2; }
     fn file_carries_language_and_versions() {
         let frontend = CppStructuralFrontend;
         assert_eq!(frontend.language(), Language::Cpp);
-        assert_eq!(frontend.frontend_version(), "cpp-ir-v1");
+        assert_eq!(frontend.frontend_version(), "cpp-ir-v2");
 
         let file = parse("int a;");
         assert_eq!(file.language, Language::Cpp);

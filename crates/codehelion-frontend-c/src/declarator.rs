@@ -22,6 +22,7 @@
 
 #![allow(clippy::redundant_pub_crate)] // internal helpers reached from the crate root
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use codehelion_core::frontend::{Token, TokenKind};
@@ -226,6 +227,39 @@ fn angle_group_open(tokens: &[Token], close: usize) -> Option<usize> {
     None
 }
 
+/// Index of the `>` or `>>` closing the angle-bracket group opened by the `<`
+/// at `open`, found by counting forward.
+///
+/// Like [`angle_group_open`] the walk stops at a token that cannot occur inside
+/// a template argument list and declines when a `>>` would have to be split to
+/// balance the count.
+pub(crate) fn angle_group_close(tokens: &[Token], open: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let end = tokens.len().min(open + 1 + MAX_DECLARATION_LOOKAHEAD);
+    for (index, token) in tokens.iter().enumerate().take(end).skip(open + 1) {
+        if token.kind != TokenKind::Punctuation {
+            continue;
+        }
+        match token.text.as_str() {
+            ";" | "{" | "}" => return None,
+            "<" => depth += 1,
+            "<<" => depth += 2,
+            ">" => depth -= 1,
+            ">>" => {
+                if depth < 2 {
+                    return None;
+                }
+                depth -= 2;
+            }
+            _ => continue,
+        }
+        if depth == 0 {
+            return Some(index);
+        }
+    }
+    None
+}
+
 /// Index of the innermost angle-bracket group still open before `from`.
 fn enclosing_angle_open(tokens: &[Token], from: usize) -> Option<usize> {
     let mut depth = 0usize;
@@ -294,6 +328,67 @@ pub(crate) fn declarator_name(tokens: &[Token], open: usize) -> Option<usize> {
     Some(candidate)
 }
 
+/// Tokens an `operator` declarator can span between its keyword and the
+/// parameter list: the symbol, or the type of a conversion operator.
+const MAX_OPERATOR_DECLARATOR_TOKENS: usize = 8;
+
+/// Index of the `operator` keyword naming the function whose parameter list
+/// opens at `open`, or `None` when the declarator is not an operator.
+///
+/// Operator names are read as a whole, because the symbol can be anything a
+/// declarator walk would otherwise take for something else: `>` and `>>` look
+/// like the end of a template argument list, `()` like a second parameter
+/// list, and a conversion operator ends in a type name.
+pub(crate) fn operator_keyword_before(tokens: &[Token], open: usize) -> Option<usize> {
+    for back in 1..=MAX_OPERATOR_DECLARATOR_TOKENS {
+        let index = open.checked_sub(back)?;
+        let token = &tokens[index];
+        if token.kind == TokenKind::Keyword && token.text == "operator" {
+            return Some(index);
+        }
+        if token.kind == TokenKind::Punctuation && matches!(token.text.as_str(), ";" | "{" | "}") {
+            return None;
+        }
+    }
+    None
+}
+
+/// The name an operator function is reported under, from the `operator`
+/// keyword at `keyword` up to the parameter list opening at `open`.
+pub(crate) fn operator_name(tokens: &[Token], keyword: usize, open: usize) -> String {
+    let spelled: Vec<&str> = tokens[keyword..open]
+        .iter()
+        .map(|token| token.text.as_str())
+        .collect();
+    canonical_declared_name(&spelled.join(" ")).into_owned()
+}
+
+/// A declared name with its spelling settled: whitespace is kept only between
+/// two word characters, as a single space. Both frontends report a function
+/// under this form, so `operator ==` and `operator==` are one name whichever
+/// mode read them.
+pub(crate) fn canonical_declared_name(text: &str) -> Cow<'_, str> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut canonical = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && is_word(c) && canonical.chars().next_back().is_some_and(is_word) {
+            canonical.push(' ');
+        }
+        pending_space = false;
+        canonical.push(c);
+    }
+    if canonical == text {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(canonical)
+    }
+}
+
 /// The header of a record definition: its declared tag name, if any, and the
 /// `{` that opens its body.
 pub(crate) struct RecordHeader {
@@ -326,6 +421,16 @@ pub(crate) fn record_header(
                 .is_some_and(|next| next.kind == TokenKind::Punctuation && next.text == "(")
         {
             index = group_close(pairs, index + 1)? + 1;
+            continue;
+        }
+        // A C++11 attribute-specifier-seq `[[...]]` is skipped whole too.
+        if token.kind == TokenKind::Punctuation
+            && token.text == "["
+            && tokens
+                .get(index + 1)
+                .is_some_and(|next| next.kind == TokenKind::Punctuation && next.text == "[")
+        {
+            index = group_close(pairs, index)? + 1;
             continue;
         }
         match token.kind {
