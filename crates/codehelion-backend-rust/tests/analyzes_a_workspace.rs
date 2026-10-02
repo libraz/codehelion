@@ -174,10 +174,14 @@ fn source_of(fixture: &str) -> String {
     std::fs::read_to_string(path).expect("the fixture is readable")
 }
 
+#[path = "analyzes_a_workspace/attribute_macros.rs"]
+mod attribute_macros;
 #[path = "analyzes_a_workspace/cargo_configuration.rs"]
 mod cargo_configuration;
 #[path = "analyzes_a_workspace/generics.rs"]
 mod generics;
+#[path = "analyzes_a_workspace/library_and_binary.rs"]
+mod library_and_binary;
 #[path = "analyzes_a_workspace/macros.rs"]
 mod macros;
 #[path = "analyzes_a_workspace/project_boundaries.rs"]

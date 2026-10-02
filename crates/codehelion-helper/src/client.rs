@@ -40,7 +40,7 @@ use crate::protocol::{
 };
 use crate::sandbox::{HelperProcess, SandboxRequest, spawn};
 
-use diagnostics::Diagnostics;
+use diagnostics::{Diagnostics, bounded};
 use io::{Delivery, Outgoing, deliver, drain_stderr, read_responses, write_requests};
 
 pub use error::HelperError;
@@ -67,6 +67,13 @@ const SHUTDOWN_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 /// answers about many units, and a ceiling on its lifetime output would spend
 /// itself on the first few and leave every later unit with no explanation.
 pub const MAX_DIAGNOSTIC_LINES: usize = 256;
+
+/// Bytes of one diagnostic line kept; a longer line is cut and says so.
+///
+/// A line count alone bounds nothing when one line can be as large as the
+/// helper cares to make it, and a helper's output includes whatever the
+/// compilers and build scripts under it printed.
+const MAX_DIAGNOSTIC_LINE_BYTES: usize = 8 * 1024;
 
 /// A running helper and the conversation with it.
 #[derive(Debug)]
@@ -374,7 +381,7 @@ impl Helper {
                 diagnostics,
                 ..
             } => {
-                self.answer_diagnostics = diagnostics;
+                self.answer_diagnostics = bounded(diagnostics, 0);
                 Ok(Analysis::Missing(reason))
             }
             _ => Err(HelperError::Died {

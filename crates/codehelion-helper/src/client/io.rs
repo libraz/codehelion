@@ -10,6 +10,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use super::MAX_DIAGNOSTIC_LINE_BYTES;
 use super::diagnostics::Diagnostics;
 use crate::protocol::{FrameError, Request, Response, read_frame, write_frame};
 
@@ -125,14 +126,57 @@ pub(super) fn drain_stderr(stream: std::process::ChildStderr, sink: Arc<Mutex<Di
 
 /// Read all of one helper stderr stream while retaining the bounded prefix of
 /// each span between two reads.
-fn collect_stderr(reader: impl BufRead, sink: &Arc<Mutex<Diagnostics>>) {
-    for line in reader.lines().map_while(Result::ok) {
+fn collect_stderr(mut reader: impl BufRead, sink: &Arc<Mutex<Diagnostics>>) {
+    let mut line = Vec::new();
+    // One byte past the ceiling is enough to tell a line that was cut.
+    while matches!(
+        read_capped_line(&mut reader, &mut line, MAX_DIAGNOSTIC_LINE_BYTES + 1),
+        Ok(true)
+    ) {
         // Take the lock for one line and let it go: the helper writing to
         // its standard error must never be what stops a caller from
         // reading what it has written so far.
         sink.lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(line);
+            .push(String::from_utf8_lossy(&line).into_owned());
+    }
+}
+
+/// Read one line into `line`, keeping at most `cap` bytes of it.
+///
+/// The rest of an over-long line is read and discarded, so a line of any
+/// length costs no more memory than `cap`. Returns whether a line was read.
+fn read_capped_line(
+    reader: &mut impl BufRead,
+    line: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<bool> {
+    line.clear();
+    let mut read_any = false;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if available.is_empty() {
+            return Ok(read_any);
+        }
+        read_any = true;
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let content = available
+            .get(..newline.unwrap_or(available.len()))
+            .unwrap_or_default();
+        let room = cap.saturating_sub(line.len());
+        line.extend_from_slice(content.get(..content.len().min(room)).unwrap_or_default());
+        let consumed = newline.map_or(available.len(), |index| index.saturating_add(1));
+        reader.consume(consumed);
+        if newline.is_some() {
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(true);
+        }
     }
 }
 
@@ -160,6 +204,41 @@ mod tests {
         assert_eq!(
             kept.get(MAX_DIAGNOSTIC_LINES - 2).map(String::as_str),
             Some(expected_last.as_str())
+        );
+    }
+
+    #[test]
+    fn one_enormous_stderr_line_is_kept_cut_and_the_next_line_is_still_read() {
+        let mut input = "x".repeat(MAX_DIAGNOSTIC_LINE_BYTES * 50);
+        input.push_str("\r\nnext\n");
+        let sink = Arc::new(Mutex::new(Diagnostics::default()));
+
+        collect_stderr(std::io::Cursor::new(input), &sink);
+
+        let kept = sink.lock().unwrap().take();
+        assert_eq!(kept.len(), 2);
+        assert!(
+            kept[0].len() <= MAX_DIAGNOSTIC_LINE_BYTES + 32,
+            "{}",
+            kept[0].len()
+        );
+        assert!(kept[0].ends_with(" [line cut]"));
+        assert_eq!(kept[1], "next");
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_do_not_end_the_reading() {
+        let sink = Arc::new(Mutex::new(Diagnostics::default()));
+
+        collect_stderr(
+            std::io::Cursor::new(b"bad \xff byte\nafter".to_vec()),
+            &sink,
+        );
+
+        let kept = sink.lock().unwrap().take();
+        assert_eq!(
+            kept,
+            vec!["bad \u{fffd} byte".to_string(), "after".to_string()]
         );
     }
 

@@ -1,6 +1,6 @@
 //! What a helper printed on its standard error, kept under a ceiling.
 
-use super::MAX_DIAGNOSTIC_LINES;
+use super::{MAX_DIAGNOSTIC_LINE_BYTES, MAX_DIAGNOSTIC_LINES};
 
 /// Helper standard error that has not been reported yet, and what did not fit.
 ///
@@ -42,7 +42,8 @@ impl Diagnostics {
 /// `already_dropped` lines were discarded before this point. The note is part
 /// of the ceiling rather than an extra line past it, so what a caller receives
 /// is bounded whether or not anything was left out.
-pub(super) fn bounded(mut lines: Vec<String>, already_dropped: usize) -> Vec<String> {
+pub(super) fn bounded(lines: Vec<String>, already_dropped: usize) -> Vec<String> {
+    let mut lines: Vec<String> = lines.into_iter().map(cut_line).collect();
     let mut dropped = already_dropped;
     if lines.len().saturating_add(usize::from(dropped > 0)) > MAX_DIAGNOSTIC_LINES {
         let room = MAX_DIAGNOSTIC_LINES.saturating_sub(1);
@@ -55,6 +56,19 @@ pub(super) fn bounded(mut lines: Vec<String>, already_dropped: usize) -> Vec<Str
         ));
     }
     lines
+}
+
+/// Cut `line` to the byte ceiling, saying so when something was left out.
+fn cut_line(mut line: String) -> String {
+    if line.len() > MAX_DIAGNOSTIC_LINE_BYTES {
+        let mut end = MAX_DIAGNOSTIC_LINE_BYTES;
+        while !line.is_char_boundary(end) {
+            end = end.saturating_sub(1);
+        }
+        line.truncate(end);
+        line.push_str(" [line cut]");
+    }
+    line
 }
 
 #[cfg(test)]
@@ -76,6 +90,26 @@ mod tests {
             let reported = sink.lock().unwrap().take();
             assert_eq!(reported, vec![format!("refused unit-{unit}")]);
         }
+    }
+
+    #[test]
+    fn however_much_a_helper_says_what_is_reported_stays_under_both_ceilings() {
+        let huge = "é".repeat(MAX_DIAGNOSTIC_LINE_BYTES);
+        let lines: Vec<String> = (0..MAX_DIAGNOSTIC_LINES * 4)
+            .map(|index| format!("{index} {huge}"))
+            .collect();
+
+        let reported = bounded(lines, 0);
+
+        assert_eq!(reported.len(), MAX_DIAGNOSTIC_LINES);
+        let note = reported.last().unwrap();
+        assert!(note.contains("further line(s)"), "{note}");
+        assert!(
+            reported
+                .iter()
+                .all(|line| line.len() <= MAX_DIAGNOSTIC_LINE_BYTES + " [line cut]".len()),
+        );
+        assert!(reported[0].ends_with(" [line cut]"));
     }
 
     #[test]

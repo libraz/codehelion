@@ -439,9 +439,9 @@ fn a_definition_is_collected_however_the_flag_spells_it() {
 /// as well as by how this project spells it.
 #[test]
 fn a_unit_is_found_by_where_it_is_as_well_as_by_how_the_project_spells_it() {
-    let database = Database {
-        root: PathBuf::from("/work"),
-        entries: vec![
+    let database = Database::new(
+        PathBuf::from("/work"),
+        vec![
             RecordedCommand {
                 file: "/work/src/a.cpp".to_string(),
                 directory: Some("/work/build".to_string()),
@@ -455,7 +455,7 @@ fn a_unit_is_found_by_where_it_is_as_well_as_by_how_the_project_spells_it() {
             .entry()
             .expect("the entry carries a command"),
         ],
-    };
+    );
     assert!(database.unit("src/a.cpp", None).is_some());
     assert!(database.unit("/work/src/a.cpp", None).is_some());
     // A file this database says nothing about stays unanswerable, whichever
@@ -491,10 +491,7 @@ fn an_exact_selector_never_falls_back_to_another_command_for_the_same_file() {
     }
     .entry()
     .expect("the entry carries a command");
-    let database = Database {
-        root: PathBuf::from("/work"),
-        entries: vec![narrow, wide],
-    };
+    let database = Database::new(PathBuf::from("/work"), vec![narrow, wide]);
     let wide_selector = database.entries[1].selector.clone();
     let selected = database
         .unit("/work/src/a.cpp", Some(&wide_selector))
@@ -575,6 +572,7 @@ fn a_database_is_read_once_however_many_units_ask_about_it() {
     assert_eq!(
         databases
             .nearest(&root.join("a.cpp"))
+            .expect("the database is readable")
             .expect("the database is beside the unit")
             .definitions(),
         ["-DFIRST=1"]
@@ -587,6 +585,7 @@ fn a_database_is_read_once_however_many_units_ask_about_it() {
         assert_eq!(
             databases
                 .nearest(&root.join(unit))
+                .expect("the database is readable")
                 .expect("the database read for the first unit answers for the rest")
                 .definitions(),
             ["-DFIRST=1"],
@@ -603,7 +602,7 @@ fn a_tree_with_no_database_is_searched_once_per_directory() {
     let root = project.path();
     let mut databases = Databases::default();
 
-    assert!(databases.nearest(&root.join("a.rs")).is_none());
+    assert!(databases.nearest(&root.join("a.rs")).unwrap().is_none());
     std::fs::write(
         root.join("compile_commands.json"),
         serde_json::to_string(&[serde_json::json!({
@@ -616,7 +615,7 @@ fn a_tree_with_no_database_is_searched_once_per_directory() {
     .expect("the database is written");
 
     assert!(
-        databases.nearest(&root.join("b.rs")).is_none(),
+        databases.nearest(&root.join("b.rs")).unwrap().is_none(),
         "the search from one directory was walked twice"
     );
 }
@@ -635,8 +634,66 @@ fn an_unreadable_database_refuses_every_unit_that_asks_about_it() {
     let mut databases = Databases::default();
     for unit in ["a.cpp", "b.cpp", "c.cpp"] {
         assert!(
-            databases.nearest(&root.join(unit)).is_none(),
+            databases.nearest(&root.join(unit)).is_err(),
             "{unit} was answered from a database that could not be read"
         );
+    }
+}
+
+/// Finding a unit through the index reaches the entry a scan of every entry in
+/// order would: the first one that names the file, by either spelling.
+#[test]
+fn the_indexed_lookup_selects_what_a_scan_of_every_entry_would() {
+    let command = |file: &str, directory: &str, define: &str| {
+        RecordedCommand {
+            file: file.to_string(),
+            directory: Some(directory.to_string()),
+            arguments: Some(["clang++", define, "-c", file].map(str::to_string).to_vec()),
+            command: None,
+        }
+        .entry()
+        .expect("the entry carries a command")
+    };
+    let mut entries: Vec<Entry> = (0..20)
+        .map(|index| {
+            command(
+                &format!("src/f{index}.cpp"),
+                "/work",
+                &format!("-DN={index}"),
+            )
+        })
+        .collect();
+    // The same file again under another command, and once more spelled from
+    // a build directory: all three name one file.
+    entries.push(command("src/f3.cpp", "/work", "-DSECOND=1"));
+    entries.push(command("../src/f3.cpp", "/work/build", "-DTHIRD=1"));
+    let database = Database::new(PathBuf::from("/work"), entries);
+
+    let scanned = |named: &str| {
+        let absolute = canonical(Path::new(named));
+        database.entries.iter().position(|entry| {
+            Path::new(&codehelion_helper::ir::spell(
+                Some(&database.root),
+                &entry.file,
+            )) == Path::new(named)
+                || entry.file == absolute
+        })
+    };
+    for named in [
+        "src/f0.cpp",
+        "src/f3.cpp",
+        "/work/src/f3.cpp",
+        "src/f19.cpp",
+        "src/none.cpp",
+    ] {
+        let found = database.unit(named, None).map(|entry| {
+            database
+                .entries
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, entry))
+                .expect("the entry belongs to the database")
+        });
+        let expected = scanned(named);
+        assert_eq!(found, expected, "{named}");
     }
 }

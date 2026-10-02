@@ -56,3 +56,63 @@ fn a_tree_is_described_by_the_conditions_its_units_are_compiled_under() {
     assert!(nothing.cfgs.is_empty(), "{nothing:?}");
     helper.shutdown().expect("the helper should stop cleanly");
 }
+
+/// A database that is there and cannot be read leaves the conditions of the
+/// build unknown. Describing the tree as having none would file the run under
+/// conditions nobody established.
+#[test]
+fn a_database_that_cannot_be_read_stops_the_description() {
+    let broken = tempfile::tempdir().expect("temp dir");
+    std::fs::write(broken.path().join("compile_commands.json"), b"{ not json").unwrap();
+    let mut helper = helper();
+
+    let error = helper
+        .describe(broken.path())
+        .expect_err("an unreadable database must not describe as an empty one");
+
+    assert!(
+        error
+            .to_string()
+            .contains("unreadable_compilation_database"),
+        "{error}"
+    );
+    helper.shutdown().expect("the helper should stop cleanly");
+}
+
+/// What a unit is told about why it was refused is about that unit. The
+/// sentence explaining a database nobody could read belongs to the request
+/// that met it, not to whichever unit is asked about next.
+#[test]
+fn a_refusal_is_not_carried_into_the_answer_to_a_later_request() {
+    let broken = tempfile::tempdir().expect("temp dir");
+    std::fs::write(broken.path().join("compile_commands.json"), b"{ not json").unwrap();
+    let lonely = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        lonely.path().join("lonely.cpp"),
+        "int main() { return 0; }\n",
+    )
+    .unwrap();
+    let unit = UnitRef {
+        unit: "lonely.cpp".to_string(),
+        file: lonely.path().join("lonely.cpp").display().to_string(),
+        variant: "host".to_string(),
+    };
+    let mut helper = helper();
+    let _ = helper.describe(broken.path());
+
+    let analysis = helper
+        .analyze(&unit, &[Capability::Types])
+        .expect("the helper should answer");
+
+    assert!(matches!(
+        analysis,
+        Analysis::Missing(Unavailability::NoBuildInformation)
+    ));
+    let said = helper.take_answer_diagnostics();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(
+        said[0].contains("no compilation database above"),
+        "{said:?}"
+    );
+    helper.shutdown().expect("the helper should stop cleanly");
+}

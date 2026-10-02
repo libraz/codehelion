@@ -46,9 +46,9 @@ use std::sync::Mutex;
 use codehelion_helper::PROTOCOL_VERSION;
 use codehelion_helper::ir::{COMPILER_IR_SCHEMA_VERSION, Unavailability};
 use codehelion_helper::protocol::{
-    Analyze, BuildDescription, Capability, DescribeBuild, HelperIdentity,
+    Analyze, BuildDescription, Capability, DescribeBuild, Failure, HelperIdentity,
 };
-use codehelion_helper::server::{Answer, Backend, Description, serve};
+use codehelion_helper::server::{Answer, Backend, Description, serve_stdio};
 
 use crate::analysis::Outcome;
 use crate::database::Databases;
@@ -125,9 +125,7 @@ fn main() -> std::process::ExitCode {
         cfg_available: cfg_dump::available(),
         databases: Databases::default(),
     };
-    let mut input = std::io::stdin().lock();
-    let mut output = std::io::stdout().lock();
-    match serve(&mut backend, &mut input, &mut output) {
+    match serve_stdio(&mut backend) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             // Standard error, because standard output is the protocol: a
@@ -191,35 +189,54 @@ impl Backend for ClangBackend<'_> {
     }
 
     fn describe(&mut self, request: &DescribeBuild) -> Description {
+        // Sentences left by an earlier request belong to that request.
+        taken_refusals();
         // A tree with no compilation database has no C or C++ build to
         // describe, which is an answer rather than a failure: a project that is
         // entirely Rust is not missing one, and refusing here would stop a scan
-        // of it because a helper it never needed happened to be installed.
-        let described = self
-            .databases
-            .nearest(Path::new(&request.root))
-            .map_or_else(BuildDescription::default, |database| BuildDescription {
+        // of it because a helper it never needed happened to be installed. A
+        // database that is there and cannot be read is the opposite: the
+        // conditions could not be established, and a run must not be filed
+        // under ones that were guessed at.
+        match self.databases.nearest(Path::new(&request.root)) {
+            Ok(Some(database)) => Description::Build(BuildDescription {
                 features: Vec::new(),
                 // The macros a translation unit is compiled with decide which
                 // declarations its headers contain at all, which is what a cfg
                 // is — the same question C answers with `#if`.
                 cfgs: database.definitions(),
-            });
-        Description::Build(described)
+            }),
+            Ok(None) => Description::Build(BuildDescription::default()),
+            Err(why) => Description::Failed(Failure {
+                code: "unreadable_compilation_database".to_string(),
+                message: why.to_string(),
+            }),
+        }
     }
 
     fn analyze(&mut self, request: &Analyze) -> Answer {
         let clang = self.clang;
-        let Some(database) = self.databases.nearest(Path::new(&request.unit.file)) else {
+        // Only what this request produces travels with its answer.
+        taken_refusals();
+        let database = match self.databases.nearest(Path::new(&request.unit.file)) {
+            Ok(Some(database)) => database,
             // Nothing above this file says how it is compiled. Reported per
             // file rather than as a failed run: a scan of a mixed tree reads
             // the half that does have a build, and the half nobody could speak
             // for is what a coverage report is for.
-            refused(&format!(
-                "{}: no compilation database above this file says how it is compiled",
-                request.unit.unit
-            ));
-            return Answer::Unavailable(Unavailability::NoBuildInformation);
+            Ok(None) => {
+                refused(&format!(
+                    "{}: no compilation database above this file says how it is compiled",
+                    request.unit.unit
+                ));
+                return Answer::Unavailable(Unavailability::NoBuildInformation);
+            }
+            // Said for every unit that asks, because each of them is refused
+            // for this reason.
+            Err(why) => {
+                refused(why);
+                return Answer::Unavailable(Unavailability::NoBuildInformation);
+            }
         };
         match analysis::analyze(
             clang,

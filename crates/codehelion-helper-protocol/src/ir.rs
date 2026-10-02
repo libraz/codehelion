@@ -37,8 +37,9 @@ use crate::protocol::Capability;
 
 /// The compiler-IR schema identifier.
 ///
-/// The product has not been released, so the complete current shape is the
-/// only supported wire contract.
+/// The only shape this build reads: a change that an older reader cannot
+/// interpret gets a new identifier, and an answer in another one is refused as
+/// unreadable.
 pub const COMPILER_IR_SCHEMA_VERSION: &str = "compiler-ir-v1";
 
 /// A half-open byte range in one file, with the line its start falls on.

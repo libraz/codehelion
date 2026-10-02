@@ -60,7 +60,7 @@ use codehelion_helper::ir::{
     Anchor, CompilerIr, ResolvedSymbol, SymbolKind, Unavailability, UnitRef,
 };
 use codehelion_helper::protocol::{BuildDescription, Execution};
-use ra_ap_hir::{Adt, Crate, HasSource, ModuleDef};
+use ra_ap_hir::{Adt, Crate, HasSource, ModuleDef, Semantics};
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_vfs::Vfs;
 
@@ -83,6 +83,10 @@ pub(crate) struct Loaded {
     pub(crate) db: RootDatabase,
     pub(crate) vfs: Vfs,
     pub(crate) root: PathBuf,
+    /// Where each line of a file begins, built the first time a range in that
+    /// file is placed and kept: placing every range of a file would otherwise
+    /// count its lines again from the top for each one.
+    pub(crate) line_starts: std::sync::Mutex<BTreeMap<ra_ap_vfs::FileId, std::sync::Arc<[u32]>>>,
 }
 
 /// What a request permitted this process to run out of the project.
@@ -306,7 +310,30 @@ fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
     let (db, vfs, _proc_macro) =
         ra_ap_load_cargo::load_workspace(workspace, &config.extra_env, &load_config)
             .map_err(|error| error.to_string())?;
-    Ok(Loaded { db, vfs, root })
+    Ok(Loaded {
+        db,
+        vfs,
+        root,
+        line_starts: std::sync::Mutex::default(),
+    })
+}
+
+/// The crate called `name` whose module tree reaches `file`.
+///
+/// A package with a library and a binary has two crates under one name, so the
+/// name alone does not choose: the requested file belongs to the one that
+/// holds it.
+fn crate_holding(db: &RootDatabase, name: &str, file: ra_ap_vfs::FileId) -> Option<Crate> {
+    let holding: Vec<Crate> = Semantics::new(db)
+        .file_to_module_defs(file)
+        .map(|module| module.krate(db))
+        .collect();
+    Crate::all(db).into_iter().find(|krate| {
+        holding.contains(krate)
+            && krate
+                .display_name(db)
+                .is_some_and(|crate_name| crate_name.to_string() == name)
+    })
 }
 
 /// Everything the compiler knows about one crate, collected into the wire IR.
@@ -335,17 +362,14 @@ fn analyze_crate(loaded: &Loaded, unit: &UnitRef) -> Outcome {
         .as_path()
         .map(|path| codehelion_helper::ir::spell(Some(&loaded.root), Path::new(path.as_str())))
         .unwrap_or_default();
-    let Some(krate) = Crate::all(db).into_iter().find(|krate| {
-        krate
-            .display_name(db)
-            .is_some_and(|name| name.to_string() == unit.unit)
-    }) else {
+    let Some(krate) = crate_holding(db, &unit.unit, requested_id) else {
         return Outcome::unavailable(
             Unavailability::NoBuildInformation,
             format!(
-                "the workspace at {} builds no crate called {}",
+                "the workspace at {} builds no crate called {} that holds {}",
                 loaded.root.display(),
-                unit.unit
+                unit.unit,
+                unit.file
             ),
         );
     };

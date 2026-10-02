@@ -175,8 +175,10 @@ pub(crate) fn analyze(
 struct Reading<'a> {
     /// How the files the unit reached are named in the answer.
     files: Files<'a>,
-    /// Macro invocations paired with the definitions they expanded.
-    macros: Vec<MacroStamp>,
+    /// Macro invocations paired with the definitions they expanded, by the file
+    /// each was written in. Only files of the project are kept: an entity in
+    /// any other file is never anchored, so a stamp there is never read.
+    macros: BTreeMap<(u64, u64, u64), Vec<MacroStamp>>,
     types: TypeTable,
     symbols: Vec<ResolvedSymbol>,
     calls: Vec<CallSite>,
@@ -246,8 +248,6 @@ struct Spelled {
 
 /// One macro invocation and the body it expanded.
 struct MacroStamp {
-    /// Clang's identity for the file containing the invocation.
-    file: (u64, u64, u64),
     /// Invocation bytes, used to associate AST cursor locations with it.
     start: u64,
     end: u64,
@@ -259,7 +259,7 @@ impl<'a> Reading<'a> {
     fn new(root: &'a Path) -> Self {
         Self {
             files: Files::new(root),
-            macros: Vec::new(),
+            macros: BTreeMap::new(),
             types: TypeTable::default(),
             symbols: Vec::new(),
             calls: Vec::new(),
@@ -520,24 +520,30 @@ impl<'a> Reading<'a> {
         if start_file.get_id() != end_file.get_id() || end.offset <= start.offset {
             return;
         }
+        let known = self.known(&start_file);
+        if !known.inside {
+            return;
+        }
+        let file_name = known.name.clone();
         let Some(written) = self.definition_range(definition) else {
             return;
         };
-        let file_name = self.known(&start_file).name.clone();
-        self.macros.push(MacroStamp {
-            file: start_file.get_id(),
-            start: u64::from(start.offset),
-            end: u64::from(end.offset),
-            anchor: Anchor {
-                expansion: SourceRange {
-                    file: file_name,
-                    start_byte: u64::from(start.offset),
-                    end_byte: u64::from(end.offset),
-                    start_line: start.line,
+        self.macros
+            .entry(start_file.get_id())
+            .or_default()
+            .push(MacroStamp {
+                start: u64::from(start.offset),
+                end: u64::from(end.offset),
+                anchor: Anchor {
+                    expansion: SourceRange {
+                        file: file_name,
+                        start_byte: u64::from(start.offset),
+                        end_byte: u64::from(end.offset),
+                        start_line: start.line,
+                    },
+                    definition: Some(written),
                 },
-                definition: Some(written),
-            },
-        });
+            });
     }
 
     /// The non-empty source range of a macro definition cursor.
@@ -602,10 +608,10 @@ impl<'a> Reading<'a> {
         let offset = u64::from(at.offset);
         if let Some(anchor) = self
             .macros
-            .iter()
-            .filter(|stamp| {
-                stamp.file == file.get_id() && stamp.start <= offset && offset <= stamp.end
-            })
+            .get(&file.get_id())
+            .into_iter()
+            .flatten()
+            .filter(|stamp| stamp.start <= offset && offset <= stamp.end)
             .min_by_key(|stamp| stamp.end - stamp.start)
             .map(|stamp| stamp.anchor.clone())
         {

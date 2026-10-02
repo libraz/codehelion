@@ -118,7 +118,7 @@ pub(crate) fn source_range(
     range: ra_ap_syntax::TextRange,
 ) -> SourceRange {
     let start = u32::from(range.start());
-    let text = loaded.db.file_text(file_id).text(&loaded.db).to_string();
+    let starts = line_starts_of(loaded, file_id);
     let path = loaded
         .vfs
         .file_path(file_id)
@@ -129,20 +129,43 @@ pub(crate) fn source_range(
         file: path,
         start_byte: u64::from(start),
         end_byte: u64::from(u32::from(range.end())),
-        start_line: line_of(&text, start as usize),
+        start_line: line_at(&starts, start),
     }
+}
+
+/// Where each line of `file_id` begins, read from the text once.
+fn line_starts_of(loaded: &Loaded, file_id: ra_ap_vfs::FileId) -> std::sync::Arc<[u32]> {
+    let mut cache = loaded
+        .line_starts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::sync::Arc::clone(
+        cache
+            .entry(file_id)
+            .or_insert_with(|| line_starts(loaded.db.file_text(file_id).text(&loaded.db))),
+    )
+}
+
+/// The byte offset each line of `text` begins at, the first being zero.
+fn line_starts(text: &str) -> std::sync::Arc<[u32]> {
+    std::iter::once(0)
+        .chain(
+            text.bytes()
+                .enumerate()
+                .filter(|(_, byte)| *byte == b'\n')
+                .map(|(index, _)| u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX)),
+        )
+        .collect()
+}
+
+/// The one-based line the byte at `offset` falls on.
+fn line_at(starts: &[u32], offset: u32) -> u32 {
+    let line = starts.partition_point(|start| *start <= offset);
+    u32::try_from(line).unwrap_or(u32::MAX).max(1)
 }
 
 pub(crate) fn real_file(file_id: HirFileId, db: &RootDatabase) -> Option<ra_ap_vfs::FileId> {
     file_id.file_id().map(|file| file.file_id(db))
-}
-
-/// The one-based line the byte at `offset` falls on.
-fn line_of(text: &str, offset: usize) -> u32 {
-    let counted = text
-        .get(..offset.min(text.len()))
-        .map_or(0, |head| head.bytes().filter(|byte| *byte == b'\n').count());
-    u32::try_from(counted).unwrap_or(u32::MAX).saturating_add(1)
 }
 
 /// The types a unit mentions, each recorded once.
@@ -185,4 +208,45 @@ fn display_of(ty: &ra_ap_hir::Type<'_>, db: &RootDatabase) -> String {
         || category(ty, db).name().to_string(),
         |adt| adt.name(db).as_str().to_string(),
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::{line_at, line_starts};
+
+    /// The line of `offset` by counting the newlines before it, which is what
+    /// the index has to agree with at every offset.
+    fn counted(text: &str, offset: usize) -> u32 {
+        let before = text
+            .get(..offset.min(text.len()))
+            .map_or(0, |head| head.bytes().filter(|byte| *byte == b'\n').count());
+        u32::try_from(before).unwrap() + 1
+    }
+
+    #[test]
+    fn the_line_index_agrees_with_counting_newlines_at_every_offset() {
+        for text in [
+            "",
+            "one line",
+            "\n",
+            "a\nb\n\nc",
+            "trailing newline\n",
+            "\n\nleading",
+            "multi\u{3042}byte\nline \u{1F600}\nend",
+            "windows\r\nline\r\nends\r\n",
+        ] {
+            let starts = line_starts(text);
+            // Offsets come from syntax ranges, which fall between characters.
+            for offset in (0..=text.len() + 2)
+                .filter(|offset| *offset > text.len() || text.is_char_boundary(*offset))
+            {
+                assert_eq!(
+                    line_at(&starts, u32::try_from(offset).unwrap()),
+                    counted(text, offset),
+                    "offset {offset} of {text:?}"
+                );
+            }
+        }
+    }
 }

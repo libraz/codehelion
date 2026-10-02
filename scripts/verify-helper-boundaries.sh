@@ -3,6 +3,9 @@
 # compiler adapters are separate executables, so their crates may be workspace
 # members but must never occur below either of these roots in `cargo tree`.
 #
+# The Rust helper's analysis engine, rust-analyzer, is held to the same rule by
+# an explicit list of its crates.
+#
 # `rustc-*` has legitimate ecosystem crates (for example rustc-hash), so this
 # check intentionally rejects the compiler-private `rustc_*` crate namespace
 # rather than applying an unsafe broad substring match.
@@ -26,6 +29,13 @@ is_forbidden_crate() {
         # libclang / LLVM binding crates. Keep this list explicit: a crate whose
         # name merely contains "clang" or "llvm" is not necessarily a binding.
         clang|clang-sys|libclang|libclang-sys|llvm-sys|llvm-ir|inkwell) return 0 ;;
+        # The Rust helper's compiler is rust-analyzer. Its lexer-level crates
+        # (ra_ap_syntax, ra_ap_parser, ra_ap_stdx, ra_ap_edition) serve the
+        # source frontend and stay allowed; everything that analyses semantics
+        # or reads a project belongs to the helper process alone.
+        ra_ap_hir|ra_ap_hir_def|ra_ap_hir_expand|ra_ap_hir_ty|ra_ap_ide_db|ra_ap_base_db) return 0 ;;
+        ra_ap_load-cargo|ra_ap_project_model|ra_ap_vfs|ra_ap_vfs-notify|ra_ap_toolchain) return 0 ;;
+        ra_ap_proc_macro_api) return 0 ;;
         # A backend is valid as a workspace member and child process, never as a
         # linked normal dependency of the engine or command-line binary.
         codehelion-backend-rust|codehelion-backend-clang) return 0 ;;

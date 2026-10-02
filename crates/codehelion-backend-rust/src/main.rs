@@ -34,7 +34,7 @@ use codehelion_helper::ir::COMPILER_IR_SCHEMA_VERSION;
 use codehelion_helper::protocol::{
     Analyze, BuildDescription, Capability, DescribeBuild, Execution, Failure, HelperIdentity,
 };
-use codehelion_helper::server::{Answer, Backend, Description, serve};
+use codehelion_helper::server::{Answer, Backend, Description, serve_stdio};
 
 use crate::analysis::{Outcome, Permissions, Workspaces};
 
@@ -56,9 +56,7 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
     let mut backend = RustBackend::default();
-    let mut input = std::io::stdin().lock();
-    let mut output = std::io::stdout().lock();
-    match serve(&mut backend, &mut input, &mut output) {
+    match serve_stdio(&mut backend) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             // Standard error, because standard output is the protocol: a
@@ -168,7 +166,7 @@ impl Backend for RustBackend {
 }
 
 /// The analysis library's version, which is the compiler's version here.
-const RA_VERSION: &str = "0.0.344";
+const RA_VERSION: &str = env!("CODEHELION_RUST_ANALYZER_VERSION");
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
@@ -194,6 +192,32 @@ mod tests {
             end_byte: 8,
             start_line: 1,
         })
+    }
+
+    /// The version advertised is the one the dependency lock resolved, not a
+    /// number somebody typed.
+    #[test]
+    fn the_advertised_engine_version_is_the_one_the_lock_resolves() {
+        let lock =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"))
+                .expect("the workspace lock file is readable");
+        let resolved = lock
+            .split("[[package]]")
+            .find(|package| package.contains("name = \"ra_ap_hir\"\n"))
+            .and_then(|package| {
+                package
+                    .lines()
+                    .find_map(|line| line.strip_prefix("version = "))
+            })
+            .map(|version| version.trim_matches('"'))
+            .expect("the lock resolves ra_ap_hir");
+
+        assert_eq!(RA_VERSION, resolved);
+        let identity = RustBackend::default().identity();
+        assert_eq!(
+            identity.toolchains,
+            vec![format!("rust-analyzer {resolved}")]
+        );
     }
 
     /// The narrowing this helper's replies go through, including the kinds of

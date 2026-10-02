@@ -97,11 +97,19 @@ pub fn resolve_in_directory(directory: Option<&Path>, path: &Path) -> PathBuf {
     directory.map_or_else(|| path.to_path_buf(), |directory| directory.join(path))
 }
 
-/// Split a recorded command line into the words a shell would have passed.
+/// Split a recorded command line into words the way a compilation database
+/// tokenizes its `command` strings.
 ///
-/// Quoting and backslash escaping only. A database that writes its commands as
-/// one string has already lost whatever the shell would have done with them,
-/// and guessing at expansion here would invent arguments no compiler was given.
+/// Quoting and backslash escaping only. Outside single quotes a backslash makes
+/// the next character literal and is dropped, inside double quotes as well as
+/// outside any quotation, so `"C:\dir"` is `C:dir`; a POSIX shell would keep
+/// that backslash. Inside single quotes a backslash is an ordinary character.
+/// This follows the Clang tooling, so a command means here what it means to the
+/// tools that read the same database.
+///
+/// A database that writes its commands as one string has already lost whatever
+/// a shell would have done with them, and guessing at expansion here would
+/// invent arguments no compiler was given.
 ///
 /// Words are separated by ASCII spacing, which is what a shell separates them
 /// by. A space that is only a space to Unicode is left in the word: a compiler
@@ -123,9 +131,9 @@ pub fn split_command(command: &str) -> Vec<String> {
             continue;
         }
         match (character, quote) {
-            // A backslash hides the next character where a shell lets it:
-            // outside quotation and within double quotes. Within single quotes
-            // it is a character like any other.
+            // A backslash hides the next character outside quotation and
+            // within double quotes, as the compilation-database tokenizer does.
+            // Within single quotes it is a character like any other.
             ('\\', None | Some('"')) => escaped = true,
             ('"' | '\'', None) => {
                 quote = Some(character);
@@ -151,6 +159,18 @@ pub fn split_command(command: &str) -> Vec<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The contract is the compilation database's, which differs from a POSIX
+    /// shell inside double quotes.
+    #[test]
+    fn a_backslash_hides_the_next_character_except_within_single_quotes() {
+        assert_eq!(
+            split_command(r#"cc "a\nb" "C:\dir""#),
+            ["cc", "anb", "C:dir"]
+        );
+        assert_eq!(split_command(r#"cc "say \"hi\"""#), ["cc", r#"say "hi""#]);
+        assert_eq!(split_command(r"cc 'a\nb' a\ b"), ["cc", r"a\nb", "a b"]);
+    }
 
     #[test]
     fn a_command_written_as_one_line_is_split_the_way_a_shell_would() {

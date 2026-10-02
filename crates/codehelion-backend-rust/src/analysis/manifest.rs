@@ -58,8 +58,40 @@ pub(super) fn workspace_manifest(manifest: &Path) -> PathBuf {
 }
 
 fn declares_workspace(manifest: &Path) -> bool {
-    std::fs::read_to_string(manifest)
-        .is_ok_and(|text| text.lines().any(|line| line.trim() == "[workspace]"))
+    std::fs::read_to_string(manifest).is_ok_and(|text| declares_workspace_table(&text))
+}
+
+/// Whether a manifest's text opens a `workspace` table.
+///
+/// Read by header rather than parsed, as the build-script reading is: a manifest
+/// too malformed to load is still one that says what it says. TOML spells one
+/// header with spaces inside the brackets, quotes around the name and a comment
+/// after it, and a dotted header such as `[workspace.dependencies]` or a
+/// top-level `workspace = { .. }` key opens the same table.
+fn declares_workspace_table(manifest: &str) -> bool {
+    let mut in_a_table = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            in_a_table = true;
+            // `[[name]]` is an array of tables, which a workspace is not.
+            if header.starts_with('[') {
+                continue;
+            }
+            let name = header.split(']').next().unwrap_or_default();
+            let first = name.split('.').next().unwrap_or_default();
+            if first.trim().trim_matches(['"', '\'']) == "workspace" {
+                return true;
+            }
+        } else if !in_a_table {
+            let key = line.split('=').next().unwrap_or_default();
+            if line.contains('=') && key.split('.').next().unwrap_or_default().trim() == "workspace"
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Whether the package at `manifest` builds something before it compiles.
@@ -290,11 +322,76 @@ fn names_a_program(path: &[String]) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{Declared, declared_build_script, has_build_script, program_naming_key};
+    use super::{
+        Declared, declared_build_script, declares_workspace_table, has_build_script,
+        program_naming_key, workspace_manifest,
+    };
 
     fn package(body: &str) -> String {
         format!("[package]\nname = \"p\"\nversion = \"0.1.0\"\n{body}")
+    }
+
+    #[test]
+    fn a_workspace_table_is_recognised_under_every_spelling_of_its_header() {
+        for header in [
+            "[workspace]",
+            "  [workspace]  ",
+            "[workspace] # the members follow",
+            "[ workspace ]",
+            "[\"workspace\"]",
+            "[workspace.dependencies]",
+        ] {
+            assert!(
+                declares_workspace_table(&format!("{header}\nmembers = [\"a\"]\n")),
+                "{header}"
+            );
+        }
+        assert!(declares_workspace_table(
+            "workspace = { members = [\"a\"] }\n"
+        ));
+        assert!(declares_workspace_table(
+            "[package]\nname = \"p\"\n\n[workspace]\n"
+        ));
+    }
+
+    #[test]
+    fn something_that_only_mentions_a_workspace_declares_none() {
+        for text in [
+            "[package]\nname = \"p\"\nworkspace = \"..\"\n",
+            "[[workspace]]\nname = \"x\"\n",
+            "[package.metadata.workspace]\nkey = 1\n",
+            "# [workspace]\n[package]\nname = \"p\"\n",
+            "[workspaces]\n",
+        ] {
+            assert!(!declares_workspace_table(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_nearest_ancestor_that_declares_a_workspace_is_the_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let member = root.path().join("crates/member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[ workspace ] # members\nmembers = [\"crates/member\"]\n",
+        )
+        .unwrap();
+        std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"member\"\n").unwrap();
+
+        assert_eq!(
+            workspace_manifest(&member.join("Cargo.toml")),
+            root.path().join("Cargo.toml")
+        );
+
+        let alone = tempfile::tempdir().unwrap();
+        std::fs::write(alone.path().join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+        assert_eq!(
+            workspace_manifest(&alone.path().join("Cargo.toml")),
+            alone.path().join("Cargo.toml")
+        );
     }
 
     #[test]

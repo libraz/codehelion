@@ -16,6 +16,9 @@
 //! to break the rules this enforces.
 
 use std::io::{Read, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, channel};
 
 use crate::ir::{CompilerIr, Unavailability};
 use crate::protocol::{
@@ -139,6 +142,113 @@ pub fn serve<B: Backend, R: Read, W: Write>(
     }
 }
 
+/// Serve on standard input and output, ending any work in flight when the
+/// client goes away.
+///
+/// A client that dies without asking for a shutdown closes the pipe, and a
+/// helper that is busy reads the end of the stream only when its request is
+/// done. Until then the compilers and build scripts it started keep running
+/// for a run nobody is waiting on, so this ends the helper's own process group
+/// the moment the stream closes mid-request.
+///
+/// # Errors
+///
+/// As [`serve`].
+pub fn serve_stdio<B: Backend>(backend: &mut B) -> Result<(), FrameError> {
+    let mut input = GuardedInput::new(std::io::stdin(), terminate_own_group);
+    let mut output = std::io::stdout().lock();
+    serve(backend, &mut input, &mut output)
+}
+
+/// End the process group this process leads, itself included.
+///
+/// A process that leads no group of its own shares one with whatever started
+/// it, which is not this process's to end, so it is left alone.
+#[cfg(unix)]
+fn terminate_own_group() {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::{Pid, getpgrp, getpid};
+
+    if getpgrp() == getpid() {
+        let _ = kill(Pid::from_raw(-getpid().as_raw()), Signal::SIGKILL);
+    }
+}
+
+/// Without process groups there is no group to end.
+#[cfg(not(unix))]
+const fn terminate_own_group() {}
+
+/// A reader that notices the stream closing while nobody is waiting on it.
+///
+/// A thread reads ahead so the closing is seen even while the serving thread
+/// is inside a backend. When the stream ends while the serving thread is
+/// waiting for the next frame, that is the ordinary end of a conversation and
+/// is passed on as end of input; when it ends in the middle of a request,
+/// `on_orphaned` runs.
+struct GuardedInput {
+    chunks: Receiver<std::io::Result<Vec<u8>>>,
+    pending: Vec<u8>,
+    taken: usize,
+    waiting: Arc<AtomicBool>,
+}
+
+impl GuardedInput {
+    fn new<R, F>(mut source: R, on_orphaned: F) -> Self
+    where
+        R: Read + Send + 'static,
+        F: FnOnce() + Send + 'static,
+    {
+        let (sender, chunks) = channel();
+        let waiting = Arc::new(AtomicBool::new(false));
+        let watching = Arc::clone(&waiting);
+        std::thread::spawn(move || {
+            let mut buffer = vec![0_u8; 64 * 1024];
+            loop {
+                let chunk = match source.read(&mut buffer) {
+                    Ok(0) => Ok(Vec::new()),
+                    Ok(count) => Ok(buffer.get(..count).unwrap_or_default().to_vec()),
+                    Err(error) => Err(error),
+                };
+                if matches!(&chunk, Ok(bytes) if !bytes.is_empty()) {
+                    if sender.send(chunk).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                if !watching.load(Ordering::SeqCst) {
+                    on_orphaned();
+                }
+                let _ = sender.send(chunk);
+                return;
+            }
+        });
+        Self {
+            chunks,
+            pending: Vec::new(),
+            taken: 0,
+            waiting,
+        }
+    }
+}
+
+impl Read for GuardedInput {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.taken >= self.pending.len() {
+            self.waiting.store(true, Ordering::SeqCst);
+            let next = self.chunks.recv();
+            self.waiting.store(false, Ordering::SeqCst);
+            // A reader thread that has gone is a stream that has ended.
+            self.pending = next.unwrap_or_else(|_| Ok(Vec::new()))?;
+            self.taken = 0;
+        }
+        let available = self.pending.get(self.taken..).unwrap_or_default();
+        let count = available.len().min(buf.len());
+        buf[..count].copy_from_slice(&available[..count]);
+        self.taken += count;
+        Ok(count)
+    }
+}
+
 fn answer<B: Backend>(backend: &mut B, request: &Request) -> ResponseBody {
     // Answered before the revision is checked, and it is the only message that
     // is: a handshake is how two peers find out what they can say to each
@@ -188,6 +298,7 @@ mod tests {
     use super::*;
     use crate::ir::{CompilerIr, UnitRef};
     use crate::protocol::{Capability, ClientIdentity, MAX_FRAME_BYTES, read_frame};
+    use std::time::Duration;
 
     struct Fixed {
         answer: Answer,
@@ -323,6 +434,70 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// A stream that closes while a request is being worked on is a client that
+    /// is gone, and what the request started has to be ended.
+    #[test]
+    fn a_stream_that_closes_during_a_request_ends_the_work_in_flight() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let (orphaned, signalled) = channel();
+        let mut input = GuardedInput::new(reader, move || orphaned.send(()).unwrap());
+        writer.write_all(b"x").unwrap();
+        let mut byte = [0_u8; 1];
+        assert_eq!(input.read(&mut byte).unwrap(), 1);
+
+        // The serving thread is now inside a backend, not reading.
+        drop(writer);
+
+        signalled
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the closed stream was noticed");
+    }
+
+    /// The end of a conversation, seen while waiting for the next frame, is not
+    /// an orphaning: the helper is about to stop on its own.
+    #[test]
+    fn a_stream_that_closes_between_requests_is_an_ordinary_end_of_input() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let (orphaned, signalled) = channel();
+        let mut input = GuardedInput::new(reader, move || orphaned.send(()).unwrap());
+        let waiting = Arc::clone(&input.waiting);
+        let serving = std::thread::spawn(move || {
+            let mut byte = [0_u8; 1];
+            input.read(&mut byte).unwrap()
+        });
+        while !waiting.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+
+        drop(writer);
+
+        assert_eq!(serving.join().unwrap(), 0);
+        assert!(signalled.try_recv().is_err(), "an idle helper was ended");
+    }
+
+    #[test]
+    fn frames_read_through_the_guard_are_the_frames_written() {
+        let mut bytes = Vec::new();
+        write_frame(
+            &mut bytes,
+            &Request {
+                protocol_version: PROTOCOL_VERSION,
+                id: 9,
+                body: RequestBody::Shutdown,
+            },
+        )
+        .unwrap();
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer.write_all(&bytes).unwrap();
+        drop(writer);
+        let mut input = GuardedInput::new(reader, || {});
+
+        let request: Request = read_frame(&mut input).unwrap().unwrap();
+
+        assert_eq!(request.id, 9);
+        assert!(read_frame::<_, Request>(&mut input).unwrap().is_none());
     }
 
     fn conversation(requests: &[RequestBody]) -> (Vec<Response>, Fixed) {

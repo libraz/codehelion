@@ -122,7 +122,7 @@ fn a_proc_macro_invocation_is_recorded_as_unexpanded() {
     let skipped = ir
         .unexpanded_macros
         .iter()
-        .filter(|macro_| macro_.reason == UnexpandedMacroReason::Unresolved)
+        .filter(|macro_| macro_.reason == UnexpandedMacroReason::RequiresExecution)
         .collect::<Vec<_>>();
     assert_eq!(skipped.len(), 2, "{:#?}", ir.unexpanded_macros);
     let source = std::fs::read_to_string(

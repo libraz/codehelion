@@ -18,7 +18,7 @@
 //! configure step is a program the project ships. A tree with no database is a
 //! tree this helper cannot answer about, which it says rather than fixes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
 
 use codehelion_helper::CompileCommandSelector;
@@ -415,6 +415,10 @@ pub(crate) struct Database {
     pub(crate) root: PathBuf,
     /// One entry per translation unit, in the order the database lists them.
     pub(crate) entries: Vec<Entry>,
+    /// Positions in `entries` by the way this project spells each file.
+    by_spelling: HashMap<PathBuf, Vec<usize>>,
+    /// Positions in `entries` by where each file is.
+    by_file: HashMap<PathBuf, Vec<usize>>,
 }
 
 /// Where a search for a compilation database ended.
@@ -450,28 +454,32 @@ pub(crate) struct Databases {
 impl Databases {
     /// The database governing `path`, found by walking up from it.
     ///
-    /// `None` when there is none, which is a tree this helper has nothing to
-    /// say about rather than a failure: a project that is entirely Rust has no
-    /// compilation database and is not missing one.
-    pub(crate) fn nearest(&mut self, path: &Path) -> Option<&Database> {
-        let start = if path.is_dir() { path } else { path.parent()? };
-        let location = self.locate(start)?;
-        let read = self
-            .read
+    /// `Ok(None)` when there is none, which is a tree this helper has nothing
+    /// to say about rather than a failure: a project that is entirely Rust has
+    /// no compilation database and is not missing one.
+    ///
+    /// `Err` carries why a database that is there could not be read. That is
+    /// not the same silence as a project with no database: one is fixed by
+    /// writing a database and the other by repairing the one that is there, so
+    /// the caller says it for every unit that asks and refuses to describe the
+    /// tree.
+    pub(crate) fn nearest(&mut self, path: &Path) -> Result<Option<&Database>, &str> {
+        let Some(start) = (if path.is_dir() {
+            Some(path)
+        } else {
+            path.parent()
+        }) else {
+            return Ok(None);
+        };
+        let Some(location) = self.locate(start) else {
+            return Ok(None);
+        };
+        self.read
             .entry(location)
-            .or_insert_with_key(|location| Database::read(&location.file, &location.root));
-        match read {
-            Ok(database) => Some(database),
-            // Why it could not be read is said rather than folded into the
-            // same silence as a project that has no database at all: one of
-            // those is fixed by writing a database and the other by repairing
-            // the one that is there. It is said for every unit that asks,
-            // because each of them is refused for this reason.
-            Err(why) => {
-                crate::refused(why);
-                None
-            }
-        }
+            .or_insert_with_key(|location| Database::read(&location.file, &location.root))
+            .as_ref()
+            .map(Some)
+            .map_err(String::as_str)
     }
 
     /// Where the search from `start` ends, walking up only the first time.
@@ -513,14 +521,40 @@ impl Database {
             .map_err(|error| format!("reading {}: {error}", path.display()))?;
         let raw: Vec<RecordedCommand> = serde_json::from_str(&text)
             .map_err(|error| format!("parsing {}: {error}", path.display()))?;
-        Ok(Self {
+        Ok(Self::new(
             // Resolved for the same reason the entries are: the root is what
             // every answer is spelled against, and one spelled against a root
             // the caller reached another way is a set of relative paths that
             // point somewhere else.
-            root: canonical(root),
-            entries: raw.iter().filter_map(Recorded::entry).collect(),
-        })
+            canonical(root),
+            raw.iter().filter_map(Recorded::entry).collect(),
+        ))
+    }
+
+    /// A database of `entries`, indexed so that finding one costs the entries
+    /// that name the same file rather than every entry there is.
+    pub(crate) fn new(root: PathBuf, entries: Vec<Entry>) -> Self {
+        let mut by_spelling: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+        let mut by_file: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+        for (position, entry) in entries.iter().enumerate() {
+            by_spelling
+                .entry(PathBuf::from(codehelion_helper::ir::spell(
+                    Some(&root),
+                    &entry.file,
+                )))
+                .or_default()
+                .push(position);
+            by_file
+                .entry(entry.file.clone())
+                .or_default()
+                .push(position);
+        }
+        Self {
+            root,
+            entries,
+            by_spelling,
+            by_file,
+        }
     }
 
     /// The entry for the translation unit named `unit`.
@@ -543,12 +577,22 @@ impl Database {
     ) -> Option<&Entry> {
         let named = Path::new(unit);
         let absolute = canonical(named);
-        self.entries.iter().find(|entry| {
-            selector.is_none_or(|wanted| entry.selector.names_the_same_entry(wanted))
-                && (Path::new(&codehelion_helper::ir::spell(Some(&self.root), &entry.file))
-                    == named
-                    || entry.file == absolute)
-        })
+        // The entries that name this file either way, in database order: the
+        // first one the selector accepts is the one a full scan would reach.
+        let mut named_by_either: Vec<usize> = self
+            .by_spelling
+            .get(named)
+            .into_iter()
+            .chain(self.by_file.get(&absolute))
+            .flatten()
+            .copied()
+            .collect();
+        named_by_either.sort_unstable();
+        named_by_either.dedup();
+        named_by_either
+            .into_iter()
+            .filter_map(|position| self.entries.get(position))
+            .find(|entry| selector.is_none_or(|wanted| entry.selector.names_the_same_entry(wanted)))
     }
 
     /// Every macro the database defines anywhere, sorted and without repeats.

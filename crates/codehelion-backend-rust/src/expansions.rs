@@ -25,7 +25,7 @@ use std::path::Path;
 use codehelion_helper::ir::{
     Anchor, ResolvedExpression, SourceRange, UnexpandedMacro, UnexpandedMacroReason,
 };
-use ra_ap_hir::{Adt, HasSource, Macro, ModuleDef, Semantics};
+use ra_ap_hir::{Adt, HasSource, Macro, ModuleDef, PathResolution, Semantics};
 use ra_ap_ide_db::RootDatabase;
 use ra_ap_syntax::{AstNode, ast};
 
@@ -129,20 +129,9 @@ pub(crate) fn collect(loaded: &Loaded, file: &Path, types: &mut TypeTable) -> Co
             });
         }
     }
-    // Derive macros are attributes rather than `MacroCall` syntax nodes. With
-    // the procedural-macro server disabled rust-analyzer cannot resolve their
-    // defining crate, but their source attribute is still an exact statement
-    // that the helper did not expand. Record it as unresolved rather than
-    // pretending the generated methods never existed.
-    for attribute in source.syntax().descendants().filter_map(ast::Attr::cast) {
-        let text = attribute.syntax().text().to_string();
-        if text.trim_start().starts_with("#[derive") {
-            found.unexpanded.push(UnexpandedMacro {
-                invocation: source_range(loaded, file_id, attribute.syntax().text_range()),
-                reason: UnexpandedMacroReason::Unresolved,
-            });
-        }
-    }
+    found
+        .unexpanded
+        .extend(unexpanded_attributes(loaded, &sema, file_id, &source));
     found.unexpanded.sort_by_key(|macro_| {
         (
             macro_.invocation.start_byte,
@@ -155,6 +144,90 @@ pub(crate) fn collect(loaded: &Loaded, file: &Path, types: &mut TypeTable) -> Co
         .dedup_by(|left, right| left.invocation == right.invocation && left.reason == right.reason);
     found
 }
+
+/// Attribute and derive macros, which are attributes rather than `MacroCall`
+/// syntax nodes. The helper consumes neither expansion, so each is recorded. An
+/// attribute nested in `cfg_attr` is one invocation of its own.
+fn unexpanded_attributes(
+    loaded: &Loaded,
+    sema: &Semantics<'_, RootDatabase>,
+    file_id: ra_ap_vfs::FileId,
+    source: &ast::SourceFile,
+) -> Vec<UnexpandedMacro> {
+    let mut unexpanded = Vec::new();
+    for attribute in source.syntax().descendants().filter_map(ast::Attr::cast) {
+        let direct = attribute.meta();
+        for meta in attribute.skip_cfg_attrs() {
+            let Some(reason) = attribute_macro_reason(sema, &meta) else {
+                continue;
+            };
+            let range = if direct.as_ref() == Some(&meta) {
+                attribute.syntax().text_range()
+            } else {
+                meta.syntax().text_range()
+            };
+            unexpanded.push(UnexpandedMacro {
+                invocation: source_range(loaded, file_id, range),
+                reason,
+            });
+        }
+    }
+    unexpanded
+}
+
+/// Why an attribute left a macro unexpanded, or `None` when it is no macro.
+///
+/// Whatever resolves to a procedural macro needs that crate run to be expanded,
+/// whatever syntax invoked it. A macro the engine knows but this helper does
+/// not consume is only unavailable, and a path that names no macro at all is
+/// unresolved. An attribute that is not a macro — a builtin such as `inline`,
+/// a derive helper, a tool attribute — is not an invocation.
+fn attribute_macro_reason(
+    sema: &Semantics<'_, RootDatabase>,
+    meta: &ast::Meta,
+) -> Option<UnexpandedMacroReason> {
+    let path = meta.path()?;
+    let is_derive = path
+        .as_single_name_ref()
+        .is_some_and(|name| name.text() == "derive");
+    if is_derive {
+        let Some(derived) = sema.resolve_derive_macro(meta) else {
+            return Some(UnexpandedMacroReason::Unresolved);
+        };
+        return Some(
+            if derived
+                .iter()
+                .flatten()
+                .any(|macro_| macro_.is_proc_macro())
+            {
+                UnexpandedMacroReason::RequiresExecution
+            } else if derived.iter().any(Option::is_none) {
+                UnexpandedMacroReason::Unresolved
+            } else {
+                UnexpandedMacroReason::ExpansionUnavailable
+            },
+        );
+    }
+    match sema.resolve_path(&path) {
+        Some(PathResolution::Def(ModuleDef::Macro(macro_))) => Some(if macro_.is_proc_macro() {
+            UnexpandedMacroReason::RequiresExecution
+        } else {
+            UnexpandedMacroReason::ExpansionUnavailable
+        }),
+        Some(_) => None,
+        // A single unresolved name is as likely a builtin or tool attribute the
+        // engine does not model as a macro that is missing; a longer path is
+        // not, apart from the tools that own a namespace.
+        None => {
+            let first = path.first_segment()?.to_string();
+            (path.segments().count() > 1 && !TOOL_NAMESPACES.contains(&first.as_str()))
+                .then_some(UnexpandedMacroReason::Unresolved)
+        }
+    }
+}
+
+/// Attribute namespaces owned by tools rather than by macros.
+const TOOL_NAMESPACES: [&str; 4] = ["rustfmt", "clippy", "rust_analyzer", "miri"];
 
 /// Where the macro itself was written.
 ///

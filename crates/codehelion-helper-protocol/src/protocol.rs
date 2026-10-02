@@ -27,8 +27,8 @@ use crate::ir::{CompilerIr, Unavailability, UnitRef};
 
 /// The only protocol revision this build speaks.
 ///
-/// The product has not been released, so clients and helpers use the complete
-/// current protocol directly.
+/// A change to the wire format that an older peer cannot read bumps this
+/// number, and a peer that receives another revision refuses it by name.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Largest payload a single frame may declare.
