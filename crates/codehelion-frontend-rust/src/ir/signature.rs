@@ -15,6 +15,7 @@ use super::emit::{
     compact_element_with_generics, compact_node_with_generics, push_signature_chunk,
     push_signature_token,
 };
+use super::is_trivia;
 use super::map_token_kind;
 
 /// The tokens of an `impl` header: everything the node covers before its body.
@@ -29,7 +30,7 @@ pub(super) fn impl_header(cst: &SyntaxNode) -> Vec<(TokenKind, String)> {
         .map(|body| body.text_range().start());
     cst.descendants_with_tokens()
         .filter_map(ra_ap_syntax::NodeOrToken::into_token)
-        .filter(|token| !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT))
+        .filter(|token| !is_trivia(token.kind()))
         .take_while(|token| body_start.is_none_or(|start| token.text_range().start() < start))
         .map(|token| (map_token_kind(token.kind()), token.text().to_owned()))
         .collect()
@@ -101,9 +102,7 @@ pub(super) fn rust_signature(node: &SyntaxNode) -> Option<Signature> {
             },
             ra_ap_syntax::NodeOrToken::Token(token) => {
                 let text = token.text();
-                if !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT)
-                    && !matches!(text, "fn" | ";")
-                {
+                if !is_trivia(token.kind()) && !matches!(text, "fn" | ";") {
                     push_signature_token(&mut qualifiers, text);
                 }
             }
@@ -327,9 +326,7 @@ fn rust_parameter_has_self_pattern(parameter: &SyntaxNode) -> bool {
             let tokens: Vec<String> = pattern
                 .descendants_with_tokens()
                 .filter_map(ra_ap_syntax::NodeOrToken::into_token)
-                .filter(|token| {
-                    !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT)
-                })
+                .filter(|token| !is_trivia(token.kind()))
                 .map(|token| token.text().to_owned())
                 .collect();
             tokens == ["self"] || tokens == ["mut", "self"]

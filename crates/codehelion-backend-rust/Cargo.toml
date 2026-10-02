@@ -14,13 +14,13 @@ codehelion-helper = { version = "0.6.0", path = "../codehelion-helper" }
 # server, on a stable toolchain, and resolved by cargo like any other
 # dependency — which is what a version bump costs here, instead of a nightly
 # pin and an adapter per compiler release.
-ra_ap_hir = "0.0.350"
-ra_ap_ide_db = "0.0.350"
-ra_ap_load-cargo = "0.0.350"
-ra_ap_project_model = "0.0.350"
-ra_ap_syntax = "0.0.350"
-ra_ap_toolchain = "0.0.350"
-ra_ap_vfs = "0.0.350"
+ra_ap_hir = "0.0.356"
+ra_ap_ide_db = "0.0.356"
+ra_ap_load-cargo = "0.0.356"
+ra_ap_project_model = "0.0.356"
+ra_ap_syntax = "0.0.356"
+ra_ap_toolchain = "0.0.356"
+ra_ap_vfs = "0.0.356"
 tempfile = "3"
 
 [dev-dependencies]

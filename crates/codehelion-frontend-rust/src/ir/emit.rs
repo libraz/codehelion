@@ -7,6 +7,7 @@
 
 use ra_ap_syntax::{SyntaxKind, SyntaxNode};
 
+use super::is_trivia;
 use super::signature::GenericBinding;
 
 pub(super) fn compact_node_with_generics(
@@ -22,7 +23,7 @@ pub(super) fn compact_node_with_generics(
                 .parent_ancestors()
                 .any(|ancestor| ancestor.kind() == SyntaxKind::ATTR)
         })
-        .filter(|token| !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT))
+        .filter(|token| !is_trivia(token.kind()))
     {
         if let Some(binding) = rust_generic_binding_for_token(&token, generic_bindings) {
             push_signature_generic(&mut out, binding);
@@ -72,12 +73,7 @@ fn rust_is_associated_type_label(token: &ra_ap_syntax::SyntaxToken) -> bool {
     let first = associated
         .descendants_with_tokens()
         .filter_map(ra_ap_syntax::NodeOrToken::into_token)
-        .find(|candidate| {
-            !matches!(
-                candidate.kind(),
-                SyntaxKind::WHITESPACE | SyntaxKind::COMMENT
-            )
-        });
+        .find(|candidate| !is_trivia(candidate.kind()));
     first.is_some_and(|first| first.text_range() == token.text_range())
 }
 
@@ -93,7 +89,7 @@ fn rust_is_field_expr_member(token: &ra_ap_syntax::SyntaxToken) -> bool {
     let mut previous = token.prev_token();
     while previous
         .as_ref()
-        .is_some_and(|token| matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT))
+        .is_some_and(|token| is_trivia(token.kind()))
     {
         previous = previous.and_then(|token| token.prev_token());
     }

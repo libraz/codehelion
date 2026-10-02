@@ -15,7 +15,7 @@ description = "Reads a local git history into the commit records the codehelion 
 # alternative instead. What is enabled is the smallest set that reads commits,
 # diffs two trees, and reports a working-tree status: no credential handling
 # and none of the network clients, which a fully local tool has no use for.
-gix = { version = "0.87", default-features = false, features = ["sha1", "basic", "status", "parallel", "pack-cache-lru-dynamic"] }
+gix = { version = "0.88", default-features = false, features = ["sha1", "basic", "status", "parallel", "pack-cache-lru-dynamic"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 

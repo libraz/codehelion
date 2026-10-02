@@ -233,7 +233,7 @@ impl<'s> IrBuilder<'s> {
                 continue;
             };
             let kind = token.kind();
-            if matches!(kind, SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
+            if is_trivia(kind) {
                 continue;
             }
             let range = token.text_range();
@@ -357,11 +357,33 @@ impl<'s> IrBuilder<'s> {
     }
 }
 
-/// The byte range a CST node covers.
+/// Whether a CST element carries no code: whitespace and comments, doc
+/// comments included, which the parser wraps in a node of their own.
+const fn is_trivia(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::WHITESPACE
+            | SyntaxKind::COMMENT
+            | SyntaxKind::DOC_COMMENT
+            | SyntaxKind::OUTER_DOC_COMMENT
+            | SyntaxKind::INNER_DOC_COMMENT
+    )
+}
+
+/// The byte range a CST node covers, from its first token that is not
+/// trivia.
+///
+/// The parser attaches the comments leading an item, doc comments included,
+/// to the item's node. A unit starts at its own first token, as the Fast
+/// frontend's does, so a doc comment does not widen the lines it reports.
 fn byte_range(node: &SyntaxNode) -> ByteRange {
     let range = node.text_range();
+    let start = node
+        .children_with_tokens()
+        .find(|element| !is_trivia(element.kind()))
+        .map_or_else(|| range.start(), |element| element.text_range().start());
     ByteRange {
-        start: usize::from(range.start()),
+        start: usize::from(start),
         end: usize::from(range.end()),
     }
 }
@@ -565,6 +587,33 @@ trait T {
                 (Shape::Method, Some("on_impl".to_owned())),
                 (Shape::Method, Some("on_trait".to_owned())),
             ]
+        );
+    }
+
+    #[test]
+    fn an_item_starts_at_its_attributes_not_at_its_doc_comment() {
+        let source = "\
+impl S {
+    /// Documented.
+    ///
+    /// More.
+    #[inline]
+    fn documented(&self) {}
+}
+";
+        let file = parse(source);
+        let mut starts = Vec::new();
+        file.walk(&mut |node| {
+            if node.shape == Shape::Method {
+                starts.push(node.range.start);
+            }
+        });
+        assert_eq!(starts, vec![source.find("#[inline]").unwrap()]);
+        assert!(
+            file.tokens
+                .iter()
+                .all(|token| !token.text.starts_with("//")),
+            "a doc comment is not a code token"
         );
     }
 

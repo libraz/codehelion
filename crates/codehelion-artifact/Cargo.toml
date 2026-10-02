@@ -31,7 +31,7 @@ pdb = { version = "0.8", optional = true }
 rustc-demangle = "0.1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-wasmparser = { version = "0.258", optional = true }
+wasmparser = { version = "0.260", optional = true }
 
 [dev-dependencies]
 flate2 = "1"
