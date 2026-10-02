@@ -24,7 +24,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags};
 
@@ -40,6 +40,9 @@ const SNAPSHOT_SIDECARS: &[&str] = &["-wal", "-journal"];
 
 /// Time one private validation connection waits for a writer to finish.
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often a database that looks orphaned is looked at again.
+const ORPHAN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 // Databases validated by copying them, so that a test can hold the in-place
 // path to its promise that a healthy database is never copied to be read.
@@ -130,19 +133,31 @@ fn validate_private_copy(path: &Path) -> Result<(), StoreError> {
 /// Reject a zero-length or missing main file when `SQLite` sidecars are left
 /// behind.  A zero-length database without sidecars is still a valid fresh
 /// target and is initialized by the normal open path.
+///
+/// A process creating the database looks the same while its first
+/// transaction is open, so the state has to persist for as long as a writer
+/// is waited for before it counts as orphaned.
 pub(super) fn reject_orphaned_sidecars(path: &Path) -> Result<(), StoreError> {
-    let main_is_empty = fs::metadata(path).map_or(true, |metadata| metadata.len() == 0);
-    if !main_is_empty {
-        return Ok(());
-    }
+    reject_orphaned_sidecars_after(path, SQLITE_BUSY_TIMEOUT)
+}
 
-    let has_sidecar = sidecar_paths(path)
-        .iter()
-        .any(|sidecar| fs::metadata(sidecar).is_ok());
-    if has_sidecar {
-        return Err(StoreError::OrphanedDatabaseSidecar);
+fn reject_orphaned_sidecars_after(path: &Path, wait: Duration) -> Result<(), StoreError> {
+    let started = Instant::now();
+    while looks_orphaned(path) {
+        if started.elapsed() >= wait {
+            return Err(StoreError::OrphanedDatabaseSidecar);
+        }
+        std::thread::sleep(ORPHAN_POLL_INTERVAL);
     }
     Ok(())
+}
+
+fn looks_orphaned(path: &Path) -> bool {
+    let main_is_empty = fs::metadata(path).map_or(true, |metadata| metadata.len() == 0);
+    main_is_empty
+        && sidecar_paths(path)
+            .iter()
+            .any(|sidecar| fs::metadata(sidecar).is_ok())
 }
 
 /// Construct a sidecar path without assuming that the database path is UTF-8.
@@ -271,6 +286,40 @@ mod tests {
                  SELECT hex(randomblob(256)) FROM many;",
             )
             .expect("the rows are written");
+    }
+
+    #[test]
+    fn sidecars_beside_an_empty_database_are_refused_once_they_persist() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.db");
+        File::create(&path).unwrap();
+        File::create(sidecar_path(&path, "-wal")).unwrap();
+
+        assert!(matches!(
+            reject_orphaned_sidecars_after(&path, Duration::from_millis(50)),
+            Err(StoreError::OrphanedDatabaseSidecar)
+        ));
+    }
+
+    #[test]
+    fn sidecars_of_a_database_still_being_created_are_waited_for() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.db");
+        File::create(&path).unwrap();
+        let journal = sidecar_path(&path, "-journal");
+        File::create(&journal).unwrap();
+
+        let creator = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                fs::write(&path, b"committed").unwrap();
+                fs::remove_file(&journal).unwrap();
+            })
+        };
+        reject_orphaned_sidecars_after(&path, Duration::from_secs(5))
+            .expect("the creator finishes within the wait");
+        creator.join().unwrap();
     }
 
     #[test]
