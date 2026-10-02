@@ -233,11 +233,7 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
     // decision for the whole run rather than a per-file guess. An explicit
     // policy is the answer where there is one; detection only fills the gap.
     let loaded = read_candidates(walked.candidates, config.max_file_bytes, &mut skipped);
-    let header_language = match config.header_policy {
-        HeaderPolicy::C => Language::C,
-        HeaderPolicy::Cpp => Language::Cpp,
-        HeaderPolicy::Detect => header_evidence.unwrap_or_else(|| headers_read_alone(&loaded)),
-    };
+    let header_language = header_vote(config.header_policy, header_evidence, &loaded);
     let layout = CargoLayout::from_manifests(&manifests);
     let compile_commands_path = config.compile_commands.as_ref().map_or_else(
         || select_compile_commands(&root, compile_candidates),
@@ -370,6 +366,32 @@ fn select_compile_commands(root: &Path, mut candidates: Vec<PathBuf>) -> Option<
 fn compile_commands_depth(root: &Path, path: &Path) -> usize {
     path.strip_prefix(root)
         .map_or(usize::MAX, |relative| relative.components().count())
+}
+
+/// The one decision on how bare `.h` headers are read, and so the header
+/// language recorded in the build variant.
+///
+/// It is a function of the bare headers actually read: with none, nothing was
+/// read differently, so the answer is the constant [`Language::C`] whatever the
+/// policy or the other C and C++ files, and a Rust-only tree keeps one variant
+/// when a C++ file is added. With some, an explicit policy answers, then the
+/// tree's evidence, then [`headers_read_alone`].
+fn header_vote(
+    policy: HeaderPolicy,
+    evidence: Option<Language>,
+    loaded: &[(walk::Candidate, Vec<u8>)],
+) -> Language {
+    if !loaded
+        .iter()
+        .any(|(candidate, _)| candidate.classification.provisional)
+    {
+        return Language::C;
+    }
+    match policy {
+        HeaderPolicy::C => Language::C,
+        HeaderPolicy::Cpp => Language::Cpp,
+        HeaderPolicy::Detect => evidence.unwrap_or_else(|| headers_read_alone(loaded)),
+    }
 }
 
 /// Settle bare `.h` headers from the headers themselves, for a tree that has
@@ -1109,6 +1131,28 @@ mod tests {
         let report = discover(&root, &DiscoveryConfig::default()).unwrap();
         assert_eq!(report.header_language, Language::Cpp);
         assert_eq!(report.build_variant.headers, Some(Language::Cpp));
+    }
+
+    #[test]
+    fn adding_a_cpp_file_to_a_headerless_tree_keeps_the_build_variant() {
+        let (_guard, root) = tree_of(&["a.c"]);
+        let before = discover(&root, &DiscoveryConfig::default()).unwrap();
+        for name in ["b.cpp", "c.cpp"] {
+            fs::write(root.join(name), "int b(void){return 0;}\n").unwrap();
+        }
+        let after = discover(&root, &DiscoveryConfig::default()).unwrap();
+        assert_eq!(
+            before.build_variant.canonical(),
+            after.build_variant.canonical()
+        );
+        for policy in [HeaderPolicy::C, HeaderPolicy::Cpp, HeaderPolicy::Detect] {
+            let config = DiscoveryConfig {
+                header_policy: policy,
+                ..DiscoveryConfig::default()
+            };
+            let report = discover(&root, &config).unwrap();
+            assert_eq!(report.header_language, Language::C, "{policy:?}");
+        }
     }
 
     #[test]

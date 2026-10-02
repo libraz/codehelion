@@ -678,3 +678,65 @@ fn two_groups_over_one_stretch_cannot_remove_each_other() {
 
     assert_eq!(contained_groups(&groups, &spans), vec![false, false]);
 }
+
+/// The groups as keys only: medoid key, then member keys, in output order.
+fn keyed(set: &GroupingSet, units: &[GroupingUnit]) -> Vec<(u8, Vec<u8>)> {
+    set.groups
+        .iter()
+        .map(|g| {
+            (
+                units[g.canonical].key[0],
+                g.members.iter().map(|&m| units[m].key[0]).collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn grouping_does_not_depend_on_the_order_units_were_discovered_in() {
+    // Similarities whose float sums are order-sensitive, over a graph dense
+    // enough that the medoid is decided by near-equal totals.
+    let count = 9;
+    let pair_similarity = |a: usize, b: usize| {
+        let seed = (a * 7 + b * 13 + a * b) % 11;
+        let nudge = f64::from(u32::try_from(a + b).unwrap()) * 1e-12;
+        f64::from(u8::try_from(seed).unwrap()).mul_add(0.0371, 0.61) + nudge
+    };
+    for max_component in [64, 4] {
+        let config = GroupingConfig {
+            max_component,
+            ..GroupingConfig::default()
+        };
+        let base_units = units(count);
+        let mut base_edges = Vec::new();
+        for a in 0..count {
+            for b in (a + 1)..count {
+                base_edges.push(edge(a, b, pair_similarity(a, b)));
+            }
+        }
+        let expected = keyed(&group(&base_units, &base_edges, &config), &base_units);
+        assert!(!expected.is_empty());
+
+        for shift in 1..count {
+            // New index `i` holds the unit that was `(i * 4 + shift) % count`.
+            let placement: Vec<usize> = (0..count).map(|i| (i * 4 + shift) % count).collect();
+            let permuted_units: Vec<GroupingUnit> =
+                placement.iter().map(|&old| base_units[old]).collect();
+            let mut new_index = vec![0; count];
+            for (new, &old) in placement.iter().enumerate() {
+                new_index[old] = new;
+            }
+            let permuted_edges: Vec<SimilarityEdge> = base_edges
+                .iter()
+                .rev()
+                .map(|e| edge(new_index[e.a], new_index[e.b], e.similarity))
+                .collect();
+            let permuted = group(&permuted_units, &permuted_edges, &config);
+            assert_eq!(
+                keyed(&permuted, &permuted_units),
+                expected,
+                "max_component {max_component}, shift {shift}"
+            );
+        }
+    }
+}

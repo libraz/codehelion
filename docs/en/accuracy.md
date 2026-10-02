@@ -20,7 +20,7 @@ nothing else, so an unlabelled true copy would count against the detector.
 
 | corpus | Fast | Structural |
 |---|---|---|
-| rust | 0.7143 | 1.0000 |
+| rust | 0.8571 | 1.0000 |
 | c | 0.8333 | 1.0000 |
 | cpp | 0.8571 | 1.0000 |
 | cpp-common-signature | 1.0000 | 1.0000 |
@@ -60,7 +60,8 @@ the longer one, so it takes no place of its own in the order:
 | size | 1.0000 | 0.9400 | 0.8772 |
 
 Nothing false reaches the first ten either way, which is why the priority
-ordering and `--mode structural` are defaults rather than options.
+ordering is the default order. These figures are Structural mode's; the default
+mode is Fast (see [Analysis modes](analysis-modes.md)).
 
 ## Precision
 

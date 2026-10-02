@@ -27,20 +27,17 @@
 //!
 //! # Schema versioning
 //!
-//! [`IR_SCHEMA_VERSION`] is a fingerprint input, and fingerprints built from
-//! different IR schema versions are never considered equal. It stays at 1
-//! until a released version requires a compatibility boundary. The `v0.1.0`
-//! release has shipped, so a change that alters a comparison result must use a
-//! deliberate compatibility decision; this side-table addition does not alter
-//! the IR tree or any fingerprint input.
+//! [`IR_SCHEMA_VERSION`] is carried on every [`SyntaxIrFile`] so a consumer can
+//! tell which schema it holds. It is not an input to any fingerprint or run
+//! identity: the frontend version is, and a schema change that alters what a
+//! frontend emits moves that version.
 
 use core::fmt;
 
 use crate::discovery::Language;
 use crate::frontend::{Diagnostic, Lexeme, Token};
 
-/// Version of the Syntax IR schema, recorded per file and hashed into every
-/// structural fingerprint.
+/// Version of the Syntax IR schema, carried per file. Not a fingerprint input.
 pub const IR_SCHEMA_VERSION: u32 = 1;
 
 /// Domain and recipe version for syntax signatures.
@@ -424,7 +421,7 @@ pub struct SyntaxIrFile {
     /// Language the file was parsed as.
     pub language: Language,
     /// Version tag of the structural frontend that produced this IR; a
-    /// fingerprint input alongside [`IR_SCHEMA_VERSION`].
+    /// fingerprint input.
     pub frontend_version: &'static str,
     /// IR schema version this file conforms to.
     pub ir_schema_version: u32,

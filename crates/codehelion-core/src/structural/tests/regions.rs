@@ -511,3 +511,52 @@ fn no_two_folded_runs_share_a_fingerprint() {
     }
     assert_eq!(regions.len(), 2);
 }
+
+#[test]
+fn a_cover_lookup_reads_the_covers_not_every_earlier_occurrence() {
+    // Disjoint regions all starting before the query and none reaching it:
+    // a scan of earlier starts reads every one, the index reads none of them.
+    let count = 4_096;
+    let regions: Vec<StructuralRegion> = (0..count)
+        .map(|index| region(0, CloneClass::Type1, 4, &[(0, index * 10, index * 10 + 5)]))
+        .collect();
+    let mut index = crate::structural::regions::RegionCoverageIndex::new(&regions);
+    for (position, value) in regions.iter().enumerate() {
+        index.insert(position, value);
+    }
+
+    let mut visited = 0;
+    let far = occurrence(0, count * 10 + 100, count * 10 + 200);
+    assert!(index.covering(&far, &mut visited).is_empty());
+    assert!(visited <= 2, "nothing reaches the query: {visited}");
+
+    // One wide cover among them is found, at logarithmic cost.
+    let mut regions = regions;
+    regions.push(region(0, CloneClass::Type1, 4, &[(0, 7, 40_000)]));
+    let mut index = crate::structural::regions::RegionCoverageIndex::new(&regions);
+    for (position, value) in regions.iter().enumerate() {
+        index.insert(position, value);
+    }
+    let mut visited = 0;
+    let inner = occurrence(0, 20_000, 20_010);
+    assert_eq!(
+        index
+            .covering(&inner, &mut visited)
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![count]
+    );
+    assert!(visited < 100, "visited {visited} of {count} occurrences");
+}
+
+#[test]
+fn a_cover_lookup_ignores_occurrences_not_yet_inserted() {
+    let regions = vec![
+        region(0, CloneClass::Type1, 4, &[(0, 0, 100)]),
+        region(0, CloneClass::Type1, 4, &[(0, 0, 100)]),
+    ];
+    let mut index = crate::structural::regions::RegionCoverageIndex::new(&regions);
+    index.insert(1, &regions[1]);
+    let found = index.covering(&occurrence(0, 10, 20), &mut 0);
+    assert_eq!(found.into_iter().collect::<Vec<_>>(), vec![1]);
+}

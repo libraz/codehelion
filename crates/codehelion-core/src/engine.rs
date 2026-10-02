@@ -336,8 +336,9 @@ fn detect_inner(
 /// The fragment pass can connect two verbatim instances through a third,
 /// renamed instance even though it correctly leaves their direct exact pair
 /// to the raw pass. Once grouped, that produces one Type-1 group whose every
-/// member occupies the same or a containing/contained range as one member of
-/// the Type-2 group. Retaining both would count the shared instances twice.
+/// member lies inside, or equals, a member of the Type-2 group. Retaining both
+/// would count the shared instances twice. A Type-1 member that merely
+/// contains a smaller renamed member extends past it, so that group stays.
 fn drop_subsumed_type1_groups(groups: &mut Vec<CloneGroup>) -> usize {
     subsume_type1_groups(groups).dropped
 }
@@ -380,11 +381,11 @@ fn subsume_type1_groups(groups: &mut Vec<CloneGroup>) -> Subsumption {
     }
 }
 
-/// Whether one member range accounts for another: same file, and one range
-/// contains the other in either direction.
+/// Whether a renamed-group member range accounts for an exact-group member:
+/// it contains or equals it, so no verbatim extent is lost by dropping the
+/// exact group.
 const fn ranges_subsume(candidate_start: usize, candidate_end: usize, member: &Instance) -> bool {
-    (candidate_start <= member.token_start && member.token_end <= candidate_end)
-        || (member.token_start <= candidate_start && candidate_end <= member.token_end)
+    candidate_start <= member.token_start && member.token_end <= candidate_end
 }
 
 /// One renamed-group member, indexed by the file it sits in.
@@ -489,9 +490,9 @@ impl Type2MemberIndex {
         };
         let mut found = BTreeSet::new();
 
-        // Members starting at or before this one can only account for it by
-        // containing it; the running maximum ends the walk as soon as no
-        // earlier member reaches far enough.
+        // Only a member starting at or before this one can contain it; the
+        // running maximum ends the walk as soon as no earlier member reaches
+        // far enough.
         let mut position = file
             .entries
             .partition_point(|entry| entry.start <= member.token_start);
@@ -505,21 +506,6 @@ impl Type2MemberIndex {
             }
             position -= 1;
             let entry = file.entries[position];
-            *comparisons += 1;
-            if ranges_subsume(entry.start, entry.end, member) {
-                found.insert(entry.group);
-            }
-        }
-
-        // Members starting inside this one account for it when they also end
-        // inside it. The scan stops at the member's own end.
-        let from = file
-            .entries
-            .partition_point(|entry| entry.start < member.token_start);
-        for entry in file.entries[from..]
-            .iter()
-            .take_while(|entry| entry.start <= member.token_end)
-        {
             *comparisons += 1;
             if ranges_subsume(entry.start, entry.end, member) {
                 found.insert(entry.group);
@@ -752,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn a_type2_group_absorbs_its_exact_type1_subset() {
+    fn a_whole_function_exact_group_survives_a_renamed_fragment_of_it() {
         let first = quick(FN_A);
         let second = quick(FN_A);
         let renamed = quick(FN_A_RENAMED);
@@ -776,10 +762,21 @@ mod tests {
 
         let report = detect(&files, &EngineConfig::default());
 
-        assert_eq!(report.groups.len(), 1, "groups: {:#?}", report.groups);
-        assert_eq!(report.groups[0].clone_type, CloneClass::Type2);
-        assert_eq!(report.groups[0].members.len(), 3);
-        assert_eq!(report.stats.subsumed_groups, 1);
+        let exact: Vec<_> = report
+            .groups
+            .iter()
+            .filter(|group| group.clone_type == CloneClass::Type1)
+            .collect();
+        assert_eq!(exact.len(), 1, "groups: {:#?}", report.groups);
+        assert_eq!(exact[0].members.len(), 2);
+        assert!(
+            exact[0]
+                .members
+                .iter()
+                .all(|member| (member.token_start, member.token_end) == (0, first.len())),
+            "the verbatim extent is the whole function"
+        );
+        assert_eq!(report.stats.subsumed_groups, 0);
     }
 
     /// Whether one group states an occurrence pair another group already
@@ -890,8 +887,8 @@ mod tests {
     }
 
     /// Groups shaped like the ones consolidation produces: renamed groups,
-    /// the exact groups they account for (in both containment directions),
-    /// and exact groups only partly accounted for.
+    /// the exact groups they account for, and exact groups that are only
+    /// partly accounted for or that extend past a renamed member.
     fn subsumption_corpus(blocks: usize) -> Vec<CloneGroup> {
         let mut groups = Vec::new();
         let mut key = 0;
@@ -927,8 +924,8 @@ mod tests {
                     (other, start + 70, start + 90),
                 ],
             );
-            // Every member contains a renamed member instead: also accounted
-            // for, since containment counts in either direction.
+            // Every member contains a renamed member instead: retained, since
+            // the verbatim extent beyond the renamed member would be lost.
             push(
                 &mut groups,
                 CloneClass::Type1,
@@ -952,10 +949,8 @@ mod tests {
                         outer.members.iter().any(|candidate| {
                             comparisons += 1;
                             candidate.file == member.file
-                                && ((candidate.token_start <= member.token_start
-                                    && member.token_end <= candidate.token_end)
-                                    || (member.token_start <= candidate.token_start
-                                        && candidate.token_end <= member.token_end))
+                                && candidate.token_start <= member.token_start
+                                && member.token_end <= candidate.token_end
                         })
                     })
             });
@@ -986,9 +981,20 @@ mod tests {
         let oracle_result = oracle_subsume_type1_groups(&mut oracle);
 
         assert_eq!(indexed_result.dropped, oracle_result.dropped);
-        assert_eq!(indexed_result.dropped, 500, "two of four groups per block");
+        assert_eq!(indexed_result.dropped, 250, "one of four groups per block");
         assert_eq!(retained_keys(&indexed), retained_keys(&oracle));
-        assert_eq!(indexed.len(), 500);
+        assert_eq!(indexed.len(), 750);
+    }
+
+    #[test]
+    fn a_wider_exact_group_survives_a_renamed_fragment_inside_it() {
+        let mut groups = vec![
+            synthetic_group(0, CloneClass::Type2, &[(0, 10, 30), (1, 10, 30)]),
+            synthetic_group(1, CloneClass::Type1, &[(0, 0, 100), (1, 0, 100)]),
+            synthetic_group(2, CloneClass::Type1, &[(0, 10, 30), (1, 10, 30)]),
+        ];
+        assert_eq!(subsume_type1_groups(&mut groups).dropped, 1);
+        assert_eq!(retained_keys(&groups), vec![0, 1]);
     }
 
     #[test]

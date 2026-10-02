@@ -116,7 +116,7 @@ const CORPORA: &[Expected] = &[
             refuted: 0,
             forward_confirmed: 1,
             forward_refuted: 0,
-            unjudged: 19,
+            unjudged: 20,
             conflicting: 0,
         },
     },
@@ -163,7 +163,7 @@ const CORPORA: &[Expected] = &[
             // most of what goes unruled here is that: byte-identical copies
             // nobody has ruled on, among them a pair of writes closing off a
             // rendered string and a pair of pointer decodes.
-            unjudged: 82,
+            unjudged: 84,
             conflicting: 0,
         },
     },
@@ -175,15 +175,15 @@ const CORPORA: &[Expected] = &[
         forward_confirmed: 15,
         forward_refuted: 13,
         fast: Verdicts {
-            confirmed: 12,
+            confirmed: 15,
             refuted: 9,
-            forward_confirmed: 12,
+            forward_confirmed: 15,
             forward_refuted: 9,
             // The same account as cjson: verbatim runs the fragment pass
             // reports, here a clamp on the acceleration parameter written out
             // in three places and a forwarding return written twice. All are
             // byte-identical and none carries a verdict.
-            unjudged: 221,
+            unjudged: 235,
             conflicting: 0,
         },
     },
@@ -211,7 +211,7 @@ const CORPORA: &[Expected] = &[
             // them only survive because a fragment-pass match is no longer
             // discarded on the assumption that the raw pass would report the
             // same span: when the raw pass runs out of allowance, it does not.
-            unjudged: 553,
+            unjudged: 558,
             conflicting: 1,
         },
     },
@@ -228,14 +228,14 @@ const CORPORA: &[Expected] = &[
         forward_confirmed: 21,
         forward_refuted: 14,
         fast: Verdicts {
-            confirmed: 23,
+            confirmed: 25,
             refuted: 1,
-            forward_confirmed: 23,
+            forward_confirmed: 25,
             forward_refuted: 1,
             // Two more verbatim runs, one repeated three times inside a single
             // socket client header and one shared by two console sinks.
             // Neither carries a verdict.
-            unjudged: 162,
+            unjudged: 163,
             conflicting: 0,
         },
     },

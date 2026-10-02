@@ -28,7 +28,8 @@
 //! whose ends were never compared. Singletons are not clone groups. The whole
 //! module is a pure, deterministic function of its inputs: components,
 //! candidate medoids under sampling, and every output collection are ordered by
-//! stable key, never by discovery order.
+//! stable key, never by discovery order. Units sharing a key are told apart by
+//! index only, since nothing else distinguishes them here.
 //!
 //! # What this asks of the stages above
 //!
@@ -69,11 +70,9 @@ use crate::verify::Confidence;
 /// code still hashes the same — but it can move a group's, because a group
 /// fingerprint folds in the set of contents its members hold.
 ///
-/// It stays at v1 until the first release tag, along with every other version
-/// this build records. A second number would only describe an audit database
-/// somebody still has on disk, and re-running the scan is the whole of the
-/// recovery; changing medoid selection, the cohesion floors or the refinement
-/// order therefore leaves this constant alone.
+/// Bump it when grouping the same input can come out differently, so a stored
+/// result can be told apart from one made under the current rules. A change
+/// that leaves every group as it was does not need one.
 pub const GROUPING_VERSION: &str = "grouping-v1";
 
 /// Tuning for grouping. Similarities are in `[0, 1]`; the defaults are
@@ -689,7 +688,8 @@ const fn union(parent: &mut [usize], a: usize, b: usize) {
 
 /// The pieces of a component that refinement runs on: the component itself
 /// when it fits under [`GroupingConfig::max_component`], otherwise key-ordered
-/// pieces. An equal-key equivalence class is atomic: splitting it would create
+/// pieces. Either way the members come back ordered by key, so every sum and
+/// tie-break downstream reads them in an order unit indices cannot move. An equal-key equivalence class is atomic: splitting it would create
 /// separate groups with the same content-derived identity.
 fn refinable_pieces(
     component: &[usize],
@@ -698,12 +698,12 @@ fn refinable_pieces(
     stats: &mut GroupingStats,
 ) -> Vec<Vec<usize>> {
     let limit = piece_limit(config);
+    let mut ordered = component.to_vec();
+    ordered.sort_by_key(|&member| (units[member].key, member));
     if component.len() <= limit {
-        return vec![component.to_vec()];
+        return vec![ordered];
     }
     stats.oversized_components += 1;
-    let mut ordered = component.to_vec();
-    ordered.sort_by_key(|&member| units[member].key);
     let mut pieces = Vec::new();
     let mut current = Vec::new();
     let mut class_start = 0;
@@ -790,7 +790,7 @@ fn refine_component(
         // Regroup the ejected members; deterministic order for recursion. The
         // piece's table already holds their similarities, so a level costs no
         // rebuilding of what the level above already weighed.
-        rest.sort_by_key(|&m| units[m].key);
+        rest.sort_by_key(|&m| (units[m].key, m));
         refine_component(&rest, units, similarities, sim, config, groups, stats);
     }
 }
@@ -808,7 +808,7 @@ fn select_medoid(
     stats: &mut GroupingStats,
 ) -> usize {
     let mut candidates: Vec<usize> = component.to_vec();
-    candidates.sort_by_key(|&m| units[m].key);
+    candidates.sort_by_key(|&m| (units[m].key, m));
     if candidates.len() > config.sampling_threshold {
         candidates.dedup_by_key(|member| units[*member].key);
         let sample_size = config.sample_size.max(1).min(candidates.len());
@@ -975,7 +975,7 @@ fn build_group(
         return None;
     }
     let mut ordered_members: Vec<usize> = kept.iter().copied().filter(|&m| m != medoid).collect();
-    ordered_members.sort_by_key(|&m| units[m].key);
+    ordered_members.sort_by_key(|&m| (units[m].key, m));
     ordered_members.insert(0, medoid);
 
     let medoid_similarities: Vec<f64> = ordered_members

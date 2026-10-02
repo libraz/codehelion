@@ -84,13 +84,13 @@ const CORPORA: &[Expected] = &[
         measurements: [
             Measurements {
                 mode: "fast",
-                by_type: [Some(0.75), Some(1.0), Some(0.0)],
-                precision: 2.0 / 3.0,
-                findings_per_kloc: 16.4835,
+                by_type: [Some(1.0), Some(1.0), Some(0.0)],
+                precision: 5.0 / 6.0,
+                findings_per_kloc: 32.9670,
                 false_positives_per_kloc: 5.4945,
-                recall: 5.0 / 7.0,
+                recall: 6.0 / 7.0,
                 non_clone_hits: 0,
-                shortfall: "Fast reports contiguous matching fragments, so it misses the duplicated-loop Type-1 pair and does not recover the gapped Type-3 pair",
+                shortfall: "Fast reports contiguous matching fragments, so it does not recover the gapped Type-3 pair",
             },
             Measurements {
                 mode: "structural",
@@ -116,8 +116,8 @@ const CORPORA: &[Expected] = &[
                 // label for: it recovers part of the gapped Type-3 pair, and
                 // the line overlap against that label falls under the
                 // coverage threshold, so it is charged as a false positive.
-                precision: 2.0 / 6.0,
-                findings_per_kloc: 44.4444,
+                precision: 3.0 / 6.0,
+                findings_per_kloc: 59.2593,
                 false_positives_per_kloc: 29.6296,
                 recall: 5.0 / 6.0,
                 non_clone_hits: 0,
@@ -144,12 +144,12 @@ const CORPORA: &[Expected] = &[
                 // As in the C corpus, the fragment pass reports the
                 // `sum_even` conditional shared verbatim by seed, type1 and
                 // type3, which no label covers.
-                precision: 3.0 / 7.0,
+                precision: 5.0 / 9.0,
                 // The signature mirror adds fifteen source lines without
                 // entering the primary finding stream, so the counts stay
                 // fixed while the per-kLOC denominators move from 170 to
                 // 185 lines.
-                findings_per_kloc: 37.8378,
+                findings_per_kloc: 48.6486,
                 false_positives_per_kloc: 21.6216,
                 recall: 6.0 / 7.0,
                 non_clone_hits: 0,
@@ -799,7 +799,7 @@ fn cpp_mirror_does_not_change_primary_sets_or_stability() {
             .unwrap_or_else(|error| panic!("copying {file}: {error}"));
     }
 
-    for (mode, expected_count) in [("fast", 7), ("structural", 4)] {
+    for (mode, expected_count) in [("fast", 9), ("structural", 4)] {
         let committed_report = scan(
             &committed,
             mode,

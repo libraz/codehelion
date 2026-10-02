@@ -42,7 +42,7 @@ use super::normalize::{NormToken, normalize_into};
 use super::segment::{self, AnchorId, SegmentId, anchored_unit};
 use super::{CloneClass, ClonePair, EngineConfig, EngineStats, InputFile, Instance};
 
-/// Remaining candidate-pair allowance shared by both passes.
+/// Remaining candidate-pair allowance for one pairing pass.
 pub(crate) struct PairBudget {
     remaining: usize,
     exhausted: bool,
@@ -143,6 +143,53 @@ fn instance(
     }
 }
 
+/// The runs already extended, by file pair and diagonal.
+///
+/// A verified seed lying inside a run on its own diagonal extends to that same
+/// run, so walking it again only repeats work: a run of `L` tokens is hit by
+/// about `L / winnow_window` seeds, and extending each would cost `L²`.
+#[derive(Default)]
+struct ExtendedRuns {
+    /// `(file_a, file_b, b_start - a_start)` to start-to-end token offsets in
+    /// file `a`. Runs on one diagonal are maximal and so disjoint.
+    by_diagonal: BTreeMap<(usize, usize, usize), BTreeMap<usize, usize>>,
+}
+
+impl ExtendedRuns {
+    /// Whether the `k`-token seed at these positions lies inside a run already
+    /// extended on its diagonal.
+    fn containing(
+        &self,
+        file_a: usize,
+        file_b: usize,
+        a_pos: usize,
+        b_pos: usize,
+        k: usize,
+    ) -> bool {
+        self.by_diagonal
+            .get(&(file_a, file_b, b_pos.wrapping_sub(a_pos)))
+            .and_then(|runs| runs.range(..=a_pos).next_back())
+            .is_some_and(|(_, &end)| a_pos + k <= end)
+    }
+
+    fn insert(&mut self, run: &Run) {
+        self.by_diagonal
+            .entry((
+                run.file_a,
+                run.file_b,
+                run.b_start.wrapping_sub(run.a_start),
+            ))
+            .or_default()
+            .insert(run.a_start, run.a_start + run.len);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`extend`] walked a seed on this thread.
+    static EXTENSIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Extend a verified seed to a maximal equal run within one segment per side.
 fn extend(
     a: &[Token],
@@ -153,6 +200,8 @@ fn extend(
     bi: usize,
     k: usize,
 ) -> (usize, usize, usize) {
+    #[cfg(test)]
+    EXTENSIONS.with(|count| count.set(count.get() + 1));
     let sa = seg_a[ai];
     let sb = seg_b[bi];
     let mut start_a = ai;
@@ -416,6 +465,7 @@ pub(crate) fn raw_pass(
         .sum::<usize>();
 
     let mut runs: Vec<Run> = Vec::new();
+    let mut extended = ExtendedRuns::default();
     'seeding: for &(_, _, postings) in &kept {
         if !budget.take_list(pairs_within(postings.len())) {
             break 'seeding;
@@ -441,17 +491,22 @@ pub(crate) fn raw_pass(
                 if !(0..k).all(|d| tokens_eq(&a[pa + d], &b[pb + d])) {
                     continue;
                 }
-                let (a_start, b_start, len) = extend(a, b, &segments[fa], &segments[fb], pa, pb, k);
-                if fa == fb && a_start + len > b_start {
-                    continue; // self-overlapping repetition
+                if extended.containing(fa, fb, pa, pb, k) {
+                    continue; // inside a run already extended
                 }
-                runs.push(Run {
+                let (a_start, b_start, len) = extend(a, b, &segments[fa], &segments[fb], pa, pb, k);
+                let run = Run {
                     file_a: fa,
                     file_b: fb,
                     a_start,
                     b_start,
                     len,
-                });
+                };
+                extended.insert(&run);
+                if fa == fb && a_start + len > b_start {
+                    continue; // self-overlapping repetition
+                }
+                runs.push(run);
             }
         }
     }
@@ -1084,6 +1139,44 @@ mod tests {
         assert!(
             cut.fragment_candidates < full.fragment_candidates,
             "the allowance must have stopped pairing partway: {cut:#?}"
+        );
+    }
+
+    #[test]
+    fn a_long_duplicated_run_is_extended_once_however_many_seeds_it_holds() {
+        let body = (0..400)
+            .map(|i| format!("call{i} ( ) ;"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let first = tokens_of(&format!("fn one ( ) {{ {body} }}"));
+        let second = tokens_of(&format!("fn two ( ) {{ {body} }}"));
+        let units_first = [function(0, first.len())];
+        let units_second = [function(0, second.len())];
+        let files = [
+            InputFile {
+                tokens: &first,
+                units: &units_first,
+            },
+            InputFile {
+                tokens: &second,
+                units: &units_second,
+            },
+        ];
+        let config = EngineConfig::default();
+        EXTENSIONS.with(|count| count.set(0));
+        let (raw, _, stats, _) = run_both_passes(&files, &config);
+
+        assert!(
+            stats.seed_candidates > 10,
+            "the run must hold many seeds: {}",
+            stats.seed_candidates
+        );
+        assert_eq!(EXTENSIONS.with(std::cell::Cell::get), 1);
+        assert_eq!(raw.len(), 1, "one maximal run: {raw:?}");
+        assert_eq!(
+            raw[0].a.token_end - raw[0].a.token_start,
+            first.len() - 2,
+            "everything after the differing name"
         );
     }
 

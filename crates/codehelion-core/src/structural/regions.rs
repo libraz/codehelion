@@ -470,7 +470,7 @@ pub(super) fn drop_subsumed(regions: &mut Vec<StructuralRegion>) -> usize {
     });
 
     let mut dropped = vec![false; regions.len()];
-    let mut coverage = RegionCoverageIndex::default();
+    let mut coverage = RegionCoverageIndex::new(regions);
     for &inner in &order {
         // Only wider runs, and among equals only those already settled, enter
         // the index. A pair of runs covering each other therefore cannot
@@ -496,32 +496,105 @@ pub(super) fn drop_subsumed(regions: &mut Vec<StructuralRegion>) -> usize {
 /// An occurrence index over the regions that survived the containment pass.
 ///
 /// Every outer region that can subsume an inner one must cover each of its
-/// occurrences. Querying the occurrence with the fewest indexed covers avoids
-/// the former scan over every earlier region; [`covers_run`] remains the
-/// authority for the complete multi-occurrence and clone-class check.
+/// occurrences. Querying the occurrence with the fewest indexed covers narrows
+/// the candidates before [`covers_run`], which remains the authority for the
+/// complete multi-occurrence and clone-class check. A cover of one occurrence
+/// is found without reading the earlier occurrences that cannot reach it: the
+/// work is the covers returned plus a logarithmic walk, not the number of
+/// regions in the file.
 #[derive(Default)]
-struct RegionCoverageIndex {
-    by_file: BTreeMap<usize, BTreeMap<usize, Vec<IndexedOccurrence>>>,
+pub(super) struct RegionCoverageIndex {
+    files: BTreeMap<usize, FileCovers>,
+    /// Where each region's occurrences sit in their file's table, by region.
+    slots: Vec<Vec<(usize, usize)>>,
 }
 
-#[derive(Clone, Copy)]
-struct IndexedOccurrence {
-    end: usize,
-    region: usize,
+/// The occurrences of one file in start order, with a max-end tree over the
+/// ones inserted so far (an occurrence not yet inserted reads as absent).
+#[derive(Default)]
+struct FileCovers {
+    starts: Vec<usize>,
+    regions: Vec<usize>,
+    /// Leaves padded to a power of two, each holding an inserted occurrence's
+    /// end plus one; `0` marks an absent one, which covers nothing.
+    tree: Vec<usize>,
+}
+
+impl FileCovers {
+    fn set(&mut self, slot: usize, end: usize) {
+        let mut node = self.tree.len() / 2 + slot;
+        self.tree[node] = end;
+        while node > 1 {
+            node /= 2;
+            self.tree[node] = self.tree[2 * node].max(self.tree[2 * node + 1]);
+        }
+    }
+
+    /// Collect the regions of inserted occurrences in `slots` ending at or
+    /// after `end`, counting the tree nodes visited.
+    fn collect(
+        &self,
+        node: usize,
+        span: (usize, usize),
+        limit: usize,
+        end: usize,
+        found: &mut BTreeSet<usize>,
+        visited: &mut usize,
+    ) {
+        *visited += 1;
+        if span.0 >= limit || self.tree[node] < end {
+            return;
+        }
+        if node >= self.tree.len() / 2 {
+            found.insert(self.regions[node - self.tree.len() / 2]);
+            return;
+        }
+        let middle = span.0 + (span.1 - span.0) / 2;
+        self.collect(2 * node, (span.0, middle), limit, end, found, visited);
+        self.collect(2 * node + 1, (middle, span.1), limit, end, found, visited);
+    }
 }
 
 impl RegionCoverageIndex {
-    fn insert(&mut self, region: usize, value: &StructuralRegion) {
-        for occurrence in &value.occurrences {
-            self.by_file
-                .entry(occurrence.file)
-                .or_default()
-                .entry(occurrence.range.start)
-                .or_default()
-                .push(IndexedOccurrence {
-                    end: occurrence.range.end,
+    /// An index able to hold any of `regions`, none inserted yet.
+    pub(super) fn new(regions: &[StructuralRegion]) -> Self {
+        let mut entries: BTreeMap<usize, Vec<(usize, usize, usize)>> = BTreeMap::new();
+        for (region, value) in regions.iter().enumerate() {
+            for (occurrence, placed) in value.occurrences.iter().enumerate() {
+                entries.entry(placed.file).or_default().push((
+                    placed.range.start,
                     region,
-                });
+                    occurrence,
+                ));
+            }
+        }
+        let mut slots: Vec<Vec<(usize, usize)>> = regions
+            .iter()
+            .map(|value| vec![(0, 0); value.occurrences.len()])
+            .collect();
+        let mut files = BTreeMap::new();
+        for (file, mut list) in entries {
+            list.sort_unstable();
+            for (slot, &(_, region, occurrence)) in list.iter().enumerate() {
+                slots[region][occurrence] = (file, slot);
+            }
+            files.insert(
+                file,
+                FileCovers {
+                    starts: list.iter().map(|&(start, ..)| start).collect(),
+                    regions: list.iter().map(|&(_, region, _)| region).collect(),
+                    tree: vec![0; 2 * list.len().next_power_of_two()],
+                },
+            );
+        }
+        Self { files, slots }
+    }
+
+    pub(super) fn insert(&mut self, region: usize, value: &StructuralRegion) {
+        for (&(file, slot), occurrence) in self.slots[region].iter().zip(&value.occurrences) {
+            if let Some(covers) = self.files.get_mut(&file) {
+                covers.set(slot, occurrence.range.end + 1);
+            }
         }
     }
 
@@ -529,7 +602,7 @@ impl RegionCoverageIndex {
     fn candidates(&self, value: &StructuralRegion) -> BTreeSet<usize> {
         let mut best: Option<BTreeSet<usize>> = None;
         for occurrence in &value.occurrences {
-            let candidates = self.covering(occurrence);
+            let candidates = self.covering(occurrence, &mut 0);
             if candidates.is_empty() {
                 return candidates;
             }
@@ -543,16 +616,28 @@ impl RegionCoverageIndex {
         best.unwrap_or_default()
     }
 
-    fn covering(&self, occurrence: &RegionOccurrence) -> BTreeSet<usize> {
-        let Some(starts) = self.by_file.get(&occurrence.file) else {
-            return BTreeSet::new();
-        };
-        starts
-            .range(..=occurrence.range.start)
-            .flat_map(|(_, covers)| covers)
-            .filter(|cover| occurrence.range.end <= cover.end)
-            .map(|cover| cover.region)
-            .collect()
+    /// Regions with an inserted occurrence that starts at or before, and ends
+    /// at or after, `occurrence`. `visited` counts the tree nodes read.
+    pub(super) fn covering(
+        &self,
+        occurrence: &RegionOccurrence,
+        visited: &mut usize,
+    ) -> BTreeSet<usize> {
+        let mut found = BTreeSet::new();
+        if let Some(covers) = self.files.get(&occurrence.file) {
+            let limit = covers
+                .starts
+                .partition_point(|&start| start <= occurrence.range.start);
+            covers.collect(
+                1,
+                (0, covers.tree.len() / 2),
+                limit,
+                occurrence.range.end + 1,
+                &mut found,
+                visited,
+            );
+        }
+        found
     }
 }
 
