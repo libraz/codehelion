@@ -23,7 +23,7 @@ jobs:
     name: small scan benchmark
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # This produces evidence only. Performance targets are deliberately not
       # CI gates, so a changed runner does not block unrelated correctness work.

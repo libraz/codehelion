@@ -19,7 +19,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Check tag matches the CLI version
         id: version
@@ -57,7 +57,7 @@ jobs:
             extension: .exe
             archive: zip
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Build helper executables
         run: cargo build --release -p codehelion-backend-rust -p codehelion-backend-clang
@@ -84,7 +84,7 @@ jobs:
           Copy-Item LICENSE $directory
           Copy-Item README.md $directory
           Compress-Archive -Path $directory -DestinationPath "$directory.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: helpers-${{ matrix.name }}
           path: codehelion-helpers-${{ needs.verify-tag.outputs.version }}-${{ matrix.name }}.${{ matrix.archive }}
@@ -127,7 +127,7 @@ jobs:
             archive: zip
             cross_linker: ''
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -166,7 +166,7 @@ jobs:
           Copy-Item LICENSE $directory
           Copy-Item README.md $directory
           Compress-Archive -Path $directory -DestinationPath "$directory.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cli-${{ matrix.name }}
           path: codehelion-${{ needs.verify-tag.outputs.version }}-${{ matrix.name }}.${{ matrix.archive }}
@@ -181,7 +181,7 @@ jobs:
       # Every artifact this run produced, with no pattern to narrow it: the
       # release carries both the CLI and the helpers, and a pattern that names
       # one of them drops the other from the release without failing.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -217,7 +217,7 @@ jobs:
       # that expires with the job, so no registry credential is stored here.
       id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Asked before publishing rather than discovered during it. A run that

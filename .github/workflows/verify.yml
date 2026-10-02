@@ -55,7 +55,7 @@ jobs:
       # The whole history, because the suite reads this repository's own: the
       # seam measurement is reproduced from pinned commits, and a shallow
       # checkout cannot reach them. The CI workflow's test job says the same.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -92,7 +92,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # The fixture programs are compiled in a scratch directory outside the
       # checkout, where rust-toolchain.toml does not apply. The target has to
       # be added to the toolchain this job pins, which is what the fixtures are
@@ -111,7 +111,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build and analyse real Mach-O and dSYM fixtures
@@ -122,7 +122,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build and analyse real PE/PDB fixtures
@@ -134,7 +134,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # The whole history, for the reason the test job above states.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -154,7 +154,7 @@ jobs:
       - name: Collect coverage
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           fail_ci_if_error: false

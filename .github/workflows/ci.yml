@@ -37,7 +37,7 @@ jobs:
     name: fmt + clippy + docs + boundaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -63,7 +63,7 @@ jobs:
       # co-changes and breaches over this repository's own commits, and a
       # shallow checkout would leave them measuring one commit and reporting
       # the emptiness as an answer.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       # `rust-toolchain.toml` names the components, `rust-src` among them.
@@ -103,7 +103,7 @@ jobs:
     name: Fast and Structural without compiler helpers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # Do not restore a target directory from another job. This package-only
       # build compiles the CLI and its library dependencies, never either
@@ -117,7 +117,7 @@ jobs:
     name: detection accuracy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The labelled cases record a commit, not the code it names: the sources
@@ -135,7 +135,7 @@ jobs:
     steps:
       # Reading co-change needs the commits it is computed over, so this job
       # is one of the two that checks the tree out in full.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -160,7 +160,7 @@ jobs:
     name: publishable crates build from their own package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Building a crate from its own package directory is the only thing that
@@ -175,7 +175,7 @@ jobs:
     name: minimum supported rust version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.98.0
       - uses: Swatinem/rust-cache@v2
       - name: Build
@@ -185,5 +185,5 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
