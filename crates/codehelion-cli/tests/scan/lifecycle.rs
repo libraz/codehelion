@@ -696,7 +696,9 @@ fn a_reused_run_is_the_latest_run_of_its_root() {
         "report renders the reused run"
     );
 
-    let root = codehelion_store::path_key(&dir.path().canonicalize().expect("canonical root"));
+    let root = codehelion_store::path_key(
+        &codehelion_core::paths::canonical(dir.path()).expect("canonical root"),
+    );
     let store = open_store(dir.path());
     assert_eq!(
         store
@@ -726,7 +728,9 @@ fn a_failed_seam_read_is_named_and_leaves_the_rest_of_the_report() {
     let second = scan_json_with(dir.path(), &["--no-reuse"]);
     let run_id = second["run"]["run_id"].as_i64().expect("recorded run");
     assert!(!second["summary"]["top_churn"].is_null(), "{second}");
-    let root = codehelion_store::path_key(&dir.path().canonicalize().expect("canonical root"));
+    let root = codehelion_store::path_key(
+        &codehelion_core::paths::canonical(dir.path()).expect("canonical root"),
+    );
     let mut store = open_store(dir.path());
     store
         .record_seam_run(&codehelion_store::seam::SeamRunRecord {

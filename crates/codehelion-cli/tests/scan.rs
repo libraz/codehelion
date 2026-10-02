@@ -284,7 +284,7 @@ fn one_pair() -> tempfile::TempDir {
 fn explain_group(root: &Path, group: &str) -> (String, serde_json::Value) {
     let text = cmd()
         .current_dir(root)
-        .args(["explain", group])
+        .args(["explain", group, "--decoration", "unicode"])
         .output()
         .expect("run explain");
     assert!(text.status.success(), "{text:?}");

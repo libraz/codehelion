@@ -595,7 +595,7 @@ fn printed_follow_up_commands_run_from_where_they_were_printed() {
         .current_dir(working.path())
         .arg("scan")
         .arg(tree.path())
-        .args(["--config", "cfg.toml"])
+        .args(["--config", "cfg.toml", "--decoration", "unicode"])
         .output()
         .expect("run scan");
     assert!(output.status.success(), "{output:?}");

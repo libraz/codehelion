@@ -220,7 +220,9 @@ fn a_partly_reused_invocation_is_read_back_whole() {
     assert_eq!(reported.len(), reports(&first).len());
 
     let store = Store::open(&root.join(".codehelion/audit.db")).expect("open audit database");
-    let key = codehelion_store::path_key(&root.canonicalize().expect("canonical root"));
+    let key = codehelion_store::path_key(
+        &codehelion_core::paths::canonical(&root).expect("canonical root"),
+    );
     let latest: Vec<i64> = store
         .latest_completed_invocation(&key)
         .expect("read the latest invocation")

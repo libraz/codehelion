@@ -944,7 +944,9 @@ fn seam_findings_cover_every_partition_of_the_mapped_scan() {
     cmd().args(["seam", "--path"]).arg(root).assert().success();
 
     let store = open_audit_store(root);
-    let key = codehelion_store::path_key(&root.canonicalize().expect("canonical root"));
+    let key = codehelion_store::path_key(
+        &codehelion_core::paths::canonical(root).expect("canonical root"),
+    );
     let recorded = store
         .latest_seam_run(&key)
         .expect("read the seam run")
