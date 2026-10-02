@@ -19,9 +19,14 @@ use super::{IrBuilder, PARSE_EDITION, STRUCTURAL_FRONTEND_VERSION};
 /// or assignment still open in the current group has been given back by the
 /// time one is reached. `for` is deliberately absent: `for<'a>` binders are
 /// part of the type grammar.
-const CHAIN_CLEARING_TOKENS: &[&str] = &[
-    ";", "=>", "let", "if", "while", "loop", "match", "return", "break", "continue",
-];
+const CHAIN_CLEARING_TOKENS: &[&str] =
+    &[";", "=>", "let", "if", "while", "loop", "match", "continue"];
+
+/// Keywords whose operand is an optional expression. Like a prefix operator
+/// each one makes the parser descend, and `return return return x` nests as
+/// deeply as it is long, so they end the generic and assignment nesting of the
+/// expression before them but leave the operator count standing.
+const OPERAND_KEYWORDS: &[&str] = &["return", "break", "yield"];
 
 /// Right-associative assignment operators. Each one makes the parser descend
 /// into the rest of the expression, so `x = y = z` nests as deeply as it is
@@ -57,6 +62,9 @@ struct NestingFrame {
     /// Operator nesting accumulated inside this group since the last token
     /// that ended an expression.
     operators: usize,
+    /// Function-type and closure return arrows opened inside this group and
+    /// not yet ended by the body, terminator or clause that follows the type.
+    arrows: usize,
 }
 
 /// Upper bound on the CST depth the recursive Rust parser would reach,
@@ -80,6 +88,11 @@ struct NestingDepth {
     chains: usize,
     /// Operator depth summed over every open frame.
     operators: usize,
+    /// Return-arrow depth summed over every open frame.
+    arrows: usize,
+    /// Whether the previous token was `else`, which makes the `if` after it a
+    /// nested expression of the one before.
+    after_else: bool,
 }
 
 impl NestingDepth {
@@ -89,16 +102,19 @@ impl NestingDepth {
                 closer: None,
                 chains: 0,
                 operators: 0,
+                arrows: 0,
             }],
             chains: 0,
             operators: 0,
+            arrows: 0,
+            after_else: false,
         }
     }
 
     /// The budget spent so far. The file's own frame is not nesting, so it is
     /// excluded from the group count.
     const fn depth(&self) -> usize {
-        self.frames.len() - 1 + self.chains + self.operators
+        self.frames.len() - 1 + self.chains + self.operators + self.arrows
     }
 
     /// Open `opened` levels of chain nesting in the innermost group.
@@ -135,10 +151,29 @@ impl NestingDepth {
         }
     }
 
+    /// Give back the innermost group's return arrows: the body, terminator or
+    /// `where` clause that follows a return type ends every type it nested.
+    fn clear_arrows(&mut self) {
+        if let Some(frame) = self.frames.last_mut() {
+            self.arrows -= frame.arrows;
+            frame.arrows = 0;
+        }
+    }
+
     /// Charge one token against the budget and report the depth it reaches.
     fn feed(&mut self, text: &str) -> usize {
+        let after_else = std::mem::replace(&mut self.after_else, text == "else");
         match text {
+            // `else if` recurses once per link, and the conditions and blocks
+            // between links must not give the count back.
+            "if" if after_else => {
+                self.close_chain(self.chains);
+                self.open_operators(1);
+            }
             "{" | "(" | "[" => {
+                if text == "{" {
+                    self.clear_arrows();
+                }
                 let closer = match text {
                     "{" => "}",
                     "(" => ")",
@@ -148,6 +183,7 @@ impl NestingDepth {
                     closer: Some(closer),
                     chains: 0,
                     operators: 0,
+                    arrows: 0,
                 });
             }
             "}" | ")" | "]" => {
@@ -159,6 +195,7 @@ impl NestingDepth {
                 {
                     self.chains -= frame.chains;
                     self.operators -= frame.operators;
+                    self.arrows -= frame.arrows;
                 }
             }
             // A closing run reaches the preflight glued into `>>` tokens, so
@@ -168,14 +205,27 @@ impl NestingDepth {
             ">" => self.close_chain(1),
             ">>" => self.close_chain(2),
             "," => self.clear_operators(),
+            "->" => {
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.arrows += 1;
+                    self.arrows += 1;
+                }
+            }
+            "where" => self.clear_arrows(),
             _ => {
                 if let Some(step) = operator_nesting(text) {
                     self.open_operators(step);
                 } else if ASSIGNMENT_TOKENS.contains(&text) {
                     self.open_chain(1);
+                } else if OPERAND_KEYWORDS.contains(&text) {
+                    self.close_chain(self.chains);
+                    self.open_operators(1);
                 } else if CHAIN_CLEARING_TOKENS.contains(&text) {
                     self.close_chain(self.chains);
                     self.clear_operators();
+                    if text == ";" {
+                        self.clear_arrows();
+                    }
                 }
             }
         }
@@ -443,6 +493,49 @@ mod tests {
         let source_len = source.len();
         let file = parse_on_bounded_stack(source);
         assert_bounded_depth_truncation(&file, source_len);
+    }
+
+    #[test]
+    fn long_operand_keyword_and_return_arrow_chains_are_truncated_instead_of_reaching_the_parser() {
+        let sources = [
+            format!("fn generated() {{ {}1 }}", "return ".repeat(5_000)),
+            format!(
+                "fn generated() {{ loop {{ {}1 }} }}",
+                "break ".repeat(5_000)
+            ),
+            format!("fn generated() {{ {}1 }}", "yield ".repeat(5_000)),
+            format!(
+                "fn generated() {{ if a {{}} {}{{}} }}",
+                "else if a {} ".repeat(20_000)
+            ),
+            format!("fn generated() {{ {}1 }}", "unsafe {".repeat(20_000)),
+            format!("fn generated() {{ {}x }}", "async move || ".repeat(20_000)),
+            format!("fn generated() {{ {}x }}", "&mut ".repeat(20_000)),
+            format!("fn generated() {{ {}x }}", "await.".repeat(20_000)),
+            format!("type F = {}u8;", "fn() -> ".repeat(20_000)),
+            format!("fn generated() -> {}u8 {{}}", "fn() -> ".repeat(20_000)),
+            format!(
+                "fn generated() {{ let f = {}1; }}",
+                "|| -> fn() -> u8 ".repeat(5_000)
+            ),
+        ];
+        for source in sources {
+            let source_len = source.len();
+            let file = parse_on_bounded_stack(source);
+            assert_bounded_depth_truncation(&file, source_len);
+        }
+    }
+
+    #[test]
+    fn many_ordinary_returns_and_signatures_do_not_accumulate_against_the_budget() {
+        let count = MAX_IR_DEPTH * 4;
+        let mut source = String::new();
+        for _ in 0..count {
+            source
+                .push_str("fn f(g: fn() -> u8) -> u8 { if true { return 1 } else { return 2 } }\n");
+        }
+        let file = parse_on_bounded_stack(source);
+        assert!(!file.depth_truncated, "flat code must not be truncated");
     }
 
     #[test]

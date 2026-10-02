@@ -29,6 +29,11 @@ const TYPE_POSITION_PUNCT: &[&str] = &["->", "&", "&&", "<", ",", "(", "[", ":",
 /// Keywords after which an item keyword names a type: `dyn Trait`, `as fn()`.
 const TYPE_POSITION_KEYWORDS: &[&str] = &["dyn", "as"];
 
+/// Keywords that qualify a type without naming it (`&mut impl T`,
+/// `*const fn()`, `unsafe fn(u8)`, `extern "C" fn()`). The token that decides
+/// whether an item keyword is in type position is the one before them.
+const TYPE_QUALIFIER_KEYWORDS: &[&str] = &["mut", "const", "unsafe", "extern"];
+
 /// Tokens that may immediately precede a closure's first `|`.
 const CLOSURE_PRECEDERS: &[&str] = &[
     "=", "(", "{", "[", ",", ";", "=>", "return", "&&", "||", "!", ":",
@@ -42,6 +47,10 @@ const CLOSURE_PARAM_PUNCT: &[&str] = &[",", ":", "&", "<", ">", "(", ")", "::", 
 /// from turning every item keyword into a full-file scan. A balanced group is
 /// one step, so a wide parameter list costs no more than a narrow one.
 const MAX_DECLARATION_LOOKAHEAD: usize = 256;
+
+/// Maximum tokens a walk back from a `>` may inspect to find the `for<` it
+/// closes. A binder lists lifetimes and a few bounds.
+const MAX_BINDER_LOOKBEHIND: usize = 64;
 
 /// Maximum tokens the walk from a macro definition's name to its template body
 /// may inspect. A macro definition header is a name and at most one parameter
@@ -304,7 +313,10 @@ fn enclosing_brace_of_fn(tokens: &[Token]) -> HashMap<usize, usize> {
 /// clone report without the name, and produce a unit that is a proper subset of
 /// the correctly anchored one.
 fn opens_item(tokens: &[Token], i: usize) -> bool {
-    let Some(previous) = i.checked_sub(1).map(|p| &tokens[p]) else {
+    let Some(previous) = i
+        .checked_sub(governing_offset(tokens, i) + 1)
+        .map(|p| &tokens[p])
+    else {
         return true;
     };
     match previous.kind {
@@ -312,6 +324,53 @@ fn opens_item(tokens: &[Token], i: usize) -> bool {
         TokenKind::Keyword => !TYPE_POSITION_KEYWORDS.contains(&previous.text.as_str()),
         _ => true,
     }
+}
+
+/// How many tokens before the item keyword at `i` are type qualifiers: `mut`,
+/// `const`, `unsafe`, `extern` with its ABI string, a lifetime, and a
+/// `for<..>` binder. The token before them governs the keyword.
+fn governing_offset(tokens: &[Token], i: usize) -> usize {
+    let mut at = i;
+    while let Some(previous) = at.checked_sub(1).map(|p| &tokens[p]) {
+        let text = previous.text.as_str();
+        match previous.kind {
+            TokenKind::Lifetime => at -= 1,
+            TokenKind::Literal(_) if at >= 2 && tokens[at - 2].text == "extern" => at -= 2,
+            TokenKind::Keyword if TYPE_QUALIFIER_KEYWORDS.contains(&text) => at -= 1,
+            TokenKind::Punctuation if matches!(text, ">" | ">>") => {
+                let Some(binder) = binder_start(tokens, at - 1) else {
+                    break;
+                };
+                at = binder;
+            }
+            _ => break,
+        }
+    }
+    i - at
+}
+
+/// The index of the `for` opening the `for<..>` binder whose closing `>` is at
+/// `close`, or `None` when the angle bracket closes something else.
+fn binder_start(tokens: &[Token], close: usize) -> Option<usize> {
+    let mut open = 0usize;
+    for index in (close.saturating_sub(MAX_BINDER_LOOKBEHIND)..=close).rev() {
+        let token = &tokens[index];
+        if token.kind != TokenKind::Punctuation {
+            continue;
+        }
+        match token.text.as_str() {
+            ">" => open += 1,
+            ">>" => open += 2,
+            "<" => open -= 1,
+            _ => continue,
+        }
+        if open == 0 {
+            return index
+                .checked_sub(1)
+                .filter(|&f| tokens[f].kind == TokenKind::Keyword && tokens[f].text == "for");
+        }
+    }
+    None
 }
 
 /// Whether the record keyword at `i` opens a record definition.
@@ -333,6 +392,9 @@ enum DeclarationBody {
     Block(usize),
     /// Index of the `;` that ended a declaration having no block body.
     Absent(usize),
+    /// A closing delimiter the declaration did not open came first, so the
+    /// walk has left the declaration the keyword belongs to.
+    Escaped,
     /// The lookahead budget ran out, or a group in the declaration never
     /// closed, before either was reached.
     Undecided,
@@ -370,6 +432,7 @@ fn declaration_body(
                     continue;
                 }
                 ";" if angle == 0 => return DeclarationBody::Absent(index),
+                ")" | "]" | "}" => return DeclarationBody::Escaped,
                 // The lexer glues a closing run, so one token can give back
                 // both of the levels it closes.
                 "<" => angle += 1,
@@ -416,6 +479,7 @@ fn item_unit(
             }
             (semicolon, semicolon)
         }
+        DeclarationBody::Escaped => return None,
         DeclarationBody::Undecided => return Some(Err(span_of(tokens, i, i))),
     };
     Some(Ok(Unit {
@@ -751,6 +815,82 @@ mod tests {
                 "an unnamed unit stole the anchor in {source}"
             );
         }
+    }
+
+    #[test]
+    fn a_qualified_opaque_type_does_not_anchor_the_function_body() {
+        for source in [
+            "fn show(w: &mut impl Write) -> Result<()> { fn helper() {} Ok(()) }",
+            "fn show<'a>(w: &'a impl Display) -> Result<()> { fn helper() {} Ok(()) }",
+            "fn show<'a>(w: &'a mut impl Display) -> Result<()> { fn helper() {} Ok(()) }",
+            "fn show() -> &'static mut impl Iterator<Item = u8> { fn helper() {} make() }",
+            "fn show(w: *const impl Display) -> Result<()> { fn helper() {} Ok(()) }",
+        ] {
+            let units = units_of(source);
+            assert!(
+                units.iter().all(|u| u.kind != UnitKind::Impl),
+                "a qualified opaque type became a unit in {source}"
+            );
+            assert_eq!(
+                named(&units, UnitKind::Function),
+                vec![Some("show"), Some("helper")]
+            );
+            assert!(units.iter().all(|u| u.kind != UnitKind::Method));
+        }
+    }
+
+    #[test]
+    fn a_qualified_function_pointer_type_does_not_anchor_a_unit() {
+        for source in [
+            "fn call(f: unsafe fn(u8)) { f(1) }",
+            "fn call(f: unsafe extern \"C\" fn(u8)) { f(1) }",
+            "fn call(f: extern \"C\" fn(u8)) { f(1) }",
+            "fn call(f: for<'a> fn(&'a u8)) { f(&1) }",
+            "fn call(f: for<'a> unsafe extern \"C\" fn(&'a u8)) { f(&1) }",
+            "fn call(f: *const fn()) { }",
+            "fn call(f: &mut fn()) { }",
+            "struct V { cb: unsafe extern \"C\" fn(u8), }\nfn call() { }",
+        ] {
+            let units = units_of(source);
+            assert!(
+                units.iter().all(|unit| unit.name.is_some()),
+                "an unnamed unit stole the anchor in {source}"
+            );
+            assert_eq!(
+                named(&units, UnitKind::Function),
+                vec![Some("call")],
+                "in {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_item_declarations_still_anchor_units() {
+        for (source, name) in [
+            ("pub const fn a() -> u8 { 1 }", "a"),
+            ("pub(crate) unsafe fn a() {}", "a"),
+            ("#[no_mangle] pub unsafe extern \"C\" fn a() {}", "a"),
+            ("extern \"C\" fn a() {}", "a"),
+            ("const unsafe fn a() {}", "a"),
+        ] {
+            assert_eq!(
+                named(&units_of(source), UnitKind::Function),
+                vec![Some(name)],
+                "in {source}"
+            );
+        }
+        let units = units_of("unsafe impl Send for Foo {} struct S; const fn b() {}");
+        assert_eq!(named(&units, UnitKind::Impl), vec![Some("Foo")]);
+    }
+
+    #[test]
+    fn a_declaration_walk_stops_at_a_closing_delimiter_it_did_not_open() {
+        let tokens = lex("fn x ) { }").0;
+        let pairs = delimiter_pairs(&tokens);
+        assert_eq!(
+            declaration_body(&tokens, &pairs, 0),
+            DeclarationBody::Escaped
+        );
     }
 
     #[test]

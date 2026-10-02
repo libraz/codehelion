@@ -43,9 +43,9 @@ use nesting::{depth_error_file, nesting_overflow};
 use signature::{impl_header, rust_signature};
 
 /// Version tag of this structural frontend, used as a fingerprint input. Bump
-/// it whenever a change alters the token stream or the IR tree for unchanged
-/// input.
-pub const STRUCTURAL_FRONTEND_VERSION: &str = "rust-ir-v1";
+/// it whenever a change, including a parser upgrade, alters the token stream or
+/// the IR tree for unchanged input.
+pub const STRUCTURAL_FRONTEND_VERSION: &str = "rust-ir-v2";
 
 /// Edition the parser assumes. Parsing is edition-tolerant enough for audit
 /// purposes; a wrong guess degrades to error ranges, never to a lost file.
@@ -126,8 +126,8 @@ enum Mapping {
 /// Decide how `node` maps onto the IR. This table is the granularity
 /// contract of the Rust structural frontend; changing it changes fingerprint
 /// input, which invalidates every result recorded under the old table. Such a
-/// change is settled by rescanning the recorded results, not by raising
-/// [`STRUCTURAL_FRONTEND_VERSION`], which stays at v1.
+/// change raises [`STRUCTURAL_FRONTEND_VERSION`], so results from different
+/// tables never share a fingerprint space.
 fn classify(node: &SyntaxNode) -> Mapping {
     match node.kind() {
         SyntaxKind::FN => Mapping::Emit(fn_shape(node)),
@@ -712,7 +712,7 @@ trait T {
     fn file_carries_language_and_versions() {
         let frontend = RustStructuralFrontend;
         assert_eq!(frontend.language(), Language::Rust);
-        assert_eq!(frontend.frontend_version(), "rust-ir-v1");
+        assert_eq!(frontend.frontend_version(), "rust-ir-v2");
 
         let file = parse("fn a() {}");
         assert_eq!(file.language, Language::Rust);
