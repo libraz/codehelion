@@ -9,7 +9,7 @@ baseline は、プロジェクトが受け入れた finding を明示的に残�
 ## 作る
 
 ```sh
-codehelion scan                       # ツリーを読む
+codehelion scan --mode structural     # ツリーを読む
 codehelion baseline create .          # 起点を記録する
 ```
 
@@ -20,18 +20,18 @@ baseline が指すのはグループ単位なので、出現箇所の ID を書�
 ## baseline に対して読む
 
 ```sh
-codehelion scan --baseline codehelion-baseline.json
+codehelion scan --mode structural --baseline codehelion-baseline.json
 ```
 
 既定は `suppress` モードです。baseline が凍結したグループは隠れ、残るのは baseline 以降に現れたものになります。`--fail-on-findings` と組み合わせると、これが CI のチェックに向いた形になります。誰も判断していない重複が現れたときにビルドが落ちます。
 
 ```sh
-codehelion scan --baseline codehelion-baseline.json --baseline-mode compare
+codehelion scan --mode structural --baseline codehelion-baseline.json --baseline-mode compare
 ```
 
 `compare` は何も隠しません。各グループを「baseline が凍結したもの」と「そうでないもの」に分けて報告し、消えたトークン量と現れたトークン量を並べて出します。この 2 つが揃っていないと、大きな重複 4 件を解消して小さな重複 20 件が現れた状態が退行に見えてしまいます。また重複の解消はその周辺のコードも書き換えるため、組み替えの結果として現れるグループは新しい ID を持ちます。直前までエントリがあった場所に立っているグループは、誰かが足した重複としてではなく、そこに立っているものとして報告されます。
 
-build variant または detector version が異なる場合は、古い baseline を引き継がず現行スキャンから作り直します。
+baseline を作るときと、それに対して読むときは、同じ `--mode` でスキャンしてください。build variant または detector version が異なる場合は、古い baseline を引き継がず現行スキャンから作り直します。
 
 ## baseline が要らない場合
 

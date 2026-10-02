@@ -57,7 +57,8 @@ duplication between class bodies.
 majority. Where a tree has none — a header-only library — it reads the headers
 themselves for something only C++ spells, and one of them saying so settles the
 run. The choice is part of the run's build variant, so results read one way are
-never compared with results read the other.
+never compared with results read the other. The choice is recorded only when a
+bare `.h` file was read; a run that read none records the constant C.
 
 ## Priority
 
@@ -137,8 +138,8 @@ Every ceiling that fires is accounted for in the report.
 # max-file-bytes = 2097152          # larger files are skipped and counted
 # parse-timeout-ms = 10000          # deterministic parse-work budget, not wall-clock time
 # helper-timeout-ms = 300000        # Semantic helper response deadline
-# posting-cap = 64                  # longest posting list that still enters pairing
-# pair-budget = 1000000             # candidate pairs per pairing pass
+# posting-cap = 64                  # longest posting list that still enters pairing (Fast 64, Structural 256)
+# pair-budget = 1000000             # candidate pairs per pairing pass (Fast 1000000, Structural 2000000)
 # near-miss-delta = 0.05            # diagnostic band below the Type-3 gate
 # near-miss-cap = 1000              # retained near misses per report
 # sibling-candidate-budget = 50000
@@ -148,7 +149,7 @@ Every ceiling that fires is accounted for in the report.
 # signature-sibling-per-group-cap = 8
 # signature-sibling-total-cap = 1000
 # signature-sibling-max-units-per-signature = 8
-# verification-budget = 1000000     # pairs sent to precise verification
+# verification-budget = 2000000     # pairs sent to precise verification
 # max-alignment-cells = 4000000     # dynamic-programming cells per alignment
 # max-component = 1024              # largest set of related units compared as one piece
 ```

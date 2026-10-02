@@ -55,7 +55,8 @@ command to run first on a repository that has neither.
 `seam` reports, for each ledger entry, how many asymmetric changes it has seen,
 how many of those became breaches, and when the most recent breach was.
 `--until <rev>` fixes the end of the range, which is what lets two generations'
-numbers be set beside each other.
+numbers be set beside each other. A tag, annotated or not, resolves to the
+commit it points at.
 
 `guard` compares one change against the ledger. By default it reads the working
 tree against `HEAD`; `--since <rev>` reads that revision to `HEAD` instead.
@@ -169,15 +170,18 @@ is what holds the guard's subject still while the history keeps growing.
 - A commit counts as a fix through its Conventional Commits prefix and nothing
   else. There is no natural-language search over the message.
 - A merge commit is followed through its first parent only.
-- Every output carries a digest of the settings it was computed under, and the
-  first and last commit of the range it read. Without those, a number that moved
-  cannot be told from a setting that moved.
+- The `seam` output, `--suggest` included, carries a digest of the settings it was
+  computed under and the first and last commit of the range it read; `history`
+  carries the range. Without those, a number that moved cannot be told from a
+  setting that moved.
 
 ## What the history has to be
 
-The repository has to have its history. A shallow clone cannot be read, which in
-CI means `actions/checkout` with `fetch-depth: 0` — the default depth of 1 leaves
-one commit visible.
+The repository should have its history. A shallow clone is read up to its depth,
+with a warning that the counts cover a history somebody else's depth setting cut.
+The boundary commit is left out, because what it changed cannot be read. In CI,
+`actions/checkout` with `fetch-depth: 0` reads the whole history; the default
+depth of 1 leaves no commit to count.
 
 Breaches need Conventional Commits. A repository whose messages carry no `fix:`
 prefix reports no breaches at all. Asymmetric changes are detected either way,

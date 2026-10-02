@@ -7,7 +7,8 @@
 The ranking value leads each heading because it is what the listing is in order
 on. `◆` marks the occurrence the group is measured against, which is the one to
 read first. The identifier that closes the heading is the shortest prefix
-`codehelion explain` accepts, so a group can be opened straight from the listing.
+`codehelion explain` accepts, so a group can be opened straight from the listing. A printed prefix is
+lengthened until it is unique within that report.
 
 A heading sometimes carries an annotation naming another group, as in
 `cabfd679 [narrower cut of baf4e127]`. That is a duplication which is a shorter
@@ -45,13 +46,18 @@ The asymmetric changes and the breaches are what `codehelion seam` measured, rea
 back rather than taken again: a report opens no commit. The `findings` count is
 the other side of it — duplication findings whose location falls inside the seam,
 taken from the newest completed scan of the same tree at the moment the seam run
-was recorded. A seam with no scan behind it carries no finding counts.
+was recorded. A seam with no scan behind it carries no finding counts. The count
+covers every partition of that scan. The seam block a report shows is the one
+mapped to that run, so a replay of an earlier run never shows a measurement taken
+after it. A seam with no asymmetric changes still shows its finding count.
 
 The `since` line names only what moved. Two identical evaluations produce no
 `since` line at all. A delta is reported only where the previous run under the
 same settings digest carried the same seam: a seam written into the ledger since
 then has no earlier generation, and subtracting against nothing would report the
-ledger's growth as movement in the code.
+ledger's growth as movement in the code. The findings delta is also left out when
+the two generations' scans differ in mode or build variants, because it would
+report the change of scan as movement.
 
 A count of zero is written as words — `no breaches`, `no asymmetric changes` —
 where its absence is the answer. A seam crossed repeatedly and never breached is
@@ -82,7 +88,7 @@ presents the partial answer as a complete one.
 running mode could not measure:
 
 ```text
- #1  0.56  type-1 ×2      109 tokens  b92c1297
+ #1  0.56  type-1 ×2      109 tokens  64f5bc34
      within one directory, identifiers 1.00
      confidence 0.73, maintenance risk 0.37, refactoring difficulty 0.12 (2 instances, 109-109 tokens, 109 repeated, 1.00 similarity, 2 file(s))
      similarity: composite 1.00 (lexical 1.00, structural 1.00, control-flow 1.00, type n/a, api 1.00); cohesion 1.00; confidence high [structural-verify-v1]
@@ -156,6 +162,13 @@ The floor is a view over the same findings. It decides what the text listing
 shows, and changes no count, no export and nothing recorded. Raw identifier
 agreement is measured on whole units, so a run that reports fragments has no
 value to compare, and the report says how many entries that left out.
+
+## Replaying a recorded run
+
+`codehelion report` renders a recorded run again from what was stored. The
+suppressions are shown as that run applied them, not as the policy stands now.
+The baseline status of the originating scan is not replayed: a replay does not
+hide or mark groups against a baseline, and says so in a note.
 
 ## How much is printed
 

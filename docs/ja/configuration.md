@@ -39,7 +39,7 @@ codehelion config show      # この実行が使う設定と、その出所
 
 `.h` は C と C++ が共有する唯一の拡張子で、どちらの文法で読むかがその中身の見え方を決めます。C++ ヘッダを C として読むと、エラー回復によって何も宣言しない形へ崩れ、本来の重複を隠す一方でクラス本体どうしの重複を捏造します。
 
-`detect` は拡張子が曖昧でないファイルを数えて多数派に従います。数えるものが無い木、つまりヘッダのみのライブラリでは、ヘッダ自身を読んで C++ にしか書けない綴りを探し、1 つでも見つかればその実行全体が C++ になります。この選択は実行の build variant に含まれるため、異なる文法で読んだ結果どうしが比較されることはありません。
+`detect` は拡張子が曖昧でないファイルを数えて多数派に従います。数えるものが無い木、つまりヘッダのみのライブラリでは、ヘッダ自身を読んで C++ にしか書けない綴りを探し、1 つでも見つかればその実行全体が C++ になります。この選択は実行の build variant に含まれるため、異なる文法で読んだ結果どうしが比較されることはありません。この選択が記録されるのは素の `.h` ファイルを読んだ場合だけで、1 つも読まなかった実行は定数の C を記録します。
 
 ## priority
 
@@ -107,8 +107,8 @@ hermetic な CI や `PATH` の外への導入で使います。これらは `--c
 # max-file-bytes = 2097152          # これより大きいファイルは飛ばして計上
 # parse-timeout-ms = 10000          # 決定的な parse 作業量上限（wall-clock time ではない）
 # helper-timeout-ms = 300000        # Semantic helper 応答の期限
-# posting-cap = 64                  # ペア生成に入る posting list の最大長
-# pair-budget = 1000000             # ペア生成 pass ごとの候補ペア数
+# posting-cap = 64                  # ペア生成に入る posting list の最大長（Fast 64、Structural 256）
+# pair-budget = 1000000             # ペア生成 pass ごとの候補ペア数（Fast 1000000、Structural 2000000）
 # near-miss-delta = 0.05            # Type-3 の閾値直下の診断帯
 # near-miss-cap = 1000              # report ごとに保持する near miss 数
 # sibling-candidate-budget = 50000
@@ -118,7 +118,7 @@ hermetic な CI や `PATH` の外への導入で使います。これらは `--c
 # signature-sibling-per-group-cap = 8
 # signature-sibling-total-cap = 1000
 # signature-sibling-max-units-per-signature = 8
-# verification-budget = 1000000     # 精密検証に送るペア数
+# verification-budget = 2000000     # 精密検証に送るペア数
 # max-alignment-cells = 4000000     # アラインメント 1 回あたりの動的計画法セル数
 # max-component = 1024              # 1 つの塊として比較する関連ユニットの最大集合
 ```

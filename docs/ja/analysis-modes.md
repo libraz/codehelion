@@ -34,7 +34,9 @@ Semantic は、Structural が測るものすべてに加えて、コンパイラ
 codehelion scan --mode semantic
 ```
 
-解析対象の言語ごとに helper が必要です。Rust なら `codehelion-backend-rust`、C / C++ なら `codehelion-backend-clang` を `PATH` に置くか `--helper` で指定します。`codehelion doctor` が、どれが存在するか、各 helper が話す protocol のバージョン、見つけたコンパイラ、供給できると言っている情報を報告します。helper の無い言語は実行を失敗させず、Structural として解析します。
+解析対象の言語ごとに helper が必要です。Rust なら `codehelion-backend-rust`、C / C++ なら `codehelion-backend-clang` を `PATH` に置くか `--helper` で指定します。`codehelion doctor` が、どれが存在するか、各 helper が話す protocol のバージョン、見つけたコンパイラ、供給できると言っている情報を報告します。ツリーにソースがあるのに、そのどの言語も読める helper が 1 つもインストールされていない場合、スキャンは失敗し、helper なしで解析する方法として `--mode structural` を示します。黙って Structural に切り替えることはありません。複数の言語を含むツリーでは、helper の無い言語は Structural として解析し、他の言語にはコンパイラを使います。
+
+Rust の helper は、展開しなかったマクロ呼び出しを、attribute マクロと derive マクロも含めて理由とともに記録します。procedural macro は、展開するとそのマクロの crate を実行することになるため「実行が必要」（requires execution）として、組み込みの derive や、helper が扱わない形で展開を得られないマクロは「展開不可」（expansion unavailable）として記録されます。この記録によって、薄い答えが完全な答えに見えることを防ぎます。C / C++ では、`compile_commands.json` が存在するのに読めない場合、スキャンはビルド記述の段階で止まります。推測した条件の下に実行を記録しないためです。コンパイルデータベースが無いツリーはエラーではありません。
 
 helper はバージョン付き protocol で通信する別プロセスなので、compiler API が CLI にリンクされることはありません。コンパイラがクラッシュしても終わるのは helper プロセスで、スキャンは該当ユニットを unavailable として記録し継続します。[アーキテクチャ](architecture.md)を参照してください。
 

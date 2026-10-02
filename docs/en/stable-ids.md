@@ -34,8 +34,8 @@ printed as `[finding <ID>]` under `-v`.
 Either kind can be opened:
 
 ```sh
-codehelion explain b92c1297
-codehelion explain b92c1297 --format json
+codehelion explain 64f5bc34
+codehelion explain 64f5bc34 --format json
 ```
 
 A prefix is accepted as long as it is unambiguous; the report prints one short
@@ -44,9 +44,14 @@ identifiers in full.
 
 ## What moves an id, and what does not
 
-An id is derived from normalized content, so it stands through a comment-only
-edit, a reflow, a moved line, and any edit elsewhere in the file. It changes when
-the content it names changes.
+An id is derived from normalized content, so a group, unit or fragment id stands
+through a comment-only edit, a reflow, a moved line, and any edit elsewhere in the
+file. It changes when the content it names changes.
+
+An occurrence's `FindingId` also depends on where it sits: its group, the unit it
+is in (or the file's content, for an occurrence outside every unit), and its rank
+among that scope's occurrences of the group. It therefore moves when its host
+unit's content changes, while the group id does not.
 
 That matters most while duplication is being removed, because removing a
 duplication also rewrites the code around it. A group that comes out of the
@@ -68,7 +73,7 @@ groups. How many are followed is configurable:
 
 Ids identify content; a run identifies the conditions the content was read
 under. The mode, the frontend and normalization versions, the language, and the
-build variant are all part of it, and reports print the build variant's digest.
+build variant are all part of it, and the JSON and SARIF reports carry the build variant's digest.
 Two runs read under different conditions are kept in separate spaces rather than
 compared — which is why, for instance, changing how a bare `.h` is read puts the
 results beside the previous ones rather than on top of them.

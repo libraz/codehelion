@@ -64,8 +64,9 @@ Reads a tree and records the run. The main controls:
   character in a file is still readable where an escape sequence is not. `auto`
   draws box-drawing characters everywhere except Windows, whose console depends
   on the active code page.
-- `--sort <axis>` and `--min-identifier-jaccard <value>` order and filter the
-  text listing. See [Reading a report](reading-a-report.md#ordering).
+- `--sort <axis>` orders the report, JSON `groups` and SARIF `results` included,
+  with groups that a suppression policy ranked down last;
+  `--min-identifier-jaccard <value>` filters the text listing. See [Reading a report](reading-a-report.md#ordering).
 - `--include-vendored` reports duplication inside vendored trees, and
   `--include-trivial` restores predicate families to their measured priority in
   Structural and Semantic mode.
@@ -89,6 +90,15 @@ Re-renders one recorded scan without reading the tree again. It takes the displa
 options `scan` takes — format, verbosity, limit, sort, colour, decoration — so a
 run recorded as text can be exported as JSON later. `--run <id>` selects a
 recorded scan; every scan format prints the id that replays it.
+
+Without `--run`, `report` replays every partition of the latest scan, which is the
+same partitioned document `scan` printed. A run recorded for another tree is
+replayed as recorded, with a note saying so. The commands a report prints to
+replay or explain it carry `--path`, `--config`, `--db` and `--untrusted` when the
+run needs them. The flags that need a parsed shape are refused for a Fast run, as
+they are for `scan`. A replay shows the suppressions the run applied when it was
+recorded, not the policy in force now, and does not reproduce the originating
+scan's baseline status; it notes that.
 
 ## `explain`
 
@@ -120,7 +130,8 @@ Reports what this machine has: the helpers and their protocol versions, what eac
 helper answered when asked, the sandboxing the platform can enforce, how many
 restricted semantic rules this build carries, every audit database in the
 configured directory with which of them this build can open, and the artifact
-formats this build reads.
+formats this build reads. A relative `--db` is resolved against the working
+directory.
 
 ## `artifact`
 
@@ -142,7 +153,8 @@ selects the slice of a universal Mach-O binary. `analyze` takes `--build-variant
 `--source-run` and `--linker-map` as source-correlation inputs. `compare` can take
 `--before-build-variant` and `--after-build-variant` to report differing build
 conditions. To record a controlled calibration from a comparison, it additionally
-needs `--source-run`, `--clone-group` and `--db`. See
+needs `--source-run` and `--clone-group` together with both build-variant flags;
+`--db` is optional and defaults like every other command's. See
 [Artifact analysis](artifact-analysis.md) and [Calibration](calibration.md).
 
 ## `history`

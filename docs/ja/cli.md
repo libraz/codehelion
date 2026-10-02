@@ -43,7 +43,7 @@ codehelion guard --paths src/a.rs   # 編集前に、そのパスが属する se
 - `--baseline <file>` は判断済みの finding と比較し、`--baseline-mode` が凍結済みグループを隠すか印を付けるかを決めます。`--show-suppressed`、`--show-siblings`、`--show-near-misses` は text 出力を展開します。JSON と SARIF には常にこれらのデータが含まれます。`--siblings-by-signature` は Structural / Semantic モードでシグネチャによる sibling 生成を有効にします。既定では無効で、`--show-siblings` は text 表示だけを変えます。
 - `-v` / `-vv` は各グループについて書く量を、`--limit <n>` は列挙するグループ数を決めます。`--quiet` はグループだけを出力します。省略した場合、text レポートはグループ 10 件と各グループの出現箇所 5 件までを列挙し、いくつ省いたかを述べます。`--limit <n>` が変えるのはグループ数だけで、両方の上限を外すのは `--limit 0` です。`--color <auto|always|never>` は端末判定を上書きし、`NO_COLOR` にも従います。
 - `--decoration <auto|unicode|ascii|none>` は一覧を描くグリフを選びます。色とは違って出力先には従いません。ファイルに書き出したレポートも端末と同じツリーを保ちます。エスケープシーケンスと違い、罫線素片はファイルの中でも読めるからです。`auto` は Windows を除いて罫線素片を使います。Windows のコンソールはアクティブなコードページ次第で描画が変わるためです。
-- `--sort <axis>` と `--min-identifier-jaccard <value>` は text 一覧の並べ替えと絞り込みです。[レポートの読み方](reading-a-report.md#並べ替え)を参照してください。
+- `--sort <axis>` はレポートを並べ替えます。JSON の `groups` と SARIF の `results` も対象で、抑制ポリシーで順位を下げられたグループは最後に来ます。`--min-identifier-jaccard <value>` は text 一覧の絞り込みです。[レポートの読み方](reading-a-report.md#並べ替え)を参照してください。
 - `--include-vendored` は vendored ツリーの中の重複も報告し、`--include-trivial` は Structural / Semantic モードで predicate family を計測済みの priority に戻します。
 - `--no-reuse` は、同一内容の完了済み実行がローカルにあっても解析し直します。
 - `--fail-on-findings` は visible finding が残ると exit code 3 を返します。
@@ -55,6 +55,8 @@ codehelion guard --paths src/a.rs   # 編集前に、そのパスが属する se
 ## `report`
 
 記録済みのスキャン 1 件を、ツリーを読み直さずに再描画します。`scan` が持つ表示系のオプション（形式・詳細度・件数・並べ替え・色・グリフ）をそのまま取るので、text として記録した実行をあとから JSON として書き出せます。`--run <id>` で記録済みスキャンを選びます。どの形式のスキャンも、それを再現する id を表示します。
+
+`--run` を付けない `report` は、最新のスキャンのすべての partition を再生します。`scan` が出力したものと同じ partition 付きのドキュメントです。別のツリーについて記録された実行は、記録されたとおりに再生し、その旨の注記を出します。レポートが表示する再生用・explain 用のコマンドには、実行が必要とするときに `--path`・`--config`・`--db`・`--untrusted` が付きます。構文構造を必要とするフラグは、`scan` と同じく Fast の実行では拒否されます。再生が示す抑制は、記録されたときに実行が適用したものであり、現在のポリシーではありません。元のスキャンの baseline の状態は再現されず、レポートはその旨を注記します。
 
 ## `explain`
 
@@ -74,7 +76,7 @@ codehelion guard --paths src/a.rs   # 編集前に、そのパスが属する se
 
 ## `doctor`
 
-このマシンにあるものを報告します。helper とその protocol バージョン、各 helper が問い合わせに答えた内容、プラットフォームが強制できるサンドボックス、このビルドが持つ restricted semantic ルールの数、設定されたディレクトリ内の監査データベースとこのビルドで開けるもの、そしてこのビルドが読める成果物フォーマットです。
+このマシンにあるものを報告します。helper とその protocol バージョン、各 helper が問い合わせに答えた内容、プラットフォームが強制できるサンドボックス、このビルドが持つ restricted semantic ルールの数、設定されたディレクトリ内の監査データベースとこのビルドで開けるもの、そしてこのビルドが読める成果物フォーマットです。相対パスの `--db` は作業ディレクトリを基準に解決されます。
 
 ## `artifact`
 
@@ -91,7 +93,7 @@ codehelion artifact calibration --source-run 1  # 特定のソーススキャン
 codehelion artifact calibration --baseline earlier.json  # 以前の集計と並べる
 ```
 
-`--input-format` は magic byte 検出が満たすべきフォーマットを表明し、`--arch` は universal Mach-O のスライスを選びます。`analyze` では `--build-variant`・`--source-run`・`--linker-map` がソース相関のための入力です。`compare` では `--before-build-variant` と `--after-build-variant` によりビルド条件の違いを報告できます。比較から制御済みの calibration を記録するには、さらに `--source-run`・`--clone-group`・`--db` が必要です。[成果物解析](artifact-analysis.md)と [calibration](calibration.md) を参照してください。
+`--input-format` は magic byte 検出が満たすべきフォーマットを表明し、`--arch` は universal Mach-O のスライスを選びます。`analyze` では `--build-variant`・`--source-run`・`--linker-map` がソース相関のための入力です。`compare` では `--before-build-variant` と `--after-build-variant` によりビルド条件の違いを報告できます。比較から制御済みの calibration を記録するには、さらに `--source-run` と `--clone-group` を、2 つの build variant フラグと併せて渡す必要があります。`--db` は省略でき、他のコマンドと同じ既定の場所が使われます。[成果物解析](artifact-analysis.md)と [calibration](calibration.md) を参照してください。
 
 ## `history`
 

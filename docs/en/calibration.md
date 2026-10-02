@@ -36,7 +36,7 @@ earlier `artifact analyze` run with `--source-run` and `--build-variant`.
 codehelion artifact analyze before/app.wasm --source-run 6 --build-variant build-variant.json
 # ... remove the duplication and rebuild ...
 codehelion artifact compare before/app.wasm after/app.wasm \
-  --source-run 6 --clone-group b92c1297 \
+  --source-run 6 --clone-group 64f5bc34 \
   --before-build-variant build-variant.json \
   --after-build-variant build-variant.json
 ```

@@ -47,26 +47,25 @@ groups:
 ```text
 codehelion scan · structural mode · ~/src/codehelion
 
- #1  0.56  type-1 ×2      109 tokens  b92c1297
+ #1  0.56  type-1 ×2      109 tokens  64f5bc34
      ├─ ◆ corpus/synthetic/rust/seed.rs:30-49                   values_equal
      └─   corpus/synthetic/rust/type1.rs:35-54                  values_equal
 
- #2  0.53  type-1 run ×2  101 tokens  5d7e5cd2
-     ├─ ◆ crates/codehelion-cli/src/scan/structural.rs:177-183  run_with
-     └─   crates/codehelion-cli/src/scan.rs:62-68               run
+ #2  0.54  type-1 run ×2  106 tokens  53c92308
+     ├─ ◆ crates/codehelion-cli/src/scan/structural.rs:160-172  run_with
+     └─   crates/codehelion-cli/src/scan.rs:61-73               run
 
-... and 1184 more groups (--limit 0 lists every one)
+... and 1233 more groups (--limit 0 lists every one)
 
 seams: frontend-c-cpp 12 asymmetric changes, 7 breaches (last 6e014d86), 394 findings
        readme-en-ja 1 asymmetric change, 1 breach (last 634aa5c9)
        artifact-fixture-scripts 3 asymmetric changes, 1 breach (last 6f5d63c3)
-since seam run 4: frontend-c-cpp -1,159 findings
 
-1,538 groups (type-1 78, type-2 198, type-3 1262) · 352 suppressed · sorted by priority
-supplemental: 492 siblings (--show-siblings; 60 dropped by search ceilings), 1,000 near misses (--show-near-misses; 5,633 dropped by the retention cap)
-553 files, 199,546 lines, 1,042,197 tokens · run 9 (0 file(s) changed; replay: codehelion report --run 9)
+1,602 groups (type-1 83, type-2 198, type-3 1321) · 367 suppressed · sorted by priority
+supplemental: 503 siblings (--show-siblings; 103 dropped by search ceilings), 1,000 near misses (--show-near-misses; 5,986 dropped by the retention cap)
+560 files, 206,818 lines, 1,083,595 tokens · run 11 (replay: codehelion report --run 11)
 ◆ the occurrence a group is measured against · "run" a repeated stretch of statements, not a whole unit · ×N the number of occurrences
-open one: codehelion explain b92c1297 · list every group: --limit 0
+open one: codehelion explain 64f5bc34 · list every group: --limit 0
 ```
 
 Every field, and what `-v` and `-vv` add:
@@ -129,7 +128,7 @@ included.
 
 ```sh
 codehelion scan --mode structural     # read the tree, report the duplication
-codehelion explain b92c1297           # open one group
+codehelion explain 64f5bc34           # open one group
 codehelion report --format json --output report.json
 ```
 

@@ -26,6 +26,16 @@ a recorded source-map URL for WASM.
 A quantity the format cannot supply is reported as unavailable beside an
 assumption naming what was missing, rather than as a number.
 
+Static archives and relocatable objects attribute whole symbols only, with no
+source line range: a relocatable object has no load address for a line table to
+join. Linking the members into an image is what reaches a line range.
+
+For ELF, retained sizes and dead-code candidates follow direct calls, jumps that
+leave a function (tail calls) and functions whose address is taken, since those
+run with no call edge reaching them. A jump or call through a register or a
+memory slot reaches a callee the reader cannot name, so where one occurs the
+dead-code list is a list of candidates and not a proof.
+
 The per-format capability table is generated from the definitions the backends
 themselves return, in `crates/codehelion-artifact/FORMAT_SUPPORT.md`.
 
@@ -68,7 +78,8 @@ When an artifact command receives `--build-variant manifest.json`, its identity
 uses the canonical JSON value, so whitespace and object-member ordering do not
 change the build variant.
 
-A source run also has a build variant, and reports print its digest. The two are
+A source run also has a build variant, and the JSON and SARIF reports carry its
+digest; the text report prints it only beside an artifact savings estimate. The two are
 separate conditions — how the sources were read, and how the artifact was built —
 recorded side by side rather than checked against each other. There is
 no source digest to find and copy into the manifest.
@@ -105,7 +116,10 @@ codehelion artifact compare before/binary after/binary
 
 reports the measured byte delta between two artifacts of the same format. Given
 both build-variant manifests, it warns when the build conditions differ rather
-than presenting a difference as if it came from a source change alone. Given a
+than presenting a difference as if it came from a source change alone. A native
+symbol whose bytes changed while its size did not is reported as modified, with
+the retained code bytes standing in for a body identity where the backend decodes
+none. Given a
 source run and a clone group as well, it also records a calibration measurement —
 see [Calibration](calibration.md).
 
@@ -117,7 +131,9 @@ process with one 30-second deadline. The worker is a separate process, so the
 deadline remains enforceable when a malformed input makes a parser stop making
 progress, and timeout diagnostics name the phase that was running.
 
-- `--max-bytes` and `--timeout-seconds` adjust the input and time ceilings.
+- `--max-bytes` and `--timeout-seconds` adjust the input and time ceilings. The
+  input ceiling also bounds how far DWARF and PDB debug information is expanded
+  into frames and line records.
 - `--max-memory-bytes <bytes>` enforces a worker virtual-memory ceiling on Linux;
   other platforms reject the option rather than silently ignoring it.
 - `--untrusted` clamps all three at once, so it is available on Linux only:

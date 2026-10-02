@@ -6,7 +6,9 @@ unify stops crowding out the rest.
 
 Every classification is recorded whatever the policy does with it, so
 `--show-suppressed` lists the hidden groups with the reason each was hidden, and
-JSON and SARIF retain suppressed findings regardless of the flag.
+JSON and SARIF retain suppressed findings regardless of the flag. Replaying a
+recorded run shows the suppressions as that run applied them, not the policy in
+force now.
 
 > **Pre-1.0 surface.** The defaults are part of what Structural mode reports and
 > are measured with it. The configuration keys that change them are documented
@@ -51,7 +53,10 @@ occurrence in it is.
 ```
 
 Matched against the name of the unit an occurrence sits in, which is the way to
-quiet one generated accessor family without hiding a whole file.
+quiet one generated accessor family without hiding a whole file. In C and C++
+a destructor is named `~Name` and an operator by its canonical spelling with no
+space before the symbol, such as `operator==`; a conversion operator keeps the
+space between words, as in `operator bool`, in Fast and Structural modes alike.
 
 ## Generated code
 
@@ -63,6 +68,11 @@ A file whose first lines carry one of these banners is machine output, and its
 duplication is the generator's rather than a maintenance problem. Matching
 ignores case. Setting the key replaces the defaults, so a project adding its own
 generator's banner lists these alongside it.
+
+Such a file is excluded when files are discovered, before any duplication is
+looked for, so it is only counted in the summary: `--show-suppressed` does not
+list it, and the rule that a group is hidden only when every occurrence is
+does not apply to it.
 
 ## Test code
 
@@ -117,6 +127,8 @@ could express the family once.
 # entropy-ratio-floor = 0.60
 ```
 
+This key sits at the top level of the file, outside `[suppression]`.
+
 A group below this normalized content-entropy ratio is marked as degenerate
 repetition — the same few tokens repeating rather than a routine. The value is
 relative to the largest entropy a group of the same token length can carry, so it
@@ -133,8 +145,12 @@ about that one duplication and nothing more general describes it. An id describe
 one group's content, so it stops matching once that content changes — which is
 the intended behaviour: the decision was about the code as it was.
 
-For a decision that should survive the code changing, use a
-[baseline](baselines.md) instead.
+A [baseline](baselines.md) is keyed the same way, by the content of the groups it
+froze: editing every copy of an accepted group, or adding a copy with new
+content, makes the group appear as new rather than keeping the baseline's
+decision. The baseline records where each occurrence stood, so a scan can say
+that a new group stands where a removed entry stood, but that note only
+describes the replacement and hides nothing.
 
 ## Modes
 

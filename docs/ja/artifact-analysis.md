@@ -17,6 +17,10 @@ codehelion artifact compare before/binary after/binary
 
 フォーマットが供給できない量は数値を作らず unavailable として報告し、何が足りなかったかを述べる assumption を並べます。
 
+静的アーカイブと再配置可能オブジェクトは、シンボル全体にだけ帰属させ、ソースの行範囲は持ちません。再配置可能オブジェクトには行テーブルを結びつけるロードアドレスが無いためです。メンバーをリンクしてイメージにすると、行範囲に届きます。
+
+ELF の retained size とデッドコードの候補は、直接の呼び出しに加えて、関数の外へ出るジャンプ（末尾呼び出し）と、アドレスが取られている関数をたどります。後者は呼び出し辺が届かなくても実行されるためです。レジスタやメモリスロット経由のジャンプや呼び出しは、リーダーが名指しできない呼び出し先に届くので、それが現れる場合のデッドコード一覧は証明ではなく候補の一覧です。
+
 フォーマットごとの能力表は、各バックエンドが自ら返す定義から生成されており、`crates/codehelion-artifact/FORMAT_SUPPORT.md` にあります。
 
 ### WebAssembly のソース対応はシンボル単位まで
@@ -44,7 +48,7 @@ codehelion artifact analyze dist/app.wasm --build-variant build-variant.json --s
 
 `--build-variant manifest.json` を渡した場合、build variant の identity には正規化した JSON 値を使うため、空白や object member の順序は identity を変えません。
 
-source run にも build variant があり、レポートはその digest を表示します。両者は別々の条件 — ソースをどう読んだか、成果物をどうビルドしたか — であり、突き合わせるのではなく並べて記録します。manifest に書き写すべき source 側の digest は存在しません。
+source run にも build variant があり、JSON と SARIF のレポートはその digest を持ち、text のレポートは成果物の削減見積もりの隣にだけ表示します。両者は別々の条件 — ソースをどう読んだか、成果物をどうビルドしたか — であり、突き合わせるのではなく並べて記録します。manifest に書き写すべき source 側の digest は存在しません。
 
 ## 実体化の多重度
 
@@ -66,13 +70,13 @@ codehelion artifact analyze path/to/binary --source-run 1 --build-variant build-
 codehelion artifact compare before/binary after/binary
 ```
 
-は、同じフォーマットの成果物 2 つのあいだで実測したバイト差を報告します。両方の build variant manifest を渡せば、ビルド条件が違う場合に警告を出し、差がソース変更だけから来たかのように見せることはしません。さらに source run とクローングループを渡すと、calibration の計測も記録します。[calibration](calibration.md) を参照してください。
+は、同じフォーマットの成果物 2 つのあいだで実測したバイト差を報告します。両方の build variant manifest を渡せば、ビルド条件が違う場合に警告を出し、差がソース変更だけから来たかのように見せることはしません。バイトが変わったのにサイズが変わらないネイティブのシンボルは modified として報告します。バックエンドがオペランドをデコードせず本体の identity を持たない場合は、保持しているコードのバイト列がその代わりになります。さらに source run とクローングループを渡すと、calibration の計測も記録します。[calibration](calibration.md) を参照してください。
 
 ## 上限と隔離
 
 `artifact analyze` と `artifact compare` は既定で 512 MiB を超える入力を拒否し、parse・相関・永続化・render を別プロセスの worker で行い、全体に 30 秒の期限を適用します。worker が別プロセスであるため、壊れた入力によってパーサが進まなくなっても期限は有効で、timeout の診断は停止した段階を名指しします。
 
-- `--max-bytes` と `--timeout-seconds` が入力サイズと時間の上限を調整します。
+- `--max-bytes` と `--timeout-seconds` が入力サイズと時間の上限を調整します。入力の上限は、DWARF と PDB のデバッグ情報がフレームや行レコードへ展開される範囲も制限します。
 - `--max-memory-bytes <bytes>` は Linux で worker の仮想メモリ上限を強制します。ほかの OS ではこのオプションを黙って無視せず、エラーとして返します。
 - `--untrusted` はこの 3 つをまとめて締めるため Linux 限定です。ほかの OS では、強制できないメモリ上限のまま素性の分からない成果物を読む代わりにエラーで停止します。
 

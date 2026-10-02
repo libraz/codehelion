@@ -60,8 +60,20 @@ It needs a helper for each language it should analyse — `codehelion-backend-ru
 for Rust, `codehelion-backend-clang` for C and C++ — installed on `PATH` or named
 with `--helper`. `codehelion doctor` reports which are present, the protocol
 version each speaks, the compiler each found, and what each says it can supply.
-A language whose helper is missing is analysed as Structural rather than failing
-the run.
+When the tree holds sources but no installed helper reads any of their languages,
+the scan fails and names `--mode structural` as the way to analyse the tree
+without one; it never falls back to Structural silently. In a tree with several
+languages, a language with no helper is analysed as Structural while the others
+get their compiler.
+
+The Rust helper records every macro invocation it does not expand, attribute
+and derive macros included, with the reason. A procedural macro is recorded as
+requiring execution, since expanding it would run the macro's crate; a builtin
+derive or a macro whose expansion the helper does not consume is recorded as
+expansion unavailable. The record keeps a thin answer from reading as a complete
+one. For C and C++, a `compile_commands.json` that is present but cannot be read
+stops the scan at the build description: the run is not filed under conditions
+that were guessed at. A tree with no compilation database is not an error.
 
 The helpers are separate processes reached over a versioned protocol, so no
 compiler API is linked into the CLI. A compiler crash ends a helper process; the

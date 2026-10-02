@@ -42,7 +42,9 @@ than as a missing installation.
 
 This is a flag and not a configuration key for a reason that applies twice over:
 the configuration file is discovered inside the tree being scanned, so a
-repository would otherwise be granting permission over itself.
+repository would otherwise be granting permission over itself. For the same
+reason a discovered `codehelion.toml` that is a symlink is refused (`--config`
+names a file deliberately), and a configuration file is read only up to 1 MiB.
 
 ## Reading a repository nobody vouches for
 
@@ -54,7 +56,10 @@ codehelion artifact analyze path/to/binary --untrusted
 `--untrusted` lowers every ceiling at once — file size, parse work, candidate
 budgets, and for artifacts the input, time and memory ceilings — and permits no
 execution at all. A configured database path must remain inside the scanned path
-under it; an explicit `--db` remains a deliberate operator choice.
+under it, and a database whose `.lock`, `-wal`, `-shm` or `-journal` file is a
+symlink is refused; an explicit `--db` remains a deliberate operator choice. For
+artifacts the ceilings also bound how much PDB debug information is expanded,
+as they do for DWARF.
 
 It is a flag rather than a configuration key for the same reason: the file that
 would carry the setting is supplied by the tree whose trust level is in question.
@@ -63,6 +68,10 @@ Combined with `--mode semantic` it additionally requires an operating-system
 memory ceiling around the helper process, which only Linux can enforce. Elsewhere
 that combination fails rather than run a helper unconfined. The same applies to
 `artifact --untrusted`, whose preset includes the memory ceiling.
+
+A helper runs in a process group of its own, and when the scanner disappears in
+the middle of a request the helper ends that group, compiler processes included,
+instead of leaving them running.
 
 `codehelion doctor` reports what the running platform can actually enforce, so
 the answer for a given machine is a command rather than an assumption.

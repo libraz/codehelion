@@ -11,7 +11,7 @@ file you commit, and later scans read it to say what came after it.
 ## Creating one
 
 ```sh
-codehelion scan                       # read the tree
+codehelion scan --mode structural     # read the tree
 codehelion baseline create .          # record where you are starting from
 ```
 
@@ -26,7 +26,7 @@ nothing. See [Stable identifiers](stable-ids.md).
 ## Reading a scan against one
 
 ```sh
-codehelion scan --baseline codehelion-baseline.json
+codehelion scan --mode structural --baseline codehelion-baseline.json
 ```
 
 The default mode is `suppress`: the groups the baseline froze are hidden, and what
@@ -35,7 +35,7 @@ is the shape a CI check wants — the build fails when duplication arrives that
 nobody has ruled on.
 
 ```sh
-codehelion scan --baseline codehelion-baseline.json --baseline-mode compare
+codehelion scan --mode structural --baseline codehelion-baseline.json --baseline-mode compare
 ```
 
 `compare` hides nothing. It reports each group as one the baseline froze or one it
@@ -46,7 +46,8 @@ groups that come out of the rearrangement carry new ids; one standing in the pla
 an entry has just left is reported as standing there rather than as duplication
 somebody added.
 
-If the build variant or the detector versions differ, create a fresh baseline for
+Scan with the same `--mode` when creating the baseline and when reading against
+it. If the build variant or the detector versions differ, create a fresh baseline for
 the current scan rather than carrying the old one across.
 
 ## When you do not need one
