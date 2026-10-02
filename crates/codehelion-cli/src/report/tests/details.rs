@@ -51,12 +51,21 @@ fn semantic_finding_detail_keeps_graphs_and_mappings_readable() {
     );
 
     let mut text = Vec::new();
-    detail.render_text(&mut text).unwrap();
+    detail.render_text(Decoration::Unicode, &mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("semantic evidence: sog-v1"));
     assert!(text.contains("rule sequence-pipeline-v1@1"));
     assert!(text.contains("graph 1: source -> collect"));
     assert!(text.contains("node mapping: 0→0"));
+
+    // Every glyph the occurrence view draws has an ASCII stand-in.
+    for decoration in [Decoration::Ascii, Decoration::None] {
+        let mut text = Vec::new();
+        detail.render_text(decoration, &mut text).unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.is_ascii(), "{text}");
+        assert!(text.contains("node mapping: 0->0"), "{text}");
+    }
 }
 
 #[test]
@@ -269,7 +278,9 @@ fn finding_detail_shares_the_member_shape_across_views() {
     assert!(value["group"]["similarity"].is_null());
 
     let mut buffer = Vec::new();
-    detail.render_text(&mut buffer).unwrap();
+    detail
+        .render_text(Decoration::Unicode, &mut buffer)
+        .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     assert!(text.contains(&format!("finding {}", "ab".repeat(16))));
     assert!(text.contains("location: src/lib.rs:3-12"));
@@ -338,11 +349,12 @@ fn clone_group_detail_says_whether_the_newest_comparable_run_still_holds_the_gro
     let text = String::from_utf8(text).unwrap();
     assert!(
         text.contains(&format!(
-            "run: 4 (structural; build variant digest {}) — latest",
+            "run: 4 (structural; build variant digest {}) - latest",
             "ab".repeat(32)
         )),
         "{text}"
     );
+    assert!(text.is_ascii(), "{text}");
     let value: serde_json::Value = serde_json::from_str(&detail.to_json().unwrap()).unwrap();
     assert_eq!(value["present_in_latest_run"], true);
     assert_valid_finding_detail_schema(&value);
@@ -426,7 +438,9 @@ fn finding_detail_exposes_mapping_evidence_and_separate_estimate_confidences() {
     );
 
     let mut buffer = Vec::new();
-    detail.render_text(&mut buffer).unwrap();
+    detail
+        .render_text(Decoration::Unicode, &mut buffer)
+        .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     assert!(text.contains("source-artifact mappings:"));
     assert!(text.contains("conflicting evidence retained"));
@@ -493,7 +507,9 @@ fn a_structural_occurrence_explains_itself_with_the_recorded_evidence() {
         clone_group_savings: Vec::new(),
     };
     let mut buffer = Vec::new();
-    detail.render_text(&mut buffer).unwrap();
+    detail
+        .render_text(Decoration::Unicode, &mut buffer)
+        .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     assert!(text.contains("similarity: composite 0.87"));
     // The unmeasured dimension is named, never guessed.
@@ -531,7 +547,9 @@ fn an_occurrence_inside_the_suite_explains_why() {
         clone_group_savings: Vec::new(),
     };
     let mut buffer = Vec::new();
-    detail.render_text(&mut buffer).unwrap();
+    detail
+        .render_text(Decoration::Unicode, &mut buffer)
+        .unwrap();
     assert!(
         String::from_utf8(buffer)
             .unwrap()
@@ -564,14 +582,18 @@ fn an_occurrence_of_a_run_explains_itself_as_a_run() {
         clone_group_savings: Vec::new(),
     };
     let mut buffer = Vec::new();
-    detail.render_text(&mut buffer).unwrap();
+    detail
+        .render_text(Decoration::Unicode, &mut buffer)
+        .unwrap();
     let text = String::from_utf8(buffer).unwrap();
     assert!(text.contains("duplicated run, type-1"));
 
     // The same occurrence in a whole-unit group reads the other way.
     detail.group.scope = "unit".to_string();
     let mut buffer = Vec::new();
-    detail.render_text(&mut buffer).unwrap();
+    detail
+        .render_text(Decoration::Unicode, &mut buffer)
+        .unwrap();
     assert!(
         String::from_utf8(buffer)
             .unwrap()

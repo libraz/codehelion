@@ -17,7 +17,7 @@ fn main() -> ExitCode {
         Err(err) => {
             // `{err:#}` renders the whole anyhow context chain.
             eprintln!("error: {err:#}");
-            ExitCode::FAILURE
+            codehelion::error_exit_code(&err)
         }
     }
 }

@@ -508,19 +508,26 @@ fn the_orphan_sweep_runs_only_after_a_delete_removed_rows() {
                  (id, build_variant_id, root_path, tool_version, config_hash, config_source,
                   analysis_mode, started_at, finished_at, status, min_clone_tokens)
              VALUES (1, 1, '/repo', 'test', 'hash', 'defaults', 'structural',
-                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', 'running', 20)",
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', 'running', 20),
+                    (2, 1, '/repo', 'test', 'hash', 'defaults', 'structural',
+                     '2025-12-31T00:00:00Z', '2025-12-31T00:00:01Z', 'completed', 20)",
             [],
         )
         .unwrap();
     seed_orphan_and_referenced_fingerprints(&store, 1);
 
-    // Replacing the active policy only inserts and updates suppression rows.
+    // Confirming a reused run only inserts and updates rows.
     store
-        .activate_suppressions(&[crate::snapshot::SuppressionRuleRow {
-            scope: "path_glob".to_owned(),
-            pattern: "vendor/**".to_owned(),
-            reason: None,
-        }])
+        .confirm_reused_run(
+            2,
+            &[crate::snapshot::SuppressionRuleRow {
+                scope: "path_glob".to_owned(),
+                pattern: "vendor/**".to_owned(),
+                reason: None,
+            }],
+            "2026-01-02T00:00:00Z",
+            "2026-01-02T00:00:01Z",
+        )
         .unwrap();
 
     assert_eq!(
@@ -628,4 +635,49 @@ fn the_finding_baseline_declares_only_columns_its_writer_binds() {
             "final_priority".to_owned(),
         ])
     );
+}
+
+/// Calibrations that differ only in a build variant come back in one order,
+/// the whole unique key's, whatever order they were written in.
+#[test]
+fn calibrations_read_back_in_their_full_key_order() {
+    let mut store = Store::open_in_memory().unwrap();
+    seed_source_run(&store);
+    let analysis = insert_analysis(&store, 1, 5, "2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z");
+    insert_savings(&store, analysis, 12, 5, -2);
+    store
+        .record_artifact_savings_calibration(&calibration(analysis, 12, 3))
+        .unwrap();
+    // The same measurement under a variant that sorts before the recorded one,
+    // written after it.
+    store
+        .conn
+        .execute(
+            "INSERT INTO artifact_analysis_savings_calibration
+                 (schema_version, artifact_analysis_id, source_scan_run_id,
+                  clone_group_fingerprint, source_build_variant_fingerprint,
+                  before_artifact_build_variant_fingerprint, after_artifact_fingerprint,
+                  after_artifact_build_variant_fingerprint, estimated_refactor_savings_bytes,
+                  verified_savings_bytes, absolute_error_bytes, relative_error, recorded_at)
+             SELECT schema_version, artifact_analysis_id, source_scan_run_id,
+                    clone_group_fingerprint, source_build_variant_fingerprint,
+                    before_artifact_build_variant_fingerprint, after_artifact_fingerprint,
+                    ?1, estimated_refactor_savings_bytes, verified_savings_bytes,
+                    absolute_error_bytes, relative_error, recorded_at
+             FROM artifact_analysis_savings_calibration",
+            [[1_u8; 16].as_slice()],
+        )
+        .unwrap();
+
+    let variants: Vec<[u8; 16]> = store
+        .artifact_savings_calibrations(1, &hex(12))
+        .unwrap()
+        .into_iter()
+        .map(|calibration| {
+            calibration
+                .after_artifact_build_variant_fingerprint
+                .as_bytes()
+        })
+        .collect();
+    assert_eq!(variants, vec![[1; 16], [5; 16]]);
 }

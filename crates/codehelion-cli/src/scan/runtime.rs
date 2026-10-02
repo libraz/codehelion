@@ -30,8 +30,8 @@ use std::path::Path;
 mod database;
 
 pub(crate) use database::{
-    DatabaseUse, database_path, database_path_for, incompatible_database_advice,
-    incompatible_database_replacement, readable_here, scan_database_path,
+    DatabaseUse, database_path_for, incompatible_database_advice,
+    incompatible_database_replacement, readable_here,
 };
 
 /// Maximum parser workers accepted from either the command line or config.
@@ -48,6 +48,9 @@ pub(super) fn maximum_jobs() -> usize {
 /// Resolve the worker-thread count: flag over configuration over the number
 /// of available CPUs, with an explicit resource ceiling.
 pub(crate) fn effective_jobs(flag: Option<usize>, configured: Option<usize>) -> Result<usize> {
+    if flag == Some(0) {
+        usage_bail!("--jobs must be at least 1");
+    }
     match flag.or(configured) {
         Some(0) => bail!("jobs must be at least 1"),
         Some(jobs) => Ok(jobs.min(maximum_jobs())),

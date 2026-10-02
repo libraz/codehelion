@@ -468,6 +468,30 @@ mod tests {
         assert_eq!(store.schema_version().unwrap(), schema::SCHEMA_VERSION);
     }
 
+    /// Two processes creating one new database at once both end up with the
+    /// complete baseline: the second waits for the first and accepts what it
+    /// wrote rather than failing on a table that already exists.
+    #[test]
+    fn concurrent_first_opens_of_one_new_database_all_succeed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.db");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let openers: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Store::open(&path).map(|store| store.schema_version())
+                })
+            })
+            .collect();
+        for opener in openers {
+            let version = opener.join().unwrap().unwrap().unwrap();
+            assert_eq!(version, schema::SCHEMA_VERSION);
+        }
+    }
+
     #[test]
     fn file_backed_stores_open_in_wal_with_a_busy_timeout() {
         let file = tempfile::NamedTempFile::new().unwrap();

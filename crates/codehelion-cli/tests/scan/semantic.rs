@@ -52,16 +52,19 @@ fn a_scan_below_the_workspace_root_still_gets_what_the_compiler_resolved() {
     )
     .unwrap();
     std::fs::write(root.join("member/src/other.rs"), CHECKSUM_RS).unwrap();
+    write_lockfile(root, &[("member", &[])]);
 
+    require_rust_helper();
     let output = cmd()
         .current_dir(root.join("member"))
         .args(["scan", ".", "--mode", "semantic", "--format", "json"])
         .output()
         .expect("the scan should run");
-    if !output.status.success() {
-        // No helper on this machine, which the pairing test above covers.
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
     assert_eq!(report["summary"]["compiler"]["answered"], 2);
@@ -96,6 +99,7 @@ fn one_tree_read_with_different_features_is_not_reported_as_the_other() {
         )
     };
     std::fs::write(root.join("Cargo.toml"), manifest("")).unwrap();
+    write_lockfile(root, &[("counters", &[])]);
     std::fs::write(
         root.join("src/lib.rs"),
         "#[cfg(feature = \"wide\")]\npub type Count = i64;\n\
@@ -110,22 +114,23 @@ fn one_tree_read_with_different_features_is_not_reported_as_the_other() {
             .args(["scan", ".", "--mode", "semantic", "--format", "json"])
             .output()
             .expect("the scan should run");
-        output.status.success().then(|| {
-            serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                .expect("stdout is one JSON document")
-        })
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("stdout is one JSON document")
     };
-    let Some(first) = scan() else {
-        // No helper on this machine, which the pairing test above covers.
-        return;
-    };
+    require_rust_helper();
+    let first = scan();
     // The same reading twice: reported from what was recorded, which is what
     // makes the third scan below say something.
-    let again = scan().expect("the helper answered once, so it answers again");
+    let again = scan();
     assert_eq!(again["run"]["reused"], serde_json::json!(true));
 
     std::fs::write(root.join("Cargo.toml"), manifest("\"wide\"")).unwrap();
-    let widened = scan().expect("the helper answers");
+    let widened = scan();
     assert_ne!(
         widened["run"]["reused"],
         serde_json::json!(true),
@@ -156,6 +161,7 @@ fn a_direct_dependency_feature_change_gets_its_own_semantic_variant() {
         )
     };
     std::fs::write(root.join("app/Cargo.toml"), app_manifest("")).unwrap();
+    write_lockfile(root, &[("app", &["support"]), ("support", &[])]);
     std::fs::write(
         root.join("app/src/lib.rs"),
         "pub fn answer() -> u8 { support::answer() }\n",
@@ -180,17 +186,18 @@ fn a_direct_dependency_feature_change_gets_its_own_semantic_variant() {
             .args(["scan", ".", "--mode", "semantic", "--format", "json"])
             .output()
             .expect("the scan should run");
-        output.status.success().then(|| {
-            serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                .expect("stdout is one JSON document")
-        })
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("stdout is one JSON document")
     };
-    let Some(first) = scan() else {
-        // No helper on this machine, which the pairing test above covers.
-        return;
-    };
+    require_rust_helper();
+    let first = scan();
     let lockfile_before = std::fs::read_to_string(root.join("Cargo.lock")).unwrap_or_default();
-    let again = scan().expect("the helper answered once, so it answers again");
+    let again = scan();
     assert_eq!(again["run"]["reused"], serde_json::json!(true));
 
     std::fs::write(
@@ -198,7 +205,7 @@ fn a_direct_dependency_feature_change_gets_its_own_semantic_variant() {
         app_manifest(", features = [\"extra\"]"),
     )
     .unwrap();
-    let changed = scan().expect("the helper answers after a dependency feature changes");
+    let changed = scan();
     assert_eq!(
         std::fs::read_to_string(root.join("Cargo.lock")).unwrap_or_default(),
         lockfile_before,
@@ -266,6 +273,7 @@ fn a_run_allowed_to_build_reads_more_and_is_filed_apart_from_one_that_was_not() 
          edition = \"2021\"\npublish = false\nbuild = \"build.rs\"\n",
     )
     .unwrap();
+    write_lockfile(root, &[("generated", &[])]);
     std::fs::write(
         root.join("build.rs"),
         "fn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    \
@@ -287,22 +295,29 @@ fn a_run_allowed_to_build_reads_more_and_is_filed_apart_from_one_that_was_not() 
             .args(extra)
             .output()
             .expect("the scan should run");
-        output.status.success().then(|| {
-            serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                .expect("stdout is one JSON document")
-        })
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("stdout is one JSON document")
     };
-    let Some(refused) = scan(&[]) else {
-        // No helper on this machine, which the pairing test above covers.
-        return;
-    };
+    require_rust_helper();
+    let refused = scan(&[]);
+    // Refused before any file was put to the compiler, so the file is one
+    // nobody asked about, for the reason the refusal names.
     assert_eq!(
-        refused["summary"]["compiler"]["unavailable"]["requires_execution"],
+        refused["summary"]["compiler"]["not_asked_reasons"]["requires_execution"],
         serde_json::json!(1),
         "{refused}"
     );
+    assert_eq!(
+        refused["summary"]["compiler"]["execution_refusals"][0]["execution"], "build-script",
+        "{refused}"
+    );
 
-    let permitted = scan(&["--allow-execution=build-script"]).expect("the helper answers");
+    let permitted = scan(&["--allow-execution=build-script"]);
     assert_eq!(
         permitted["summary"]["compiler"]["answered"],
         serde_json::json!(1),
@@ -325,16 +340,17 @@ fn a_semantic_run_reported_again_still_says_what_the_compiler_answered() {
             .args(["scan", ".", "--mode", "semantic", "--format", "json"])
             .output()
             .expect("the scan should run");
-        output.status.success().then(|| {
-            serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                .expect("stdout is one JSON document")
-        })
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("stdout is one JSON document")
     };
-    let Some(first) = scan() else {
-        // No helper on this machine, which the pairing test above covers.
-        return;
-    };
-    let second = scan().expect("the helper answered once, so it answers again");
+    require_rust_helper();
+    let first = scan();
+    let second = scan();
     let first_partitions = first["partitions"].as_array().expect("semantic partitions");
     let second_partitions = second["partitions"]
         .as_array()
@@ -361,6 +377,7 @@ fn write_semantic_replay_fixture(root: &Path) {
         "[package]\nname = \"semantic_replay_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
     )
     .expect("fixture manifest");
+    write_lockfile(root, &[("semantic_replay_fixture", &[])]);
     std::fs::write(
         root.join("src/lib.rs"),
         r"
@@ -403,6 +420,7 @@ fn a_semantic_fresh_report_matches_report_run_for_persisted_evidence() {
     let database = tempfile::tempdir().expect("database directory");
     let database_path = database.path().join("audit.db");
     let database_text = database_path.to_str().expect("database path is utf-8");
+    require_rust_helper();
     let first = cmd()
         .current_dir(fixture.path())
         .args([
@@ -419,11 +437,11 @@ fn a_semantic_fresh_report_matches_report_run_for_persisted_evidence() {
         ])
         .output()
         .expect("the semantic scan should run");
-    if !first.status.success() {
-        // The compiler helper is optional on a developer machine. The other
-        // semantic tests cover the explicit missing-helper contract.
-        return;
-    }
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
     let fresh: serde_json::Value =
         serde_json::from_slice(&first.stdout).expect("fresh semantic output is one JSON document");
     let fresh = fresh["partitions"]
@@ -495,6 +513,30 @@ fn a_semantic_fresh_report_matches_report_run_for_persisted_evidence() {
     );
 }
 
+/// Plant the lock file Cargo would write for `packages`, each with the local
+/// packages it depends on: the helper reads a locked resolution and will not
+/// write one into a tree it was only asked to read.
+fn write_lockfile(root: &Path, packages: &[(&str, &[&str])]) {
+    use std::fmt::Write as _;
+
+    let mut lock = "# This file is automatically @generated by Cargo.\nversion = 4\n".to_string();
+    for (name, dependencies) in packages {
+        write!(
+            lock,
+            "\n[[package]]\nname = \"{name}\"\nversion = \"0.1.0\"\n"
+        )
+        .unwrap();
+        if !dependencies.is_empty() {
+            lock.push_str("dependencies = [\n");
+            for dependency in *dependencies {
+                writeln!(lock, " \"{dependency}\",").unwrap();
+            }
+            lock.push_str("]\n");
+        }
+    }
+    std::fs::write(root.join("Cargo.lock"), lock).expect("fixture lock file");
+}
+
 /// A tree of registered pipelines that all normalize to the same shape, so the
 /// semantic candidate index holds them in one bucket of `count` members.
 fn write_pipeline_bucket_fixture(root: &Path, count: u64) {
@@ -505,14 +547,7 @@ fn write_pipeline_bucket_fixture(root: &Path, count: u64) {
          edition = \"2024\"\npublish = false\n",
     )
     .expect("fixture manifest");
-    // A dependency-free lock file: the helper reads a locked resolution and
-    // will not write one into a tree it was only asked to read.
-    std::fs::write(
-        root.join("Cargo.lock"),
-        "# This file is automatically @generated by Cargo.\nversion = 4\n\n\
-         [[package]]\nname = \"pipeline_bucket_fixture\"\nversion = \"0.1.0\"\n",
-    )
-    .expect("fixture lock file");
+    write_lockfile(root, &[("pipeline_bucket_fixture", &[])]);
     let source = (0..count)
         .map(|remainder| {
             format!(
@@ -526,18 +561,20 @@ fn write_pipeline_bucket_fixture(root: &Path, count: u64) {
     std::fs::write(root.join("src/lib.rs"), source).expect("fixture source");
 }
 
-/// One semantic scan of a tree, or `None` on a machine with no compiler
-/// helper, which the missing-helper test above covers.
-fn semantic_scan(root: &Path) -> Option<serde_json::Value> {
+/// One semantic scan of a tree, which has to succeed.
+fn semantic_scan(root: &Path) -> serde_json::Value {
+    require_rust_helper();
     let output = cmd()
         .current_dir(root)
         .args(["scan", ".", "--mode", "semantic", "--format", "json"])
         .output()
         .expect("the semantic scan should run");
-    output
-        .status
-        .success()
-        .then(|| serde_json::from_slice(&output.stdout).expect("stdout is one JSON document"))
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
 }
 
 /// What one funnel stage of a report passed on, and what it dropped for a cause.
@@ -580,9 +617,7 @@ fn a_semantic_run_cuts_its_buckets_at_the_posting_ceiling_it_was_given() {
         format!("[limits]\nposting-cap = {CEILING}\n"),
     )
     .expect("fixture configuration");
-    let Some(report) = semantic_scan(capped.path()) else {
-        return;
-    };
+    let report = semantic_scan(capped.path());
     let (buckets, over_the_ceiling) = funnel_stage(&report, "semantic candidate buckets");
     assert_eq!(
         (buckets, over_the_ceiling),
@@ -600,9 +635,7 @@ fn a_semantic_run_cuts_its_buckets_at_the_posting_ceiling_it_was_given() {
     // would read exactly like one the ceiling cut.
     let open = tempfile::tempdir().expect("uncapped fixture");
     write_pipeline_bucket_fixture(open.path(), CEILING + 1);
-    let Some(report) = semantic_scan(open.path()) else {
-        return;
-    };
+    let report = semantic_scan(open.path());
     let (buckets, over_the_ceiling) = funnel_stage(&report, "semantic candidate buckets");
     assert_eq!(
         (buckets, over_the_ceiling),

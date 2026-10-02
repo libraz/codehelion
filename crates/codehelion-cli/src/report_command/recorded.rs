@@ -123,8 +123,23 @@ pub(crate) fn recorded_configuration(origin: &RunOrigin) -> Result<report::Confi
     })
 }
 
+/// Every recorded group of run `run_id` as its report lists them, in the
+/// report's order on `sort`: rebuilt with the priority saved beside it, the
+/// ranked-down verdict recorded with the run, and the narrower cuts the set
+/// settles. A report and a lookup of one group both read groups through this,
+/// so the two say the same about every group.
+pub(crate) fn ordered_recorded_groups(
+    store: &Store,
+    run_id: i64,
+    sort: report::Sort,
+) -> Result<Vec<report::Group>> {
+    let mut groups = recorded_groups(store, run_id)?;
+    report::order_recorded(&mut groups, &store.run_group_ranked_down(run_id)?, sort);
+    Ok(groups)
+}
+
 /// Rebuild each recorded group with the priority saved beside it.
-pub(crate) fn recorded_groups(store: &Store, run_id: i64) -> Result<Vec<report::Group>> {
+fn recorded_groups(store: &Store, run_id: i64) -> Result<Vec<report::Group>> {
     store
         .run_groups(run_id)?
         .into_iter()
@@ -142,26 +157,41 @@ pub(crate) fn recorded_groups(store: &Store, run_id: i64) -> Result<Vec<report::
         .collect()
 }
 
-/// What the newest recorded seam run says, beside the generation before it.
+/// What the seam run belonging to scan run `scan_run_id` says, beside the
+/// generation before it.
 ///
 /// One reader for a fresh scan and for a replay: the counts are read back
 /// rather than recomputed, and two derivations of one comparison would disagree
-/// the moment either of them changed. `root_path` is the key runs are recorded
-/// under, which [`scan::path_key`] produces from a canonical root.
+/// the moment either of them changed. The seam run is the one
+/// [`Store::seam_run_for_scan`] names, so a replay of an earlier run never
+/// shows a measurement taken after it.
 ///
 /// A delta is reported only where the previous run under the same settings
 /// carried the same seam. A seam written into the ledger since then has no
 /// earlier generation, and subtracting against nothing would report the
-/// ledger's growth as movement in the code.
+/// ledger's growth as movement in the code. A findings delta additionally
+/// needs both generations' findings to come from scans of the same modes and
+/// build variants; otherwise it would report the change of scan as movement.
 ///
 /// # Errors
 ///
 /// Returns any underlying database error.
-pub(crate) fn recorded_seam(store: &Store, root_path: &str) -> Result<Option<report::SeamReport>> {
-    let Some(latest) = store.latest_seam_run(root_path)? else {
+pub(crate) fn recorded_seam(store: &Store, scan_run_id: i64) -> Result<Option<report::SeamReport>> {
+    let Some(scan_run) = store.run_summary(scan_run_id)? else {
+        return Ok(None);
+    };
+    let root_path = scan_run.root_path.as_str();
+    let Some(latest) = store.seam_run_for_scan(root_path, scan_run_id)? else {
         return Ok(None);
     };
     let previous = store.preceding_seam_run(root_path, latest.id, &latest.run.settings_digest)?;
+    let comparable_findings = match &previous {
+        Some(previous) => {
+            findings_basis(store, latest.run.scan_run_id)?
+                == findings_basis(store, previous.run.scan_run_id)?
+        }
+        None => false,
+    };
     let count = |value: i64| u64::try_from(value).unwrap_or(0);
     let seams = latest
         .run
@@ -190,6 +220,7 @@ pub(crate) fn recorded_seam(store: &Store, root_path: &str) -> Result<Option<rep
                 breaches_since: earlier
                     .map(|earlier| entry.breaches.saturating_sub(earlier.breaches)),
                 findings_since: earlier
+                    .filter(|_| comparable_findings)
                     .map(|earlier| entry.findings.saturating_sub(earlier.findings)),
             }
         })
@@ -203,6 +234,26 @@ pub(crate) fn recorded_seam(store: &Store, root_path: &str) -> Result<Option<rep
         since_seam_run_id: previous.as_ref().map(|previous| previous.id),
         seams,
     }))
+}
+
+/// The analysis modes and build variants a seam run's finding counts were
+/// taken from: every partition of the scan invocation it mapped, or nothing
+/// when it mapped none or that scan is gone.
+fn findings_basis(
+    store: &Store,
+    scan_run_id: Option<i64>,
+) -> Result<std::collections::BTreeSet<(String, String)>> {
+    let Some(run_id) = scan_run_id else {
+        return Ok(std::collections::BTreeSet::new());
+    };
+    if store.run_summary(run_id)?.is_none() {
+        return Ok(std::collections::BTreeSet::new());
+    }
+    Ok(store
+        .run_invocation(run_id)?
+        .into_iter()
+        .map(|origin| (origin.analysis_mode, origin.variant_fingerprint))
+        .collect())
 }
 
 #[cfg(test)]

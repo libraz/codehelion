@@ -12,56 +12,6 @@ use anyhow::{Context, Result, bail};
 use crate::config::{ResolvedConfig, configured_paths};
 use crate::provenance::{Authority, FromScannedTree, OperatorSupplied};
 
-/// Resolve the audit-database path with the authority that selected it.
-///
-/// `--db` is an explicit operator instruction and may name storage outside the
-/// scan. A database setting from a configuration found at the scan root is
-/// not: it is confined to `--path`, including its existing symlink components.
-/// `--untrusted` applies that confinement to any configured path, even one
-/// from an explicitly named configuration file.
-///
-/// The boundary is `--path` and not the repository holding it, because
-/// `--path` is the only directory the operator pointed at. A repository root
-/// is found by looking for a `.git` ancestor, so for the case `--untrusted`
-/// exists for — auditing a vendored subtree of one's own worktree — it sits
-/// above what was selected, and a configuration inside that subtree would be
-/// choosing storage among its siblings. `root` is expected canonical, which is
-/// what every caller resolves before calling.
-///
-/// Where a database *nobody* configured goes is a separate question with a
-/// separate answer: see [`configured_database_path`].
-///
-/// # Errors
-///
-/// Returns an actionable error when a repository-controlled configuration
-/// names an absolute, traversing, or symlink-escaping database path.
-pub(crate) fn database_path(
-    root: &Path,
-    flag: Option<&Path>,
-    config: &ResolvedConfig,
-    untrusted: bool,
-) -> Result<PathBuf> {
-    if let Some(path) = flag {
-        return Ok(spelled_natively(path));
-    }
-    let selected_tree = OperatorSupplied::from_command_line(root.to_path_buf());
-    let (configured, authority) = match (configured_paths(config).database, untrusted) {
-        (Authority::Operator(configured), false) => {
-            return Ok(spelled_natively(&configured_database_path(
-                &repository_root(root),
-                &configured,
-            )));
-        }
-        (configured, true) => (configured.distrusted(), "--untrusted"),
-        (Authority::Tree(configured), false) => (
-            configured,
-            "a configuration discovered in the scanned repository",
-        ),
-    };
-    confined_database_path(&selected_tree, &configured, authority)
-        .map(|path| spelled_natively(&path))
-}
-
 /// What a command does with the audit database it names, which decides
 /// whether it may step around a default one this build cannot open.
 ///
@@ -88,6 +38,28 @@ pub(crate) enum DatabaseUse {
 /// Resolve the audit database one command uses, stepping around a default
 /// database this build cannot open when that command's job allows it.
 ///
+/// Every command that opens the audit database resolves it here, so that the
+/// reader who followed a note printed by one of them arrives at the same file.
+/// A scan that records beside an unreadable default and a report that then
+/// opens the default is one tool disagreeing with itself.
+///
+/// `--db` is an explicit operator instruction and may name storage outside the
+/// scan; a relative one is read against the working directory, and it is never
+/// traded for another file, whatever the job. A database setting from a
+/// configuration found at the scan root is not an operator instruction: it is
+/// confined to `--path`, including its existing symlink components.
+/// `--untrusted` applies that confinement to any configured path, even one
+/// from an explicitly named configuration file.
+///
+/// The boundary is `--path` and not the repository holding it, because
+/// `--path` is the only directory the operator pointed at. A repository root
+/// is found by looking for a `.git` ancestor, so for the case `--untrusted`
+/// exists for — auditing a vendored subtree of one's own worktree — it sits
+/// above what was selected, and a configuration inside that subtree would be
+/// choosing storage among its siblings. `root` is expected canonical, which is
+/// what every caller resolves before calling. Where a database *nobody*
+/// configured goes is a separate question: see [`configured_database_path`].
+///
 /// A schema this build does not support is the one recording failure the tool
 /// can settle on its own: nothing about the existing file has to change for a
 /// scan to keep a durable record, so the run writes beside it instead of
@@ -95,18 +67,10 @@ pub(crate) enum DatabaseUse {
 /// disk, a read-only file, a lease another scan holds — still fails, because
 /// choosing a different file would not fix any of them.
 ///
-/// The choice lives here rather than in each command so that the reader who
-/// followed a note printed by one of them arrives at the same file. A scan
-/// that records beside an unreadable default and a report that then opens the
-/// default is one tool disagreeing with itself.
-///
-/// `--db` names one file deliberately. Using a different one would be ignoring
-/// that instruction, so an explicit path is never traded, whatever the job.
-///
 /// # Errors
 ///
-/// Returns what [`database_path`] refuses: a repository-controlled
-/// configuration naming storage outside the scanned repository.
+/// Returns an actionable error when a repository-controlled configuration
+/// names an absolute, traversing, or symlink-escaping database path.
 pub(crate) fn database_path_for(
     intent: DatabaseUse,
     root: &Path,
@@ -114,32 +78,51 @@ pub(crate) fn database_path_for(
     config: &ResolvedConfig,
     untrusted: bool,
 ) -> Result<PathBuf> {
-    let path = database_path(root, flag, config, untrusted)?;
-    if flag.is_some() || intent == DatabaseUse::Literal {
-        return Ok(path);
+    if let Some(path) = flag {
+        return Ok(spelled_natively(path));
     }
-    let Some(replacement) = incompatible_database_replacement(&path) else {
-        return Ok(path);
+    let selected_tree = OperatorSupplied::from_command_line(root.to_path_buf());
+    let path = match (configured_paths(config).database, untrusted) {
+        (Authority::Operator(configured), false) => spelled_natively(&configured_database_path(
+            &repository_root(root),
+            &configured,
+        )),
+        (configured, true) => spelled_natively(&confined_database_path(
+            &selected_tree,
+            &configured.distrusted(),
+            "--untrusted",
+        )?),
+        (Authority::Tree(configured), false) => spelled_natively(&confined_database_path(
+            &selected_tree,
+            &configured,
+            "a configuration discovered in the scanned repository",
+        )?),
     };
-    if intent == DatabaseUse::Reading && !readable_here(&replacement) {
+    if intent == DatabaseUse::Literal {
         return Ok(path);
     }
-    announce_stepping_aside(&path, &replacement);
-    Ok(replacement)
-}
-
-/// Resolve the database a scan writes.
-///
-/// # Errors
-///
-/// Returns what [`database_path_for`] returns.
-pub(crate) fn scan_database_path(
-    root: &Path,
-    flag: Option<&Path>,
-    config: &ResolvedConfig,
-    untrusted: bool,
-) -> Result<PathBuf> {
-    database_path_for(DatabaseUse::Recording, root, flag, config, untrusted)
+    if let Some(replacement) = incompatible_database_replacement(&path) {
+        if intent == DatabaseUse::Reading && !readable_here(&replacement) {
+            return Ok(path);
+        }
+        announce_stepping_aside(&path, &replacement);
+        return Ok(replacement);
+    }
+    // Once the unreadable default is gone, the history this build kept beside
+    // it is still the one every command has been using; starting over at the
+    // default would leave it behind without a word.
+    if !std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 0)
+        && let Some(sibling) = schema_versioned_sibling(&path)
+        && readable_here(&sibling)
+    {
+        eprintln!(
+            "note: {} holds no audit database; codehelion used {}, where this build has been recording",
+            path.display(),
+            sibling.display()
+        );
+        return Ok(sibling);
+    }
+    Ok(path)
 }
 
 /// Say which database was used and which was left alone.
@@ -284,7 +267,38 @@ fn confined_database_path(
     }
     let candidate = boundary.join(configured);
     ensure_existing_path_is_confined(boundary, configured, authority)?;
+    ensure_sidecars_are_not_links(&candidate, authority)?;
     Ok(candidate)
+}
+
+/// The files opened beside a database under names derived from its own: the
+/// scan lease and `SQLite`'s journal files.
+const DATABASE_SIDECAR_SUFFIXES: [&str; 4] = [".lock", "-wal", "-shm", "-journal"];
+
+/// Refuse a confined database whose sidecar the tree has planted as a link.
+///
+/// The sidecars are opened by name, following links, so a link among them
+/// would have the scan create or lock a file wherever the tree pointed it.
+fn ensure_sidecars_are_not_links(database: &Path, authority: &str) -> Result<()> {
+    for suffix in DATABASE_SIDECAR_SUFFIXES {
+        let mut name = database.as_os_str().to_os_string();
+        name.push(suffix);
+        let sidecar = PathBuf::from(name);
+        match std::fs::symlink_metadata(&sidecar) {
+            Ok(metadata) if metadata.file_type().is_symlink() => bail!(
+                "refusing database path {} from {authority}: {} is a link, which would open a file outside the database's directory; remove it or use --db <path> to explicitly choose a database",
+                database.display(),
+                sidecar.display()
+            ),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("checking database file {}", sidecar.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reject an existing symlink component that would make a lexically confined
@@ -342,7 +356,7 @@ fn ensure_existing_path_is_confined(
 /// a confinement boundary and the return type says so: the directory is found
 /// by inspecting the tree, it can sit above what the operator selected, and a
 /// path a configuration chose is held to `--path` instead (see
-/// [`database_path`]). Falling back to `root` itself when no `.git` ancestor
+/// [`database_path_for`]). Falling back to `root` itself when no `.git` ancestor
 /// exists keeps the placement inside the scan either way, rather than widening
 /// to a filesystem root or refusing to scan a tree that simply isn't a Git
 /// worktree.
@@ -361,7 +375,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        database_path, incompatible_database_replacement, repository_root,
+        DatabaseUse, database_path_for, incompatible_database_replacement, repository_root,
         schema_versioned_sibling, spelled_natively,
     };
     use crate::config::{Config, ConfigSource, ResolvedConfig};
@@ -482,8 +496,9 @@ mod tests {
         };
 
         for (resolved, untrusted) in [(&discovered, false), (&discovered, true), (&named, true)] {
-            let resolved_path = database_path(&vendored, None, resolved, untrusted)
-                .expect("a relative path below the selected tree is accepted");
+            let resolved_path =
+                database_path_for(DatabaseUse::Literal, &vendored, None, resolved, untrusted)
+                    .expect("a relative path below the selected tree is accepted");
             assert!(
                 resolved_path.starts_with(&vendored),
                 "{} escaped {}",
@@ -495,7 +510,7 @@ mod tests {
         // The same setting from a configuration the operator named is theirs
         // to make, so without `--untrusted` it keeps the established placement
         // against the repository holding the scan.
-        let trusted = database_path(&vendored, None, &named, false)
+        let trusted = database_path_for(DatabaseUse::Literal, &vendored, None, &named, false)
             .expect("an operator-named configuration places freely");
         assert_eq!(trusted, worktree.path().join("escaped/audit.db"));
     }
@@ -519,7 +534,7 @@ mod tests {
                 config,
                 source: ConfigSource::Discovered(vendored.join("codehelion.toml")),
             };
-            let error = database_path(&vendored, None, &resolved, false)
+            let error = database_path_for(DatabaseUse::Literal, &vendored, None, &resolved, false)
                 .expect_err("a path climbing out of the selected tree is refused");
             let message = format!("{error:#}");
             assert!(message.contains("refusing database path"), "{message}");

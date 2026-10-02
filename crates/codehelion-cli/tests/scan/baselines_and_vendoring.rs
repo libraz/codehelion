@@ -62,6 +62,63 @@ fn baseline_create_and_update_keep_every_completed_partition_of_one_invocation()
         .stdout(predicate::str::contains("2 build variants"));
 }
 
+/// A replay of a run scanned against a baseline says, in every format, that
+/// the baseline status is not reproduced, rather than reading as a scan that
+/// was given none; a replay of a run without one says nothing about it.
+#[test]
+fn a_replay_of_a_baselined_run_says_it_does_not_reproduce_the_baseline_status() {
+    let dir = fixture();
+    let root = dir.path();
+    let plain = scan_json(root);
+    record_baseline(root);
+    let baselined = scan_json_with(root, &["--baseline", "baseline.json"]);
+    assert!(baselined["summary"]["baseline"].is_object());
+    assert!(baselined["summary"].get("baseline_not_replayed").is_none());
+    let run = baselined["run"]["run_id"]
+        .as_i64()
+        .expect("recorded run")
+        .to_string();
+    let note = "this run was scanned against a baseline, and a replay does not reproduce the baseline status";
+
+    let replay = |format: &str, run: &str| {
+        let output = cmd()
+            .current_dir(root)
+            .args(["report", "--run", run, "--format", format])
+            .output()
+            .expect("replay the run");
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).expect("utf-8 report")
+    };
+
+    let text = replay("text", &run);
+    assert!(text.contains(&format!("note: {note}")), "{text}");
+    let json: serde_json::Value = serde_json::from_str(&replay("json", &run)).expect("JSON");
+    assert!(json["summary"].get("baseline").is_none());
+    assert_eq!(json["summary"]["baseline_not_replayed"], true);
+    let sarif: serde_json::Value = serde_json::from_str(&replay("sarif", &run)).expect("SARIF");
+    let notifications = sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"]
+        .as_array()
+        .expect("notifications");
+    assert!(
+        notifications.iter().any(|notification| {
+            notification["descriptor"]["id"] == "replay/baseline-not-replayed"
+                && notification["message"]["text"]
+                    .as_str()
+                    .is_some_and(|message| message.starts_with(note))
+        }),
+        "{notifications:?}"
+    );
+
+    let unbaselined = plain["run"]["run_id"]
+        .as_i64()
+        .expect("recorded run")
+        .to_string();
+    assert!(!replay("text", &unbaselined).contains(note));
+    let json: serde_json::Value =
+        serde_json::from_str(&replay("json", &unbaselined)).expect("JSON");
+    assert!(json["summary"].get("baseline_not_replayed").is_none());
+}
+
 #[test]
 fn a_baseline_hides_what_came_before_it_and_nothing_else() {
     let dir = fixture();
@@ -293,7 +350,17 @@ fn vendored_trees_are_hidden_by_default_and_the_report_says_it_did_that() {
     // A name that merely starts like a vendored one is the project's own code:
     // globs match whole path components, so `external/` does not claim it.
     assert_eq!(visible.len(), 1, "{visible:?}");
-    assert_eq!(visible[0]["members"][0]["file"], "external_api/a.rs");
+    let files: std::collections::BTreeSet<&str> = visible[0]["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|member| member["file"].as_str().expect("member file"))
+        .collect();
+    assert_eq!(
+        files,
+        std::collections::BTreeSet::from(["external_api/a.rs", "external_api/b.rs"]),
+        "the visible group is the project's own pair"
+    );
 
     let hidden = report["groups"]
         .as_array()

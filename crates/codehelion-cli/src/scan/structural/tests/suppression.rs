@@ -36,17 +36,15 @@ fn hiding_boilerplate_requires_every_member_to_share_its_category() {
     );
 }
 
-/// A sibling whose host holds the same content as a primary member carries the
-/// member's host fingerprint, so only the rank tells the two findings apart.
-/// The id pasted from a report has to be the id suppression matches, and it has
-/// to name the sibling alone: matching on the member's id would hide a finding
-/// nobody wrote a rule about.
+/// A sibling is one more occurrence of its owning group, so clone-ids take the
+/// group's id for it exactly as a baseline does. Its occurrence id, and that of
+/// a primary member sharing its host content, name no group and match nothing.
 #[test]
 #[allow(
     clippy::too_many_lines,
     reason = "the group, its sibling, and both candidate ids stay visible in one fixture"
 )]
-fn a_sibling_answers_to_the_finding_id_its_own_run_reports() {
+fn a_sibling_is_hidden_by_its_owning_group_id_and_by_no_occurrence_id() {
     let variant = BuildVariant::structural(LanguageSelection::default(), Language::Rust);
     // One content in three places: two of them the primary group holds, the
     // third a sibling of that group.
@@ -172,12 +170,16 @@ fn a_sibling_answers_to_the_finding_id_its_own_run_reports() {
     };
 
     assert!(
-        verdict(&sibling_finding.to_hex()).is_some(),
-        "the id the run reports for this sibling is the id it answers to"
+        verdict(&fingerprint.to_hex()).is_some(),
+        "the owning group's id hides its sibling, as it does the group"
+    );
+    assert!(
+        verdict(&sibling_finding.to_hex()).is_none(),
+        "an occurrence id written into clone-ids matches nothing"
     );
     assert!(
         verdict(&member_finding.to_hex()).is_none(),
-        "a rule naming the primary member leaves the sibling visible"
+        "a rule naming the primary member's occurrence leaves the sibling visible"
     );
 }
 

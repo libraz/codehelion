@@ -565,3 +565,92 @@ fn a_reader_that_stops_early_leaves_the_scan_successful_and_recorded() {
     let run = store.latest_run().unwrap().expect("recorded run");
     assert!(!store.run_groups(run.id).unwrap().is_empty());
 }
+
+/// The arguments of the `codehelion <command> ...` a text report printed after
+/// `marker`, up to the closing parenthesis or separator.
+fn printed_command(text: &str, marker: &str) -> Vec<String> {
+    let start = text.find(marker).expect("the report prints the command") + marker.len();
+    text[start..]
+        .split([')', '·', '\n'])
+        .next()
+        .expect("a command")
+        .split_whitespace()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// The replay and explain commands a report prints run unchanged from the
+/// directory it was printed in, reaching the same root, configuration and
+/// database, when the scan named a tree elsewhere and a configuration.
+#[test]
+fn printed_follow_up_commands_run_from_where_they_were_printed() {
+    let tree = fixture();
+    let working = tempfile::tempdir().expect("working directory");
+    std::fs::write(working.path().join("cfg.toml"), "[report]\nchurn-top = 5\n")
+        .expect("write configuration");
+    let output = cmd()
+        .current_dir(working.path())
+        .arg("scan")
+        .arg(tree.path())
+        .args(["--config", "cfg.toml"])
+        .output()
+        .expect("run scan");
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    let replay = printed_command(&text, "replay: codehelion ");
+    let explain = printed_command(&text, "open one: codehelion ");
+    for printed in [&replay, &explain] {
+        assert!(printed.contains(&"--path".to_owned()), "{printed:?}");
+        assert!(printed.contains(&"--config".to_owned()), "{printed:?}");
+    }
+
+    let replayed = cmd()
+        .current_dir(working.path())
+        .args(&replay)
+        .output()
+        .expect("run the printed replay");
+    assert!(replayed.status.success(), "{replay:?}: {replayed:?}");
+    let run = replay.last().expect("a run id");
+    assert!(
+        String::from_utf8_lossy(&replayed.stdout).contains(&format!("run {run} ")),
+        "{replayed:?}"
+    );
+    let explained = cmd()
+        .current_dir(working.path())
+        .args(&explain)
+        .output()
+        .expect("run the printed explain");
+    assert!(explained.status.success(), "{explain:?}: {explained:?}");
+}
+
+/// A run replayed for another tree than the one it was recorded for is
+/// replayed as recorded, and the replay says so.
+#[test]
+fn replaying_another_trees_run_says_so() {
+    let first = fixture();
+    let second = fixture();
+    let working = tempfile::tempdir().expect("working directory");
+    for tree in [&first, &second] {
+        cmd()
+            .current_dir(working.path())
+            .arg("scan")
+            .arg(tree.path())
+            .args(["--db", "shared.db"])
+            .assert()
+            .success();
+    }
+    cmd()
+        .current_dir(working.path())
+        .args(["report", "--db", "shared.db", "--run", "1", "--path"])
+        .arg(second.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("note: run 1 was recorded for"));
+    cmd()
+        .current_dir(working.path())
+        .args(["report", "--db", "shared.db", "--run", "2", "--path"])
+        .arg(second.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("was recorded for").not());
+}

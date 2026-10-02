@@ -682,7 +682,9 @@ pub struct StoredSuppressionRef {
     pub pattern: String,
     /// Rule judgement recorded with the suppression, when one was supplied.
     pub reason: Option<String>,
-    /// Whether the referenced rule was active in the database row.
+    /// Whether the rule was in force for the run this was read from. A rule a
+    /// run's finding cites was applied by that run, so it reads as active
+    /// however the current policy has moved since.
     pub active: Option<bool>,
 }
 

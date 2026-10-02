@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use codehelion_core::discovery::{ContentHash, Language};
+use codehelion_core::discovery::Language;
 use codehelion_core::frontend::Token;
 use codehelion_core::ir::{ByteRange, SyntaxIrFile};
 use codehelion_core::semantic::{
@@ -214,7 +214,7 @@ pub(super) struct PartitionOutcome {
     /// caller can still publish an unrecorded result.
     pub(super) recording_error: Option<anyhow::Error>,
     pub(super) staged: Option<StagedSnapshotPart>,
-    /// The key the staged part was recorded under, read back by a later reuse
-    /// decision instead of rebuilt from a second copy of the recipe.
-    pub(super) reuse_key: Option<ContentHash>,
+    /// The completed run the staged part is identical to, as decided when it
+    /// was recorded.
+    pub(super) reusable: Option<i64>,
 }

@@ -486,7 +486,10 @@ impl Store {
                     verified_savings_bytes, absolute_error_bytes, relative_error, recorded_at
              FROM artifact_analysis_savings_calibration
              WHERE source_scan_run_id = ?1 AND clone_group_fingerprint = ?2
-             ORDER BY artifact_analysis_id ASC, after_artifact_fingerprint ASC",
+             ORDER BY artifact_analysis_id ASC, after_artifact_fingerprint ASC,
+                      source_build_variant_fingerprint ASC,
+                      before_artifact_build_variant_fingerprint ASC,
+                      after_artifact_build_variant_fingerprint ASC",
         )?;
         let rows = stmt
             .query_map(params![source_scan_run_id, fingerprint.as_slice()], |row| {

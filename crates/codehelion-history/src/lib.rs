@@ -375,6 +375,13 @@ pub enum HistoryError {
 pub fn read(repo_root: &Path, request: &HistoryRequest) -> Result<History, HistoryError> {
     let repository = open(repo_root)?;
     let shallow = repository.is_shallow();
+    // A shallow clone's boundary commits have no parents in the repository, so
+    // what they changed cannot be read: the walk stops before them.
+    let boundary: BTreeSet<gix::ObjectId> = repository
+        .shallow_commits()
+        .map_err(|error| HistoryError::Read(error.to_string()))?
+        .map(|commits| commits.iter().copied().collect())
+        .unwrap_or_default();
     let start = resolve(&repository, request.until.as_deref())?;
 
     // Newest first along first parents, up to the ceiling. The ceiling is
@@ -383,7 +390,7 @@ pub fn read(repo_root: &Path, request: &HistoryRequest) -> Result<History, Histo
     let mut walked = Vec::new();
     let mut current = Some(start);
     while let Some(id) = current {
-        if walked.len() >= request.limit {
+        if walked.len() >= request.limit || boundary.contains(&id) {
             break;
         }
         let commit = repository
@@ -461,7 +468,10 @@ fn open(repo_root: &Path) -> Result<gix::Repository, HistoryError> {
     })
 }
 
-/// Resolve a revision, or `HEAD` when none was named.
+/// Resolve a revision to the commit it names, or `HEAD` when none was named.
+///
+/// A tag is peeled to its commit; a revision that names no commit at all is
+/// reported as unknown rather than read as one.
 fn resolve(
     repository: &gix::Repository,
     revision: Option<&str>,
@@ -474,13 +484,18 @@ fn resolve(
                 .map_err(|_| HistoryError::Unborn(repository.path().to_path_buf()))
         },
         |spec| {
+            let unknown = |message: String| HistoryError::UnknownRevision {
+                revision: spec.to_string(),
+                message,
+            };
             repository
                 .rev_parse_single(spec)
-                .map(gix::Id::detach)
-                .map_err(|error| HistoryError::UnknownRevision {
-                    revision: spec.to_string(),
-                    message: error.to_string(),
-                })
+                .map_err(|error| unknown(error.to_string()))?
+                .object()
+                .map_err(|error| unknown(error.to_string()))?
+                .peel_to_commit()
+                .map(|commit| commit.id)
+                .map_err(|error| unknown(error.to_string()))
         },
     )
 }

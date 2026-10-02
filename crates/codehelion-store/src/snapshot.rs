@@ -840,6 +840,13 @@ pub struct StagedSnapshotPart {
     suppressions: Vec<StagedSuppression>,
     /// The completed predecessor selected before this invocation started.
     predecessor_run: Option<i64>,
+    /// The invocation start time the partition was staged under.
+    started_at: String,
+    /// The partition's finish time.
+    finished_at: String,
+    /// The completed run this partition was found identical to, which stands
+    /// in for it once the invocation commits.
+    reused_run: Option<i64>,
 }
 
 impl StagedSnapshotPart {
@@ -853,6 +860,18 @@ impl StagedSnapshotPart {
     #[must_use]
     pub const fn with_predecessor(mut self, predecessor_run: Option<i64>) -> Self {
         self.predecessor_run = predecessor_run;
+        self
+    }
+
+    /// Mark this partition as answered by the completed run `run_id`.
+    ///
+    /// Once the partition's own row is discarded and the invocation commits,
+    /// the reused run takes this partition's start and finish times, so the
+    /// invocation's latest-run lookups name it beside the partitions that were
+    /// recorded afresh.
+    #[must_use]
+    pub const fn reusing(mut self, run_id: i64) -> Self {
+        self.reused_run = Some(run_id);
         self
     }
 }

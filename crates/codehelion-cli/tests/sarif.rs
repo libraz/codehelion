@@ -169,19 +169,29 @@ fn structural_output_satisfies_the_published_schema() {
 /// from a clean tree, and it has to satisfy the same published schema the
 /// results do — a consumer that rejects the document reads neither.
 ///
-/// Whether a compiler helper is installed is a property of the machine, so a
-/// run that could not start one is left to the pairing test in the scan suite.
+/// The Rust helper is a workspace binary, so a run without it has an
+/// environment to fix rather than a property to skip.
 #[test]
 fn what_a_run_could_not_read_is_valid_sarif_too() {
+    let doctor = cmd().arg("doctor").output().expect("doctor should run");
+    let doctor = String::from_utf8_lossy(&doctor.stdout);
+    assert!(
+        doctor
+            .lines()
+            .any(|line| line.contains("rust-compiler-helper") && line.contains("available")),
+        "the Rust semantic helper is unavailable; run `cargo build -p codehelion-backend-rust`.\n{doctor}"
+    );
     let dir = fixture();
     let output = cmd()
         .current_dir(dir.path())
         .args(["scan", ".", "--mode", "semantic", "--format", "sarif"])
         .output()
         .expect("run scan");
-    if !output.status.success() {
-        return;
-    }
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let log: Value = serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
     assert_valid_sarif(&log);
 

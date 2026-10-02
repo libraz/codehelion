@@ -21,7 +21,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use codehelion_core::conditional::ArmPath;
-use codehelion_core::discovery::{BuildVariant, ContentHash};
+use codehelion_core::discovery::{AnalysisMode, BuildVariant, ContentHash};
 use codehelion_core::engine::{self, InputFile};
 use codehelion_core::execution::ExecutionPolicy;
 use codehelion_core::stable_id::{self, FileContext};
@@ -52,7 +52,6 @@ pub(crate) const PARTITIONED_REPORT_SCHEMA_URI: &str = "https://github.com/libra
     reason = "the Fast scan orchestration intentionally keeps its stage order visible"
 )]
 pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
-    validate_fast_args(args)?;
     let started_at = rfc3339_now();
     // Measured with a monotonic clock rather than by subtracting the recorded
     // timestamps: those are RFC 3339 strings whose resolution is the report's,
@@ -65,8 +64,19 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
         bail!("scan path {} is not a directory", root.display());
     }
     let resolved_config = config::load(args.config.as_deref(), &root)?;
-    let db_path = scan_database_path(&root, args.db.as_deref(), &resolved_config, args.untrusted)?;
-    let replay_database = args.db.is_some().then(|| spelled_for_a_command(&db_path));
+    let db_path = database_path_for(
+        DatabaseUse::Recording,
+        &root,
+        args.db.as_deref(),
+        &resolved_config,
+        args.untrusted,
+    )?;
+    let replay_flags = replay_flags(
+        &root,
+        args.config.as_deref(),
+        args.db.is_some().then_some(db_path.as_path()),
+        args.untrusted,
+    );
     let _database_lock = crate::scan_lock::acquire(&db_path)?;
     let configuration = configuration_info(
         &resolved_config.source,
@@ -130,7 +140,7 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     let mut inputs = BuildInputs {
         root: &root,
         db_path: &db_path,
-        replay_database: replay_database.as_deref(),
+        replay_flags: &replay_flags,
         configuration: &configuration,
         // Filled in only after the snapshot has been recorded. A provisional
         // report therefore cannot accidentally publish a fake database id.
@@ -194,57 +204,20 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
                 recording: (!inputs.reused).then_some(recording_took),
             });
             model.summary.changes.clone_from(&inputs.changes);
-            let hydration_error = model.run.run_id.and_then(|run_id| {
-                match open_store(&db_path) {
-                    // What the seam ledger has cost is read back from the
-                    // database rather than measured here: a scan reads source
-                    // text and no commits, and the recorded seam run already
-                    // settled these counts.
-                    Ok(store) => crate::report_command::recorded_seam(&store, &path_key(&root))
-                        .and_then(|seam| {
-                            model.seam = seam;
-                            hydrate_artifact_savings(&store, run_id, &mut model.groups)
-                        })
-                        .and_then(|()| {
-                            store
-                                .preceding_compatible_run(run_id)
-                                .map_err(Into::into)
-                                .and_then(|predecessor| {
-                                    predecessor.map_or(Ok(()), |predecessor| {
-                                        hydrate_group_identity(
-                                            &store,
-                                            run_id,
-                                            predecessor,
-                                            &mut model.groups,
-                                        )?;
-                                        model.summary.top_churn = Some(top_group_churn(
-                                            &store,
-                                            run_id,
-                                            predecessor,
-                                            cfg.report.churn_top,
-                                        )?);
-                                        Ok(())
-                                    })
-                                })
-                        })
-                        .err()
-                        .map(|error| (run_id, error)),
-                    Err(error) => Some((run_id, error)),
-                }
-            });
-            if let Some((run_id, error)) = hydration_error {
-                for group in &mut model.groups {
-                    group.artifact_savings.clear();
-                }
-                model.refresh_supplemental_summary();
+            // What the seam ledger has cost is read back from the database
+            // rather than measured here: a scan reads source text and no
+            // commits, and the recorded seam run already settled these counts.
+            let failures = hydrate_recorded_reports(
+                &db_path,
+                cfg.report.churn_top,
+                std::slice::from_mut(&mut model),
+            );
+            if artifact_guidance_holds(&failures) {
+                write_report(args, out, &model)?;
+            } else {
                 write_report_without_artifact_guidance(args, out, &model)?;
-                eprintln!(
-                    "warning: artifact savings were not loaded ({error}); run {run_id} remains recorded, but artifact evidence and guidance are unavailable for this report"
-                );
-                return Err(error);
             }
-            model.refresh_supplemental_summary();
-            write_report(args, out, &model)?;
+            report_hydration_failures(failures)?;
             Ok(outcome(args, &model))
         }
         Err(error) => {
@@ -271,30 +244,72 @@ pub fn run(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
     }
 }
 
-fn validate_fast_args(args: &ScanArgs) -> Result<()> {
-    if args.compare_build_variants {
-        bail!("--compare-build-variants requires --mode semantic");
+/// The flags whose answer only some analysis modes measure.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each boolean is an independent command-line flag"
+)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ModeBoundFlags {
+    pub(crate) compare_build_variants: bool,
+    pub(crate) compare_languages: bool,
+    pub(crate) include_trivial: bool,
+    pub(crate) show_siblings: bool,
+    pub(crate) siblings_by_signature: bool,
+    pub(crate) show_near_misses: bool,
+    pub(crate) identifier_jaccard_sort: bool,
+    pub(crate) min_identifier_jaccard: bool,
+}
+
+impl ModeBoundFlags {
+    /// The mode-bound flags a scan's command line sets.
+    pub(crate) fn of_scan(args: &ScanArgs) -> Self {
+        Self {
+            compare_build_variants: args.compare_build_variants,
+            compare_languages: args.compare_languages,
+            include_trivial: args.include_trivial,
+            show_siblings: args.show_siblings,
+            siblings_by_signature: args.siblings_by_signature,
+            show_near_misses: args.show_near_misses,
+            identifier_jaccard_sort: args.sort == SortAxis::IdentifierJaccard,
+            min_identifier_jaccard: args.min_identifier_jaccard.is_some(),
+        }
     }
-    if args.compare_languages {
-        bail!("--compare-languages requires --mode semantic");
+}
+
+/// Refuse a flag that `mode` measures nothing for.
+///
+/// One rule for a scan, checked against the mode it runs, and for a report,
+/// checked against the mode the replayed run was recorded in: a flag a scan
+/// refuses for Fast is not one a replay of a Fast run may accept.
+///
+/// # Errors
+///
+/// Returns an error naming the first such flag and the modes that measure it.
+pub(crate) fn check_mode_flags(mode: AnalysisMode, flags: ModeBoundFlags) -> Result<()> {
+    let semantic_only = [
+        (flags.compare_build_variants, "--compare-build-variants"),
+        (flags.compare_languages, "--compare-languages"),
+    ];
+    let structural_or_semantic = [
+        (flags.include_trivial, "--include-trivial"),
+        (flags.show_siblings, "--show-siblings"),
+        (flags.siblings_by_signature, "--siblings-by-signature"),
+        (flags.show_near_misses, "--show-near-misses"),
+        (flags.identifier_jaccard_sort, "--sort identifier-jaccard"),
+        (flags.min_identifier_jaccard, "--min-identifier-jaccard"),
+    ];
+    let refused =
+        |flags: &[(bool, &'static str)]| flags.iter().find(|(set, _)| *set).map(|(_, flag)| *flag);
+    if mode != AnalysisMode::Semantic
+        && let Some(flag) = refused(&semantic_only)
+    {
+        usage_bail!("{flag} requires --mode semantic");
     }
-    if args.include_trivial {
-        bail!("--include-trivial requires --mode structural or --mode semantic");
-    }
-    if args.show_siblings {
-        bail!("--show-siblings requires --mode structural or --mode semantic");
-    }
-    if args.siblings_by_signature {
-        bail!("--siblings-by-signature requires --mode structural or --mode semantic");
-    }
-    if args.show_near_misses {
-        bail!("--show-near-misses requires --mode structural or --mode semantic");
-    }
-    if args.sort == SortAxis::IdentifierJaccard {
-        bail!("--sort identifier-jaccard requires --mode structural or --mode semantic");
-    }
-    if args.min_identifier_jaccard.is_some() {
-        bail!("--min-identifier-jaccard requires --mode structural or --mode semantic");
+    if mode == AnalysisMode::Fast
+        && let Some(flag) = refused(&structural_or_semantic)
+    {
+        usage_bail!("{flag} requires --mode structural or --mode semantic");
     }
     Ok(())
 }
@@ -315,19 +330,19 @@ pub(crate) fn permitted(args: &ScanArgs) -> Result<ExecutionPolicy> {
         return Ok(ExecutionPolicy::deny_all());
     };
     if args.untrusted {
-        bail!(
+        usage_bail!(
             "--untrusted permits nothing to run, and --allow-execution={names} \
              asks for something to. Drop whichever of the two was not meant"
         );
     }
     if args.mode != Mode::Semantic {
-        bail!(
+        usage_bail!(
             "--allow-execution={names} has nothing to act on in {} mode, which \
              reads source and runs nothing; it applies to --mode semantic",
             args.mode.name()
         );
     }
-    ExecutionPolicy::parse(names).map_err(Into::into)
+    ExecutionPolicy::parse(names).map_err(|error| crate::UsageError::new(error.to_string()).into())
 }
 
 /// What a finished scan exits with: findings present only when the caller
@@ -354,24 +369,24 @@ pub(crate) mod run_info;
 
 pub(crate) use run_info::{
     RunInfoInputs, common_run_info, configuration_info, file_counts, guardrails_row,
-    new_database_directory_hint, priority_row, rfc3339_now, spelled_for_a_command,
+    new_database_directory_hint, priority_row, replay_flags, rfc3339_now,
 };
 
 pub(crate) mod output;
 
-pub(crate) use output::write_output;
 pub(crate) use output::{
-    ReportOutput, hydrate_artifact_savings, hydrate_group_identity, top_group_churn,
-    write_partitioned_reports_without_artifact_guidance, write_report, write_report_options,
-    write_report_options_without_artifact_guidance, write_report_without_artifact_guidance,
+    ReportOutput, artifact_guidance_holds, hydrate_artifact_savings, hydrate_group_identity,
+    hydrate_recorded_reports, hydrate_recorded_run, report_hydration_failures,
+    write_partitioned_reports, write_partitioned_reports_without_artifact_guidance, write_report,
+    write_report_without_artifact_guidance,
 };
+pub(crate) use output::{overwrite_refusal, write_output};
 
 pub(crate) mod runtime;
 
 pub(crate) use runtime::{
-    DatabaseUse, build_globset, database_path, database_path_for, discover_sources, effective_jobs,
-    filter_globs, guarded, incompatible_database_replacement, literal_norm, readable_here,
-    scan_database_path,
+    DatabaseUse, build_globset, database_path_for, discover_sources, effective_jobs, filter_globs,
+    guarded, incompatible_database_replacement, literal_norm, readable_here,
 };
 use runtime::{engine_config, lex_sources};
 

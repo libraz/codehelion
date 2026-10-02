@@ -426,7 +426,7 @@ fn supplemental_diagnostics_respect_show_suppressed_in_text() {
 
 #[test]
 fn the_near_miss_text_flag_is_rejected_for_machine_formats() {
-    let error = crate::scan::write_report_options(
+    let error = crate::scan::output::write_report_options(
         crate::scan::ReportOutput {
             format: crate::cli::Format::Json,
             output: None,

@@ -14,7 +14,7 @@ use codehelion_store::Store;
 
 use crate::cli::CacheAction;
 use crate::doctor_command::write_lease_status;
-use crate::{Outcome, resolve_db_at, scan, scan_lock};
+use crate::{Outcome, resolve_database, scan, scan_lock};
 
 /// The database one `cache` action works on.
 ///
@@ -28,7 +28,7 @@ fn cache_database(
     config: Option<&Path>,
     untrusted: bool,
 ) -> Result<PathBuf> {
-    resolve_db_at(intent, path, db, config, untrusted)
+    resolve_database(intent, path, db, config, untrusted).map(|(_, _, database)| database)
 }
 
 pub(crate) fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> {
@@ -58,7 +58,9 @@ pub(crate) fn cache_command(action: &CacheAction, out: &mut impl Write) -> Resul
             force,
         } => {
             if !force {
-                bail!("`cache prune` deletes retained local history; pass --force to confirm");
+                usage_bail!(
+                    "`cache prune` deletes retained local history; pass --force to confirm"
+                );
             }
             // Literal: a command that deletes acts on the file it was pointed
             // at, whatever this build can make of it.
@@ -83,7 +85,7 @@ pub(crate) fn cache_command(action: &CacheAction, out: &mut impl Write) -> Resul
             force,
         } => {
             if !force {
-                bail!(
+                usage_bail!(
                     "`cache clear` permanently deletes the local audit database; pass --force to confirm"
                 );
             }

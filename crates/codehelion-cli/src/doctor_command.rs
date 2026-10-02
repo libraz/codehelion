@@ -14,7 +14,7 @@ use codehelion_helper::client::ConfiguredHelper;
 use codehelion_store::Store;
 
 use crate::cli::DoctorArgs;
-use crate::{find_git_root, is_git_ignored, resolve_db_at, scan, scan_lock};
+use crate::{find_git_root, is_git_ignored, resolve_database, scan, scan_lock};
 
 /// How long a diagnostic waits for a helper to introduce itself.
 ///
@@ -150,17 +150,22 @@ pub(crate) fn doctor_database(args: &DoctorArgs, out: &mut impl Write) -> Result
     // to name the database that was configured rather than the one another
     // command would fall back to. Which file each of them would use is the
     // next few lines' subject.
-    let db = resolve_db_at(
+    let (_, _, db) = resolve_database(
         scan::DatabaseUse::Literal,
         &cwd,
         args.db.as_deref(),
         args.config.as_deref(),
         args.untrusted,
     )?;
+    // A relative `--db` names a file against the working directory, as it does
+    // for every command that opens it; only the configured default is placed
+    // under `--path`, and the resolver has already made that one absolute.
     let db_abs = if db.is_absolute() {
         db.clone()
     } else {
-        cwd.join(&db)
+        std::env::current_dir()
+            .context("resolving the current directory")?
+            .join(&db)
     };
     writeln!(out)?;
     match std::fs::metadata(&db_abs) {

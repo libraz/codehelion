@@ -23,8 +23,8 @@ use crate::suppress;
 pub(super) struct ReportInputs<'a> {
     pub(super) root: &'a Path,
     pub(super) db_path: &'a Path,
-    /// The `--db` the commands this report prints have to repeat.
-    pub(super) replay_database: Option<&'a str>,
+    /// The flags the commands this report prints have to repeat.
+    pub(super) replay_flags: &'a str,
     pub(super) configuration: &'a report::ConfigurationInfo,
     pub(super) started_at: &'a str,
     pub(super) finished_at: &'a str,

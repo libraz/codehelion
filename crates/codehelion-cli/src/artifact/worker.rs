@@ -183,10 +183,17 @@ pub(super) fn run_isolated_request(
             .context("relaying isolated artifact worker diagnostics")?;
     }
     if !status.success() {
-        if detail.is_empty() {
-            bail!("artifact worker exited with {status}");
+        let failure = if detail.is_empty() {
+            format!("artifact worker exited with {status}")
+        } else {
+            format!("artifact worker failed: {detail}")
+        };
+        // The worker runs the same entry point, so a command line it rejected
+        // exits with the usage status and stays a usage error here.
+        if status.code() == Some(i32::from(crate::EXIT_USAGE)) {
+            return Err(crate::UsageError::new(failure).into());
         }
-        bail!("artifact worker failed: {detail}");
+        bail!(failure);
     }
     if !detail.is_empty() {
         std::io::stderr()

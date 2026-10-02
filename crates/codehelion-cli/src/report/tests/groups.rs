@@ -123,6 +123,25 @@ fn the_report_closes_with_the_marks_it_used_and_what_to_type_next() {
     assert!(!text.contains("\"run\""), "{text}");
 }
 
+/// Two ids that share their first eight digits are printed long enough to
+/// tell apart, so each abbreviation names one finding to `explain`; ids that
+/// do not collide keep the short form.
+#[test]
+fn abbreviated_ids_are_lengthened_until_no_two_share_one() {
+    let mut report = sample_report();
+    report.groups[1].suppressed = None;
+    report.groups[0].fingerprint = format!("0b0b0b0b0a{}", "1".repeat(22));
+    report.groups[1].fingerprint = format!("0b0b0b0b0c{}", "2".repeat(22));
+    let text = rendered(&report, TextOptions::default());
+    for (abbreviated, longer) in [("0b0b0b0b0a", "0b0b0b0b0a1"), ("0b0b0b0b0c", "0b0b0b0b0c2")] {
+        assert!(text.contains(abbreviated), "{text}");
+        assert!(!text.contains(longer), "{text}");
+    }
+
+    let text = rendered(&sample_report(), TextOptions::default());
+    assert!(text.contains("codehelion explain 0b0b0b0b "), "{text}");
+}
+
 #[test]
 fn a_listing_of_runs_says_what_a_run_is() {
     let mut report = sample_report();

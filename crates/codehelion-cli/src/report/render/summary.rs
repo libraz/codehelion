@@ -109,6 +109,8 @@ impl Report {
                 baseline.appeared,
                 baseline.expanded,
             )?;
+        } else if summary.baseline_not_replayed {
+            writeln!(out, "note: {}", super::super::notes::BASELINE_NOT_REPLAYED)?;
         }
         self.render_legend(opts, palette, out)
     }
@@ -438,18 +440,15 @@ pub(super) fn run_status(report: &Report) -> String {
     format!(" (replay: codehelion report{database} --run {run_id})")
 }
 
-/// The `--db` every command this report prints has to carry, ready to be
-/// pasted into one, or nothing when a bare invocation finds the same database.
+/// The flags every command this report prints has to carry, ready to be
+/// pasted into one, or nothing when a bare invocation finds the same root,
+/// configuration and database.
 ///
 /// A next step the reader cannot take is worse than no next step at all: they
 /// paste it, it opens somewhere else, and the report that sent them there is
 /// the thing they stop trusting.
 pub(super) fn database_flag(report: &Report) -> String {
-    report
-        .run
-        .replay_database
-        .as_deref()
-        .map_or_else(String::new, |path| format!(" --db {path}"))
+    report.run.replay_flags.clone()
 }
 
 /// What became of the groups the previous run put at the top.

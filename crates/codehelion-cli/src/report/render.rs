@@ -184,6 +184,16 @@ impl Report {
     ///
     /// Returns any error from the writer.
     pub fn render_text(&self, opts: TextOptions, out: &mut impl Write) -> io::Result<()> {
+        // Finding ids are printed only beside detail, so only then do they
+        // compete with the group ids for an abbreviation.
+        let opts = opts.with_ids_distinct(self.groups.iter().flat_map(|group| {
+            let findings = group
+                .members
+                .iter()
+                .filter(|_| opts.detailed())
+                .map(|member| member.finding_id.as_str());
+            std::iter::once(group.fingerprint.as_str()).chain(findings)
+        }));
         let palette = Palette {
             enabled: opts.color,
         };

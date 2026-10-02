@@ -293,6 +293,54 @@ fn a_changed_immediate_is_reported_even_though_it_normalizes_away() {
     );
 }
 
+/// A native symbol carries no body identity, so its retained code bytes are
+/// what tells two builds of it apart.
+#[test]
+fn a_same_size_native_edit_is_reported_when_the_symbol_has_no_body_identity() {
+    let mut before = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
+    before.symbols = vec![codehelion_artifact::ArtifactSymbol {
+        fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("test", b"function"),
+        name: Some("retuned".to_owned()),
+        exported: false,
+        section: None,
+        offset: 0,
+        size: 5,
+        size_inferred: false,
+        code: vec![0xb8, 1, 0, 0, 0],
+        normalized: None,
+        body_fingerprint: None,
+        inline_stack: Vec::new(),
+    }];
+    let mut after = before.clone();
+    after.symbols[0].code = vec![0xb8, 2, 0, 0, 0];
+    let unchanged = before.clone();
+
+    let report = |left: &ArtifactIr, right: &ArtifactIr| {
+        ArtifactComparisonReport::new(
+            std::path::Path::new("before.o"),
+            left,
+            None,
+            std::path::Path::new("after.o"),
+            right,
+            None,
+        )
+    };
+    let edited = report(&before, &after);
+    assert_eq!(
+        edited
+            .symbol_deltas
+            .iter()
+            .map(|delta| (delta.kind, delta.name.as_deref(), delta.size_delta_bytes))
+            .collect::<Vec<_>>(),
+        vec![("modified", Some("retuned"), 0)]
+    );
+    assert_eq!(edited.symbol_changes.modified_named_symbols, 1);
+
+    let same = report(&before, &unchanged);
+    assert!(same.symbol_deltas.is_empty());
+    assert_eq!(same.symbol_changes.modified_named_symbols, 0);
+}
+
 #[test]
 fn comparison_reports_individual_duplicate_group_changes() {
     let mut before = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();

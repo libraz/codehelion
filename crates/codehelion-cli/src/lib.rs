@@ -13,12 +13,21 @@
 //!
 //! `run` returns an [`Outcome`] that maps to a process exit code: `0` on
 //! success (whether or not findings were reported), and [`EXIT_FINDINGS`] when
-//! a scan reported findings and `--fail-on-findings` was set. Any error maps to
-//! `1` in `main`, and `clap` uses `2` for usage errors.
+//! a scan reported findings and `--fail-on-findings` was set. An error maps to
+//! [`EXIT_USAGE`] when it is a [`UsageError`] — the same code `clap` uses for
+//! the rejections it makes itself — and to `1` otherwise; see
+//! [`error_exit_code`].
 //!
 //! A reader that stops reading — `codehelion scan | head` — ends the output,
 //! not the run: the remaining text is dropped and the exit code stays the one
 //! the completed work earned.
+
+/// Return a [`UsageError`] built from a format string.
+macro_rules! usage_bail {
+    ($($message:tt)*) => {
+        return Err(anyhow::Error::new($crate::UsageError::new(format!($($message)*))))
+    };
+}
 
 pub mod artifact;
 pub mod baseline;
@@ -37,7 +46,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use codehelion_core::doctor;
 
 use crate::cli::{ArtifactAction, Cli, Command, Mode, ScanArgs};
@@ -49,6 +58,45 @@ const FULL_ID_CHARS: usize = 32;
 
 /// Exit code returned when a scan reports findings and gating is requested.
 pub const EXIT_FINDINGS: u8 = 3;
+
+/// Exit code returned when the command line was invalid.
+pub const EXIT_USAGE: u8 = 2;
+
+/// A rejection decided from the command line alone: a flag combination, a
+/// value out of range, or a flag the analysis mode has no use for.
+///
+/// Kept distinct from every failure that depends on the environment or the
+/// data, so a caller can tell a misconfigured invocation, which will fail the
+/// same way every time, from one worth retrying.
+#[derive(Debug)]
+pub struct UsageError(String);
+
+impl UsageError {
+    /// A usage rejection carrying `message`.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl fmt::Display for UsageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageError {}
+
+/// Process exit code for an error [`run`] returned: [`EXIT_USAGE`] when a
+/// [`UsageError`] is anywhere in its chain, `1` otherwise.
+#[must_use]
+pub fn error_exit_code(error: &anyhow::Error) -> ExitCode {
+    if error.chain().any(<dyn std::error::Error>::is::<UsageError>) {
+        ExitCode::from(EXIT_USAGE)
+    } else {
+        ExitCode::FAILURE
+    }
+}
 
 /// Successful command outcome, carrying the process exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,23 +303,12 @@ fn configured_helper_path<'a>(name: &str, helpers: &'a config::Helpers) -> Optio
 }
 
 fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
-    if args.compare_build_variants && args.mode != Mode::Semantic {
-        bail!("--compare-build-variants requires --mode semantic");
-    }
-    if args.compare_languages && args.mode != Mode::Semantic {
-        bail!("--compare-languages requires --mode semantic");
-    }
-    if args.include_trivial && args.mode == Mode::Fast {
-        bail!("--include-trivial requires --mode structural or --mode semantic");
-    }
-    if args.siblings_by_signature && args.mode == Mode::Fast {
-        bail!("--siblings-by-signature requires --mode structural or --mode semantic");
-    }
+    scan::check_mode_flags(args.mode.into(), scan::ModeBoundFlags::of_scan(args))?;
     // Only semantic analysis starts a compiler helper. Pinning one for a mode
     // that starts none reads as pinning the run, so it is refused with the mode
     // named rather than accepted and ignored.
     if !args.helpers.is_empty() && args.mode != Mode::Semantic {
-        bail!(
+        usage_bail!(
             "--helper has nothing to act on in {} mode, which reads source \
              without a compiler helper; it applies to --mode semantic",
             args.mode.name()
@@ -310,32 +347,28 @@ pub(crate) mod report_command;
 
 use report_command::{explain, report_command};
 
-/// Resolve the local-database path: an explicit flag wins, otherwise the
-/// configured location (discovered `codehelion.toml` or defaults).
-fn resolve_db(intent: scan::DatabaseUse, flag: Option<&Path>) -> Result<PathBuf> {
-    let current = std::env::current_dir().context("resolving the current directory")?;
-    let root =
-        codehelion_core::paths::canonical(&current).context("resolving the current directory")?;
-    resolve_db_at(intent, &root, flag, None, false)
-}
-
-/// Resolve a local-database path for the repository selected by one command.
+/// Resolve the repository one command selected, its configuration, and the
+/// local database it uses.
 ///
-/// All source-audit commands use this path so an explicit database, a named
-/// configuration, and a discovered configuration receive identical handling.
+/// Every command that does not already hold its canonical root and loaded
+/// configuration goes through this, so an explicit database, a named
+/// configuration, and a discovered configuration receive identical handling;
+/// the file itself is chosen by [`scan::database_path_for`]. A command with no
+/// `--path` passes `.`, the working directory.
 /// What the command then does with the file decides whether a default this
 /// build cannot open is stepped around; see [`scan::DatabaseUse`].
-fn resolve_db_at(
+fn resolve_database(
     intent: scan::DatabaseUse,
-    root: &Path,
+    path: &Path,
     flag: Option<&Path>,
     config_path: Option<&Path>,
     untrusted: bool,
-) -> Result<PathBuf> {
-    let root = codehelion_core::paths::canonical(root)
-        .with_context(|| format!("resolving path {}", root.display()))?;
+) -> Result<(PathBuf, config::ResolvedConfig, PathBuf)> {
+    let root = codehelion_core::paths::canonical(path)
+        .with_context(|| format!("resolving path {}", path.display()))?;
     let resolved_config = config::load(config_path, &root)?;
-    scan::database_path_for(intent, &root, flag, &resolved_config, untrusted)
+    let database = scan::database_path_for(intent, &root, flag, &resolved_config, untrusted)?;
+    Ok((root, resolved_config, database))
 }
 
 mod baseline_command;

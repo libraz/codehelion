@@ -48,7 +48,9 @@ fn config_init_writes_a_template_then_refuses_overwrite() {
         .args(["config", "init"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("already exists"));
+        .stderr(predicate::str::contains(
+            "refusing to overwrite an existing file",
+        ));
 
     cmd()
         .current_dir(dir.path())
@@ -88,4 +90,39 @@ fn config_show_rejects_unknown_keys() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown field"));
+}
+
+/// Every command that writes a file the user named refuses an existing one
+/// with the same message and leaves its contents untouched.
+#[test]
+fn every_user_named_file_refuses_an_existing_one_the_same_way() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("lib.rs"), "pub fn tiny() {}\n").expect("write source");
+    cmd()
+        .current_dir(dir.path())
+        .args(["scan", "."])
+        .assert()
+        .success();
+    let taken = dir.path().join("taken.out");
+    std::fs::write(&taken, "keep\n").expect("write existing file");
+    for arguments in [
+        vec!["config", "init", "--output", "taken.out"],
+        vec!["baseline", "create", ".", "--file", "taken.out"],
+        vec!["scan", ".", "--output", "taken.out"],
+        vec!["report", "--output", "taken.out"],
+    ] {
+        cmd()
+            .current_dir(dir.path())
+            .args(&arguments)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "writing taken.out (refusing to overwrite an existing file; pass --force to replace it)",
+            ));
+        assert_eq!(
+            std::fs::read_to_string(&taken).expect("read existing file"),
+            "keep\n",
+            "{arguments:?} replaced the file"
+        );
+    }
 }

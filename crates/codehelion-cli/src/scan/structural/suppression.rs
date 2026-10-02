@@ -2,7 +2,6 @@
 
 use super::inputs::ReportInputs;
 use super::model::{SemanticGroup, SemanticPair, SemanticUnitGraph, SourceMeta};
-use super::reporting::{member_hosts, ranks_after};
 use super::semantic_analysis::semantic_group_member_fingerprints;
 use crate::config::{self, BoilerplatePolicy, CategoryAction, Config};
 use crate::scan::build::as_u64;
@@ -460,31 +459,17 @@ pub(super) fn evaluate_suppression(
             let detail = &analysis.details[siblings.group];
             let group = &analysis.groups.groups[siblings.group];
             let member_count = as_u64(group.members.len());
-            // The id a rule is matched against has to be the one this run
-            // reports and records for the same sibling, so it is derived the
-            // same way: a sibling ranks after the primary members, because its
-            // host content can repeat a member's and an id shared with that
-            // member would answer to a rule written about the member.
-            let ranks = ranks_after(
-                member_hosts(&analysis.units, &group.members),
-                siblings
-                    .siblings
-                    .iter()
-                    .map(|sibling| analysis.units[sibling.unit].fingerprint),
-            );
+            // A rule names the owning group: an incomplete mirror is one more
+            // occurrence of that group, so clone-ids and a baseline take the
+            // group's id here as for every other finding, and an occurrence id
+            // written into either matches nothing.
             siblings
                 .siblings
                 .iter()
-                .zip(ranks)
-                .map(|(sibling, rank)| {
+                .map(|sibling| {
                     let unit = &analysis.units[sibling.unit];
-                    let finding = stable_id::finding_id(
-                        &detail.fingerprint,
-                        stable_id::OccurrenceScope::Unit(&unit.fingerprint),
-                        rank,
-                    );
                     shared::SuppressionPriority::first(|| {
-                        rules.rules.clone_id_rule(&finding.to_hex())
+                        rules.rules.clone_id_rule(&detail.fingerprint.to_hex())
                     })
                     .or_else(|| {
                         rules.group_rule(std::iter::once(sibling.unit), analysis, &local_units)

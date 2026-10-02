@@ -142,7 +142,7 @@ pub struct ScanArgs {
     /// its own trust level — which is the one setting whose whole point is that
     /// its subject does not choose it.
     ///
-    /// A configured database path must remain inside `--path`; an explicit
+    /// A configured database path must remain inside the scanned path; an explicit
     /// `--db` remains a deliberate operator choice.
     ///
     /// Semantic mode additionally requires an OS-enforced helper memory

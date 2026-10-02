@@ -579,3 +579,49 @@ fn the_latest_completed_invocation_returns_every_partition() {
         std::collections::BTreeSet::from([fast.fingerprint(), structural.fingerprint()])
     );
 }
+
+#[test]
+fn a_reused_partition_joins_the_invocation_that_reused_it() {
+    let fast = BuildVariant::fast(LanguageSelection::default(), Language::C);
+    let structural = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let mut earlier = sample_snapshot(&fast, &detectors);
+    earlier.started_at = "2026-07-25T00:00:00Z";
+    earlier.finished_at = "2026-07-25T00:00:04Z";
+    let reused_id = store.record_snapshot(&earlier).unwrap();
+
+    let mut retired = sample_snapshot(&fast, &detectors);
+    retired.started_at = "2026-07-26T00:00:00Z";
+    retired.finished_at = "2026-07-26T00:00:03Z";
+    let retired = store
+        .record_snapshot_part_staged(&retired)
+        .unwrap()
+        .reusing(reused_id);
+    store.discard_run(retired.run_id()).unwrap();
+    let mut live = sample_snapshot(&structural, &detectors);
+    live.started_at = "2026-07-26T00:00:00Z";
+    live.finished_at = "2026-07-26T00:00:04Z";
+    let live = store.record_snapshot_part_staged(&live).unwrap();
+    let live_id = live.run_id();
+
+    store
+        .finalize_snapshot_parts_with_retired(
+            std::slice::from_ref(&live),
+            std::slice::from_ref(&retired),
+            codehelion_store::snapshot::SnapshotComparisons::default(),
+        )
+        .unwrap();
+
+    let invocation = store.latest_completed_invocation("/repo").unwrap();
+    assert_eq!(
+        invocation
+            .iter()
+            .map(|origin| origin.id)
+            .collect::<Vec<_>>(),
+        vec![reused_id, live_id],
+        "the reused partition is part of the invocation that reused it"
+    );
+    assert_eq!(invocation[0].finished_at, "2026-07-26T00:00:03Z");
+}

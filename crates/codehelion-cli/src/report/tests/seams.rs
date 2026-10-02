@@ -111,6 +111,30 @@ fn a_seam_that_was_never_changed_on_one_side_says_only_that() {
     assert!(!section.contains("breach"), "{section}");
 }
 
+/// A seam nobody changed on one side can still hold findings: they come from
+/// a scan, not from the history, so the line states them as the JSON does.
+#[test]
+fn a_seam_with_findings_and_no_asymmetric_change_still_states_its_findings() {
+    let mut report = sample_report();
+    let mut seam = sample_seam_report();
+    seam.seams.truncate(1);
+    seam.seams[0].asymmetric_changes = 0;
+    seam.seams[0].breaches = 0;
+    seam.seams[0].last_breach = None;
+    seam.seams[0].findings = 1_553;
+    seam.seams[0].asymmetric_changes_since = Some(0);
+    seam.seams[0].breaches_since = Some(0);
+    seam.seams[0].findings_since = Some(0);
+    report.seam = Some(seam);
+
+    let section = rendered_seam_section(&report);
+    assert!(
+        section.contains("seams: frontend-c-cpp no asymmetric changes, 1,553 findings\n"),
+        "{section}"
+    );
+    assert!(!section.contains("breach"), "{section}");
+}
+
 #[test]
 fn no_recorded_seam_run_leaves_the_section_out_entirely() {
     let report = sample_report();

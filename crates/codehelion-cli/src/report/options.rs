@@ -73,6 +73,22 @@ impl Decoration {
         }
     }
 
+    /// What sets a qualifying clause off from the line it qualifies.
+    pub(crate) const fn dash(self) -> &'static str {
+        match self {
+            Self::Unicode => "—",
+            Self::Ascii | Self::None => "-",
+        }
+    }
+
+    /// What points from one side of a mapping to the other.
+    pub(crate) const fn arrow(self) -> &'static str {
+        match self {
+            Self::Unicode => "→",
+            Self::Ascii | Self::None => "->",
+        }
+    }
+
     /// What stands between the two sides of a comparison.
     pub(crate) const fn between(self) -> &'static str {
         match self {
@@ -119,9 +135,35 @@ pub struct TextOptions {
     /// working maintainability picks a floor on this measure and works down
     /// from there, and doing it by hand means leaving the tool.
     pub min_identifier_jaccard: Option<f64>,
+    /// Identifier digits an abbreviated id is printed with, settled per
+    /// report so no two ids it prints share their abbreviation. Below
+    /// `SHORT_ID_CHARS` it means `SHORT_ID_CHARS`.
+    pub(crate) id_chars: usize,
 }
 
 impl TextOptions {
+    /// These options, with abbreviations long enough that no two of `ids`
+    /// print the same.
+    #[must_use]
+    pub(crate) fn with_ids_distinct<'a>(mut self, ids: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut ids: Vec<&str> = ids.into_iter().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let shared = ids
+            .windows(2)
+            .map(|pair| {
+                pair[0]
+                    .bytes()
+                    .zip(pair[1].bytes())
+                    .take_while(|(left, right)| left == right)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        self.id_chars = SHORT_ID_CHARS.max(shared.saturating_add(1));
+        self
+    }
+
     /// Whether the reader asked for the numbers behind each group.
     #[must_use]
     pub(crate) const fn detailed(self) -> bool {
@@ -152,14 +194,14 @@ impl TextOptions {
         }
     }
 
-    /// A fingerprint as this view prints it: abbreviated to the shortest
-    /// prefix `codehelion explain` accepts, unless full identifiers were
-    /// asked for.
+    /// A fingerprint as this view prints it: abbreviated to a prefix
+    /// `codehelion explain` accepts and no other id in the report shares,
+    /// unless full identifiers were asked for.
     pub(crate) fn id(self, hex: &str) -> &str {
         if self.diagnostic() {
             hex
         } else {
-            hex.get(..SHORT_ID_CHARS).unwrap_or(hex)
+            hex.get(..self.id_chars.max(SHORT_ID_CHARS)).unwrap_or(hex)
         }
     }
 }

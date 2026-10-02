@@ -44,8 +44,9 @@
 //! class with an inherent severity, and the scan's own ranking (priority, with
 //! its inputs) is a different quantity from a consumer's severity axis;
 //! collapsing one onto the other would invent a judgement the tool never made.
-//! The ranking survives as the order of `results` and in each result's
-//! property bag.
+//! The ranking survives as the order of `results` — the report's own order,
+//! ranked-down groups last and the rest on the `--sort` axis — and in each
+//! result's property bag.
 
 use std::collections::BTreeMap;
 

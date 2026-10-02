@@ -131,3 +131,29 @@ fn a_helper_reported_as_present_says_what_it_answered() {
         assert!(row.contains("not found"), "{text}");
     }
 }
+
+/// A relative `--db` names a file against the working directory for doctor as
+/// it does for scan and cache, whatever `--path` selects.
+#[test]
+fn doctor_reads_a_relative_database_against_the_working_directory() {
+    let working = tempfile::tempdir().expect("working directory");
+    let elsewhere = tempfile::tempdir().expect("selected tree");
+    std::fs::write(elsewhere.path().join("lib.rs"), "pub fn tiny() {}\n").expect("write source");
+    cmd()
+        .current_dir(working.path())
+        .args(["scan", "--db", "here.db"])
+        .arg(elsewhere.path())
+        .assert()
+        .success();
+    assert!(working.path().join("here.db").is_file());
+
+    cmd()
+        .current_dir(working.path())
+        .args(["doctor", "--db", "here.db", "--path"])
+        .arg(elsewhere.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("local database: here.db ("))
+        .stdout(predicate::str::contains("database health: schema"))
+        .stdout(predicate::str::contains("(absent)").not());
+}

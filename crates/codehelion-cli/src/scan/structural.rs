@@ -18,19 +18,20 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use codehelion_core::discovery::{
-    BuildVariant, ContentHash, Language, LanguageSelection, SourceUnit,
-};
+use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection, SourceUnit};
 use codehelion_core::ir::StructuralFrontend;
 use codehelion_core::structural::DirectoryPartition;
 use codehelion_store::snapshot::{SnapshotComparisons, StagedSnapshotPart, SummaryRow};
 
 use super::build::as_u64;
-use super::output::write_partitioned_reports;
+use super::output::{
+    ReportOutput, artifact_guidance_holds, hydrate_recorded_reports, report_hydration_failures,
+    write_partitioned_reports,
+};
 use super::run_info::rfc3339_now;
 use super::runtime::{
-    FileOutcome, discover_sources, effective_jobs, filter_globs, read_within_budget,
-    scan_database_path,
+    DatabaseUse, FileOutcome, database_path_for, discover_sources, effective_jobs, filter_globs,
+    read_within_budget,
 };
 use super::store::open_store;
 use codehelion_store::path_key;
@@ -78,40 +79,22 @@ pub(super) fn remove_signature_sibling_funnel_stage(summary: &mut SummaryRow) {
         .retain(|stage| stage.name != SIGNATURE_SIBLING_FUNNEL_STAGE);
 }
 
+/// Stand the completed run `previous` in for a staged partition found
+/// identical to it, returning the token the invocation commits it through.
 fn reuse_semantic_partition(
     report: &mut Report,
     db_path: &Path,
-    root: &Path,
-    config_hash: &ContentHash,
-    staged: &StagedSnapshotPart,
-) -> Result<bool> {
-    let Some(new_run_id) = report.run.run_id else {
-        return Ok(false);
-    };
-    let mut store = open_store(db_path)?;
-    let Some(previous) = store.latest_compatible_run(
-        &path_key(root),
-        config_hash.as_str(),
-        &report.run.build_variant.fingerprint,
-    )?
-    else {
-        return Ok(false);
-    };
-    let same_baseline = store
-        .run_summary_row(previous.id)?
-        .zip(store.run_summary_row(new_run_id)?)
-        .is_some_and(|(old, new)| old.baseline_digest == new.baseline_digest);
-    if !same_baseline || store.run_tree(previous.id)? != store.run_tree(new_run_id)? {
-        return Ok(false);
-    }
+    previous: i64,
+    staged: StagedSnapshotPart,
+) -> Result<StagedSnapshotPart> {
     // Keep the opaque token alive for invocation-level suppression cleanup.
     // The run itself is discarded now because this partition reuses the
     // completed predecessor; aborting the token here could delete a newly
     // created rule that a later live partition shares.
-    store.discard_run(staged.run_id())?;
-    report.run.run_id = Some(previous.id);
+    open_store(db_path)?.discard_run(staged.run_id())?;
+    report.run.run_id = Some(previous);
     report.run.reused = true;
-    Ok(true)
+    Ok(staged.reusing(previous))
 }
 
 /// Execute `codehelion scan` in Structural mode.
@@ -168,10 +151,10 @@ fn run_with(
     compilers: Option<&Compilers>,
 ) -> Result<Outcome> {
     if args.compare_build_variants && compilers.is_none() {
-        bail!("--compare-build-variants requires --mode semantic");
+        usage_bail!("--compare-build-variants requires --mode semantic");
     }
     if args.compare_languages && compilers.is_none() {
-        bail!("--compare-languages requires --mode semantic");
+        usage_bail!("--compare-languages requires --mode semantic");
     }
     let started_at = rfc3339_now();
     let root = codehelion_core::paths::canonical(&args.path)
@@ -180,7 +163,13 @@ fn run_with(
         bail!("scan path {} is not a directory", root.display());
     }
     let resolved_config = config::load(args.config.as_deref(), &root)?;
-    let db_path = scan_database_path(&root, args.db.as_deref(), &resolved_config, args.untrusted)?;
+    let db_path = database_path_for(
+        DatabaseUse::Recording,
+        &root,
+        args.db.as_deref(),
+        &resolved_config,
+        args.untrusted,
+    )?;
     let _database_lock = crate::scan_lock::acquire(&db_path)?;
     let configuration = crate::scan::configuration_info(
         &resolved_config.source,
@@ -285,30 +274,28 @@ fn run_with(
         if recording_error.is_none() {
             recording_error = finished.recording_error.take();
         }
-        let mut staged = finished.staged.take();
-        if recording_error.is_none()
-            && !args.no_reuse
-            && !args.compare_build_variants
-            && !args.compare_languages
-            && let Some(staged_part) = staged.as_ref()
-            && let Some(reuse_key) = finished.reuse_key.as_ref()
-            && let Err(error) = reuse_semantic_partition(
-                &mut finished.report,
-                &db_path,
-                &root,
-                reuse_key,
-                staged_part,
-            )
-        {
-            recording_error = Some(error);
-        }
-        if finished.report.run.reused
-            && let Some(staged) = staged.take()
-        {
-            retired_parts.push(staged);
-        }
-        if let Some(staged) = staged {
-            staged_parts.push(staged);
+        if let Some(staged) = finished.staged.take() {
+            if recording_error.is_none()
+                && !args.no_reuse
+                && !args.compare_build_variants
+                && !args.compare_languages
+                && let Some(previous) = finished.reusable
+            {
+                match reuse_semantic_partition(
+                    &mut finished.report,
+                    &db_path,
+                    previous,
+                    staged.clone(),
+                ) {
+                    Ok(retired) => retired_parts.push(retired),
+                    Err(error) => {
+                        recording_error = Some(error);
+                        staged_parts.push(staged);
+                    }
+                }
+            } else {
+                staged_parts.push(staged);
+            }
         }
         if finished.outcome == Outcome::FindingsPresent {
             outcome = Outcome::FindingsPresent;
@@ -380,7 +367,13 @@ fn run_with(
             report.refresh_supplemental_summary();
         }
         crate::scan::write_partitioned_reports_without_artifact_guidance(
-            args, out, &reports, None, None, None, None,
+            ReportOutput::of_scan(args),
+            out,
+            &reports,
+            None,
+            None,
+            None,
+            None,
         )?;
         eprintln!(
             "warning: this run was not recorded ({error}); replay and baseline comparison are unavailable for it"
@@ -397,32 +390,18 @@ fn run_with(
     }
     let comparison = prepared_variant.map(|prepared| prepared.report);
     let cross_language_comparison = prepared_cross_language.map(|prepared| prepared.report);
-    if let Err(error) = hydrate_recorded_runs(&db_path, &cfg, &mut reports) {
-        for report in &mut reports {
-            for group in &mut report.groups {
-                group.artifact_savings.clear();
-            }
-            report.refresh_supplemental_summary();
-        }
-        crate::scan::write_partitioned_reports_without_artifact_guidance(
-            args,
-            out,
-            &reports,
-            comparison.as_ref(),
-            comparison_not_run.as_ref(),
-            cross_language_comparison.as_ref(),
-            cross_language_not_run.as_ref(),
-        )?;
-        eprintln!(
-            "warning: artifact savings were not loaded ({error}); recorded run data remains available, but artifact evidence and guidance are unavailable for this report"
-        );
-        return Err(error);
-    }
-    for report in &mut reports {
-        report.refresh_supplemental_summary();
-    }
-    write_partitioned_reports(
-        args,
+    // What the audit database knows about every recorded run is read back the
+    // same way a later `report` reads it, so the two carry the same evidence.
+    // The seam summary belongs to the repository rather than to one program
+    // in it, and is attached to every report for that reason.
+    let failures = hydrate_recorded_reports(&db_path, cfg.report.churn_top, &mut reports);
+    let write = if artifact_guidance_holds(&failures) {
+        write_partitioned_reports
+    } else {
+        crate::scan::write_partitioned_reports_without_artifact_guidance
+    };
+    write(
+        ReportOutput::of_scan(args),
         out,
         &reports,
         comparison.as_ref(),
@@ -430,49 +409,8 @@ fn run_with(
         cross_language_comparison.as_ref(),
         cross_language_not_run.as_ref(),
     )?;
+    report_hydration_failures(failures)?;
     Ok(outcome)
-}
-
-/// Fill in what the audit database knows about every recorded run of this
-/// invocation: supplemental artifact savings, the recorded seam run, what
-/// became of each group since the compatible predecessor, and the churn
-/// summary.
-///
-/// One derivation for every exit, so a scan's own report and a later
-/// `report --run` of the same run carry the same continuity evidence however
-/// many programs the tree held.
-fn hydrate_recorded_runs(db_path: &Path, cfg: &Config, reports: &mut [Report]) -> Result<()> {
-    if reports.iter().all(|report| report.run.run_id.is_none()) {
-        return Ok(());
-    }
-    let store = open_store(db_path)?;
-    for report in reports {
-        let Some(run_id) = report.run.run_id else {
-            continue;
-        };
-        crate::scan::hydrate_artifact_savings(&store, run_id, &mut report.groups)?;
-        // What the ledger's seams cost belongs to the repository rather than
-        // to one program in it, and it is attached to every report for the
-        // reason the churn summary is: each is read on its own, and one that
-        // left the section out would read as a repository with nothing
-        // written down. It is filled in before the predecessor is looked for,
-        // because a seam run has generations of its own and a first scan is
-        // not a reason to withhold them.
-        if let Some(summary) = store.run_summary(run_id)? {
-            report.seam = crate::report_command::recorded_seam(&store, &summary.root_path)?;
-        }
-        let Some(predecessor) = store.preceding_compatible_run(run_id)? else {
-            continue;
-        };
-        crate::scan::hydrate_group_identity(&store, run_id, predecessor, &mut report.groups)?;
-        report.summary.top_churn = Some(crate::scan::top_group_churn(
-            &store,
-            run_id,
-            predecessor,
-            cfg.report.churn_top,
-        )?);
-    }
-    Ok(())
 }
 
 mod comparison;

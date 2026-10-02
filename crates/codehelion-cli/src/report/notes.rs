@@ -7,6 +7,10 @@
 
 use super::{BTreeSet, FunnelCause, FunnelDrop, FunnelStage, is_search_truncation};
 
+/// What a replay of a run scanned against a baseline says in place of the
+/// baseline status it cannot reproduce.
+pub(super) const BASELINE_NOT_REPLAYED: &str = "this run was scanned against a baseline, and a replay does not reproduce the baseline status or each group's state against it; scan again with --baseline to see them";
+
 /// How many items the funnel attributes to one cause, across every stage.
 fn dropped_for(funnel: &[FunnelStage], cause: FunnelCause) -> u64 {
     funnel

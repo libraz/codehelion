@@ -120,10 +120,12 @@ pub(super) fn run_program(
     } = *ctx;
     let sources = program.sources;
     let analysis_began = std::time::Instant::now();
-    let replay_database = args
-        .db
-        .is_some()
-        .then(|| crate::scan::spelled_for_a_command(db_path));
+    let replay_flags = crate::scan::replay_flags(
+        root,
+        args.config.as_deref(),
+        args.db.is_some().then_some(db_path),
+        args.untrusted,
+    );
     let timeout = std::time::Duration::from_millis(cfg.limits.parse_timeout_ms);
     let (parsed, unreadable, timed_out) = map_sources(sources, jobs, |source| {
         parse_one(source, cfg.limits.max_file_bytes, timeout)
@@ -203,7 +205,7 @@ pub(super) fn run_program(
     let inputs = ReportInputs {
         root,
         db_path,
-        replay_database: replay_database.as_deref(),
+        replay_flags: &replay_flags,
         configuration,
         started_at,
         finished_at: &finished_at,
@@ -275,7 +277,7 @@ pub(super) fn run_program(
         whole_run,
     );
     let recording_took = recording_began.elapsed();
-    let (recording_error, staged, reuse_key) = match record_result {
+    let (recording_error, staged, reusable) = match record_result {
         Ok(recorded) => {
             model.run.run_id = Some(recorded.run_id);
             model.run.reused = recorded.reused;
@@ -284,7 +286,7 @@ pub(super) fn run_program(
                 recording: (!recorded.reused).then_some(recording_took),
             });
             model.summary.changes = recorded.changes;
-            (None, recorded.staged, Some(recorded.reuse_key))
+            (None, recorded.staged, recorded.reusable)
         }
         Err(error) => {
             model.run.timings = Some(report::RunTimings {
@@ -302,7 +304,7 @@ pub(super) fn run_program(
         cross_language_units,
         recording_error,
         staged,
-        reuse_key,
+        reusable,
     })
 }
 

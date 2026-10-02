@@ -22,7 +22,7 @@
     },
     "groups": {
       "type": "array",
-      "description": "Every detected clone group, suppressed ones included, ordered by priority descending with the fingerprint as a tie-break.",
+      "description": "Every detected clone group, suppressed ones included, in the report's order: groups the suppression policy ranks down come after every other; within each part, groups are ordered on the --sort axis (priority descending by default), then by priority descending, then by fingerprint.",
       "items": {
         "$ref": "#/$defs/group"
       }
@@ -713,6 +713,11 @@
         "search_truncated": {
           "type": "boolean",
           "description": "True when one or more candidate-search resource ceilings truncated the search and findings may be incomplete."
+        },
+        "baseline_not_replayed": {
+          "type": "boolean",
+          "const": true,
+          "description": "Present on a replay of a run that was scanned against a baseline: the baseline status and each group's baseline state are not recorded, so this document carries neither. Absent otherwise."
         },
         "unapplied_suppression_policies": {
           "type": "array",

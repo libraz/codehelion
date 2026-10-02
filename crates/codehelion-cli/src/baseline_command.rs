@@ -67,14 +67,8 @@ pub(crate) fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<
         .collect::<Result<_>>()?;
 
     if create {
-        if args.file.exists() && !force {
-            bail!(
-                "{} already exists; pass --force to overwrite",
-                args.file.display()
-            );
-        }
         let recorded = baseline::Baseline::from_runs(&runs, &scan::rfc3339_now())?;
-        recorded.write(&args.file)?;
+        recorded.write(&args.file, force)?;
         writeln!(
             out,
             "wrote {} ({} findings frozen across {} build variants from {} run parts)",
@@ -123,7 +117,7 @@ pub(crate) fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<
                 .map(|id| (origin.variant_fingerprint.clone(), id)),
         );
     }
-    pruned.write(&args.file)?;
+    pruned.write(&args.file, true)?;
     writeln!(
         out,
         "updated {} ({} entries kept across {} build variants, {} resolved and dropped)",
@@ -164,14 +158,7 @@ pub(crate) fn config_command(action: &ConfigAction, out: &mut impl Write) -> Res
             let path = output
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(config::CONFIG_FILE_NAME));
-            if path.exists() && !force {
-                bail!(
-                    "{} already exists; pass --force to overwrite",
-                    path.display()
-                );
-            }
-            std::fs::write(&path, config::TEMPLATE)
-                .with_context(|| format!("writing {}", path.display()))?;
+            scan::write_output(&path, config::TEMPLATE.as_bytes(), *force)?;
             writeln!(out, "wrote {}", path.display())?;
             Ok(Outcome::Success)
         }

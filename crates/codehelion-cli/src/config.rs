@@ -182,70 +182,27 @@ impl Config {
     /// database path).
     pub fn to_display_toml(&self) -> Result<String> {
         let mut text = self.to_toml()?;
-        if self.jobs.is_none()
-            || self.limits.posting_cap.is_none()
-            || self.limits.pair_budget.is_none()
-            || self.limits.near_miss_delta.is_none()
-            || self.limits.near_miss_cap.is_none()
-            || self.limits.sibling_candidate_budget.is_none()
-            || self.limits.sibling_per_group_cap.is_none()
-            || self.limits.sibling_total_cap.is_none()
-            || self.limits.signature_sibling_candidate_budget.is_none()
-            || self.limits.signature_sibling_per_group_cap.is_none()
-            || self.limits.signature_sibling_total_cap.is_none()
-            || self
-                .limits
-                .signature_sibling_max_units_per_signature
-                .is_none()
-        {
+        let unset: Vec<String> =
+            std::iter::once(("jobs", self.jobs.is_none(), "automatic worker count"))
+                .chain(
+                    limits::OPTIONAL_LIMITS
+                        .iter()
+                        .map(|limit| (limit.key, (limit.is_unset)(&self.limits), limit.absence)),
+                )
+                .filter(|(_, unset, _)| *unset)
+                .map(|(key, _, absence)| {
+                    let name = if key == "jobs" {
+                        key.to_owned()
+                    } else {
+                        format!("limits.{key}")
+                    };
+                    format!("# {name}: {absence}\n")
+                })
+                .collect();
+        if !unset.is_empty() {
             text.push_str("\n# Unset optional settings\n");
-            if self.jobs.is_none() {
-                text.push_str("# jobs: automatic worker count\n");
-            }
-            if self.limits.posting_cap.is_none() {
-                text.push_str("# limits.posting-cap: mode-specific default\n");
-            }
-            if self.limits.pair_budget.is_none() {
-                text.push_str("# limits.pair-budget: mode-specific default\n");
-            }
-            if self.limits.near_miss_delta.is_none() {
-                text.push_str("# limits.near-miss-delta: structural default\n");
-            }
-            if self.limits.near_miss_cap.is_none() {
-                text.push_str("# limits.near-miss-cap: structural default\n");
-            }
-            if self.limits.sibling_candidate_budget.is_none() {
-                text.push_str("# limits.sibling-candidate-budget: structural default\n");
-            }
-            if self.limits.sibling_per_group_cap.is_none() {
-                text.push_str("# limits.sibling-per-group-cap: structural default\n");
-            }
-            if self.limits.sibling_total_cap.is_none() {
-                text.push_str("# limits.sibling-total-cap: structural default\n");
-            }
-            if self.limits.signature_sibling_candidate_budget.is_none() {
-                text.push_str(
-                    "# limits.signature-sibling-candidate-budget: default used only with --siblings-by-signature\n",
-                );
-            }
-            if self.limits.signature_sibling_per_group_cap.is_none() {
-                text.push_str(
-                    "# limits.signature-sibling-per-group-cap: default used only with --siblings-by-signature\n",
-                );
-            }
-            if self.limits.signature_sibling_total_cap.is_none() {
-                text.push_str(
-                    "# limits.signature-sibling-total-cap: default used only with --siblings-by-signature\n",
-                );
-            }
-            if self
-                .limits
-                .signature_sibling_max_units_per_signature
-                .is_none()
-            {
-                text.push_str(
-                    "# limits.signature-sibling-max-units-per-signature: default used only with --siblings-by-signature\n",
-                );
+            for line in &unset {
+                text.push_str(line);
             }
         }
         Ok(text)
@@ -255,8 +212,10 @@ impl Config {
 /// A commented template written by `config init`, holding every key at its
 /// default so it can be uncommented and edited.
 pub const TEMPLATE: &str = "\
-# codehelion configuration. Every key below shows its built-in default;
-# uncomment and edit the ones you want to change.
+# codehelion configuration. Each key below is commented out at its built-in
+# default; uncomment and edit the ones you want to change. Where the default
+# depends on the mode, the comment gives each mode's value and the one shown is
+# the first named. Where it is chosen automatically, the value shown is an example.
 
 # Path globs to include; empty means every supported source file.
 # include = []
@@ -325,18 +284,6 @@ pub const TEMPLATE: &str = "\
 # spanning both a suite and the code it exercises is not test code.
 # test-code = \"rank-down\"
 
-# What to do with a clone group whose every member matches a boilerplate
-# shape: \"hide\", \"rank-down\" or \"report\". The classification is recorded
-# either way.
-# [suppression.boilerplate]
-# trivial-body = \"rank-down\"
-# forwarding = \"hide\"
-# macro-repetition = \"rank-down\"
-# guarded-dispatch = \"hide\"
-# configured-answer = \"hide\"
-# composed-answer = \"hide\"
-# built-answer = \"hide\"
-
 # What to do with a verified clone pair that no clone group can hold: \"hide\",
 # \"rank-down\" or \"report\". Clone similarity is not transitive, so this is a
 # real finding that is kept separate rather than forcing unrelated units into a
@@ -348,6 +295,17 @@ pub const TEMPLATE: &str = "\
 # language often requires one routine per width. Set this to \"report\" where a
 # macro, generic or template can express the family once.
 # width-family = \"hide\"
+# What to do with a clone group whose every member matches a boilerplate
+# shape: \"hide\", \"rank-down\" or \"report\". The classification is recorded
+# either way.
+# [suppression.boilerplate]
+# trivial-body = \"rank-down\"
+# forwarding = \"hide\"
+# macro-repetition = \"rank-down\"
+# guarded-dispatch = \"hide\"
+# configured-answer = \"hide\"
+# composed-answer = \"hide\"
+# built-answer = \"hide\"
 
 # How the separated priority measures are weighed against one another when a
 # report is put in order. Whole numbers, read as shares. Only the composition
@@ -397,8 +355,10 @@ pub const TEMPLATE: &str = "\
 # other. Set them to bound a scan that is taking longer than you will wait; the
 # report then states how many candidates the ceiling left unexamined.
 # Longest posting list or fragment class that still enters pairing.
+# Defaults: Fast 64, Structural 256.
 # posting-cap = 64
 # Upper bound on candidate pairs each pairing pass examines.
+# Defaults: Fast 1000000, Structural 2000000.
 # pair-budget = 1000000
 # Width of Structural's diagnostic near-miss band below its primary gate.
 # near-miss-delta = 0.05
@@ -423,7 +383,7 @@ pub const TEMPLATE: &str = "\
 # duplication. The caps above bound what raising it costs.
 # signature-sibling-max-units-per-signature = 8
 # Maximum Structural candidate pairs that enter precise verification.
-# verification-budget = 1000000
+# verification-budget = 2000000
 # Maximum dynamic-programming cells used by one Structural alignment.
 # max-alignment-cells = 4000000
 # Largest set of related units compared as one piece when forming groups.

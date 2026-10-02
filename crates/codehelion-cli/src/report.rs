@@ -46,8 +46,9 @@ pub struct Report {
     pub run: RunInfo,
     /// Aggregate counts over the scan.
     pub summary: Summary,
-    /// Every detected group, suppressed ones included, ordered by priority
-    /// descending with the fingerprint bytes as a tie-break.
+    /// Every detected group, suppressed ones included, in the report's order:
+    /// ranked-down groups after every other, and within each part by the
+    /// `--sort` axis, then priority descending, then fingerprint.
     pub groups: Vec<Group>,
     /// Incomplete local mirrors attached to an established group. They are
     /// not group members and are kept separate so primary clone membership

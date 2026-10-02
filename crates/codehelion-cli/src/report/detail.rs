@@ -226,9 +226,13 @@ impl CloneGroupDetail {
         // asking, so it is stated rather than left to be inferred from the run
         // number. Nothing is said when there is no second run to compare with.
         match (self.latest_scan_run, self.present_in_latest_run) {
-            (Some(_), Some(true)) => writeln!(out, " — latest")?,
+            (Some(_), Some(true)) => writeln!(out, " {} latest", decoration.dash())?,
             (Some(latest), Some(false)) => {
-                writeln!(out, " — not present in the latest run {latest}")?;
+                writeln!(
+                    out,
+                    " {} not present in the latest run {latest}",
+                    decoration.dash()
+                )?;
             }
             _ => writeln!(out)?,
         }
@@ -429,7 +433,7 @@ impl FindingDetail {
     ///
     /// Returns any error from the writer.
     #[allow(clippy::too_many_lines)] // The public explain-text order is one contract.
-    pub fn render_text(&self, out: &mut impl Write) -> io::Result<()> {
+    pub fn render_text(&self, decoration: Decoration, out: &mut impl Write) -> io::Result<()> {
         writeln!(out, "finding {}", self.member.finding_id)?;
         writeln!(
             out,
@@ -468,7 +472,7 @@ impl FindingDetail {
             "    content entropy: {:.2} bits",
             self.group.entropy_bits
         )?;
-        self.render_priority(out)?;
+        self.render_priority(decoration, out)?;
         if let Some(category) = &self.group.boilerplate {
             writeln!(out, "  boilerplate: {category}")?;
         }
@@ -484,16 +488,17 @@ impl FindingDetail {
         if let Some(cause) = &self.group.suppressed {
             writeln!(out, "  suppressed: {}", cause.label())?;
         }
-        self.render_semantic_evidence(out)?;
+        self.render_semantic_evidence(decoration, out)?;
         if !self.source_artifact_mappings.is_empty() {
             writeln!(out, "  source-artifact mappings:")?;
             for mapping in &self.source_artifact_mappings {
                 writeln!(
                     out,
-                    "    analysis {}: {} ({}) — {} bytes, {} facts, {} candidate(s){}",
+                    "    analysis {}: {} ({}) {} {} bytes, {} facts, {} candidate(s){}",
                     mapping.artifact_analysis_id,
                     mapping.artifact_symbol_fingerprint,
                     mapping.confidence,
+                    decoration.dash(),
                     mapping
                         .attributed_bytes
                         .map_or_else(|| "unattributed".to_owned(), |bytes| bytes.to_string()),
@@ -541,7 +546,11 @@ impl FindingDetail {
 
     /// Render the persisted graph evidence without collapsing it into a
     /// confidence score, so a reader can check the exact registered rule.
-    fn render_semantic_evidence(&self, out: &mut impl Write) -> io::Result<()> {
+    fn render_semantic_evidence(
+        &self,
+        decoration: Decoration,
+        out: &mut impl Write,
+    ) -> io::Result<()> {
         let Some(semantic) = &self.group.semantic else {
             return Ok(());
         };
@@ -566,7 +575,14 @@ impl FindingDetail {
             let mappings = semantic
                 .node_mappings
                 .iter()
-                .map(|mapping| format!("{}→{}", mapping.canonical, mapping.corresponding))
+                .map(|mapping| {
+                    format!(
+                        "{}{}{}",
+                        mapping.canonical,
+                        decoration.arrow(),
+                        mapping.corresponding
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             writeln!(out, "    node mapping: {mappings}")?;
@@ -581,7 +597,7 @@ impl FindingDetail {
     /// what a reader needs in order to argue with a placement is which fact
     /// drove it, not the constant it was multiplied by. The constants are in
     /// the ranking recipe the run recorded.
-    fn render_priority(&self, out: &mut impl Write) -> io::Result<()> {
+    fn render_priority(&self, decoration: Decoration, out: &mut impl Write) -> io::Result<()> {
         let Some(priority) = &self.group.priority else {
             return Ok(());
         };
@@ -592,9 +608,10 @@ impl FindingDetail {
         writeln!(out, "  priority: {:.2}", priority.value)?;
         writeln!(
             out,
-            "    clone confidence {:.2} — {} tokens in the smallest occurrence{}, \
+            "    clone confidence {:.2} {} {} tokens in the smallest occurrence{}, \
              {:.2} similarity, matched as {}",
             priority.clone_confidence,
+            decoration.dash(),
             inputs.smallest_member_tokens,
             inputs.min_clone_tokens.map_or_else(
                 // The floor decides how much a length is worth, so a run that
@@ -608,9 +625,10 @@ impl FindingDetail {
         )?;
         writeln!(
             out,
-            "    maintenance risk {} — {} occurrences over {} file(s) in {} \
+            "    maintenance risk {} {} {} occurrences over {} file(s) in {} \
              director(y/ies), largest {} tokens",
             measure(priority.maintenance_risk),
+            decoration.dash(),
             inputs.instances,
             inputs.files,
             inputs.directories,
@@ -618,8 +636,9 @@ impl FindingDetail {
         )?;
         writeln!(
             out,
-            "    refactoring difficulty {} — {} tokens to move, {}, {} language(s)",
+            "    refactoring difficulty {} {} {} tokens to move, {}, {} language(s)",
             measure(priority.refactoring_difficulty),
+            decoration.dash(),
             inputs.largest_member_tokens,
             if self.group.scope == SCOPE_FRAGMENT {
                 "a run inside its units, with no boundary to lift it out at"

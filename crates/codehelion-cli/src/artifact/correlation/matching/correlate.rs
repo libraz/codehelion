@@ -63,6 +63,7 @@ pub(in crate::artifact) fn assign_unambiguous_fragment_bytes(
                     .size
                     .saturating_mul(u64::from(covered_lines))
                     .div_ceil(u64::from(symbol_lines))
+                    .min(symbol.size)
             };
             mapping.attributed_bytes = Some(attributed_bytes);
             mapping.evidence.facts.push(if whole_symbol {
@@ -95,11 +96,18 @@ fn symbol_line_coverage(
 ) -> Option<(u32, u32, bool)> {
     let fragment_start = fragment.start_line?;
     let fragment_end = fragment.end_line?;
-    let mut extents: BTreeMap<String, Option<(u32, u32)>> = BTreeMap::new();
+    // One file is one extent however its path is spelled: frames name it with
+    // `.` or `..` segments, or relative to the scan root, depending on the
+    // compiler invocation.
+    let mut extents: BTreeMap<String, (bool, Option<(u32, u32)>)> = BTreeMap::new();
     for frame in &symbol.inline_stack {
-        let extent = extents
-            .entry(uniformly_separated(&frame.source))
+        let spelled = uniformly_separated(&frame.source);
+        let normalized = lexically_normalized(&spelled);
+        let (is_fragment_file, extent) = extents
+            .entry(root_relative(&normalized, scan_root))
             .or_default();
+        *is_fragment_file |= frame_path_matches(&spelled, scan_root, fragment)
+            || frame_path_matches(&normalized, scan_root, fragment);
         if let Some(line) = frame.line {
             *extent = Some(extent.map_or((line, line), |(start, end)| {
                 (start.min(line), end.max(line))
@@ -109,8 +117,8 @@ fn symbol_line_coverage(
     let mut fragment_file_extent: Option<(u32, u32)> = None;
     let mut symbol_lines = 0_u32;
     let mut other_files = false;
-    for (source, extent) in &extents {
-        if frame_path_matches(source, scan_root, fragment) {
+    for (is_fragment_file, extent) in extents.values() {
+        if *is_fragment_file {
             if let Some((start, end)) = *extent {
                 fragment_file_extent = Some(
                     fragment_file_extent
@@ -139,6 +147,38 @@ fn symbol_line_coverage(
         symbol_lines,
         !other_files && fragment_start <= symbol_start && fragment_end >= symbol_end,
     ))
+}
+
+/// Collapse `.` segments, empty segments and resolvable `..` segments, so two
+/// spellings of one path compare equal. The path is not resolved against the
+/// file system.
+fn lexically_normalized(path: &str) -> String {
+    let rooted = path.starts_with('/');
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                if matches!(segments.last(), Some(last) if *last != "..") {
+                    segments.pop();
+                } else if !rooted {
+                    segments.push("..");
+                }
+            }
+            other => segments.push(other),
+        }
+    }
+    let joined = segments.join("/");
+    if rooted { format!("/{joined}") } else { joined }
+}
+
+/// The path below the scan root when it lies under it, otherwise unchanged.
+fn root_relative(path: &str, scan_root: &FilePath) -> String {
+    let root = lexically_normalized(&uniformly_separated(&scan_root.to_string_lossy()));
+    path.strip_prefix(root.as_str())
+        .and_then(|inside| inside.strip_prefix('/'))
+        .unwrap_or(path)
+        .to_owned()
 }
 
 fn frame_path_matches(

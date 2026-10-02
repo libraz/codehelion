@@ -26,7 +26,13 @@ use std::path::Path as FilePath;
 /// supplies the concurrent read snapshot, so it deliberately does not take
 /// the writer lease.
 pub fn calibration(args: &ArtifactCalibrationArgs, out: &mut impl Write) -> Result<Outcome> {
-    let db = crate::resolve_db(crate::scan::DatabaseUse::Reading, args.db.as_deref())?;
+    let (_, _, db) = crate::resolve_database(
+        crate::scan::DatabaseUse::Reading,
+        std::path::Path::new("."),
+        args.db.as_deref(),
+        None,
+        false,
+    )?;
     let store = crate::scan::open_recorded_store(&db)?;
     let source_run = args.source_run.map_or_else(
         || {

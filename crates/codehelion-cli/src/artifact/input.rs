@@ -378,7 +378,7 @@ pub(super) fn parse(
             .parse_within(bytes, debug_companion, architecture, budget)
             .map_err(Into::into),
         BinaryFormat::PeCoff => PeCoffBackend
-            .parse_with_pdb(bytes, debug_companion)
+            .parse_within(bytes, debug_companion, budget)
             .map_err(Into::into),
         BinaryFormat::Archive => {
             if debug_companion.is_some() {

@@ -86,29 +86,34 @@ impl Store {
     ///
     /// Any failure — malformed input (such as a member referencing a
     /// non-existent unit) or an underlying database error — rolls the whole
-    /// replacement back; the prior completed snapshot remains intact. Older
-    /// unreferenced snapshots are removed only after this one is complete.
+    /// write back; every prior completed snapshot remains intact. Recording
+    /// removes no earlier snapshot.
     pub fn record_snapshot(&mut self, snapshot: &Snapshot<'_>) -> Result<i64, StoreError> {
         self.record_snapshot_with_predecessor(snapshot, None)
     }
 
-    /// Atomically replace the globally active suppression policy without
-    /// creating a scan run.
+    /// Stand a completed run in for the current scan invocation.
     ///
-    /// Reused scans still need to make their current invocation policy visible
-    /// when another scan changed the active rows since the reused run was
-    /// recorded. The policy is therefore written in one transaction, with
-    /// newly-created rows and every active-state change rolled back together
-    /// if any database operation fails.
+    /// The run takes the invocation's start and finish times, so every
+    /// latest-run lookup resolves to it exactly as if it had just been
+    /// recorded, and the invocation's suppression policy replaces the active
+    /// one. Both happen in one transaction: a failure leaves the run's recency
+    /// and the prior policy untouched.
     ///
     /// # Errors
     ///
-    /// Returns an underlying database error or suppression validation error.
-    pub fn activate_suppressions(
+    /// Returns [`StoreError::RunNotFound`] or [`StoreError::RunNotCompleted`]
+    /// for a run that cannot be reused, or an underlying database or
+    /// suppression validation error.
+    pub fn confirm_reused_run(
         &mut self,
+        run_id: i64,
         rules: &[SuppressionRuleRow],
+        started_at: &str,
+        finished_at: &str,
     ) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
+        refresh_reused_run(&tx, run_id, started_at, finished_at)?;
         // Writing the policy only inserts and updates suppression rows, so no
         // content identity can be left without a referent here.
         write_suppressions(&tx, rules, true)?;
@@ -189,6 +194,9 @@ impl Store {
             run_id,
             suppressions,
             predecessor_run: None,
+            started_at: snapshot.started_at.to_string(),
+            finished_at: snapshot.finished_at.to_string(),
+            reused_run: None,
         })
     }
 
@@ -262,6 +270,11 @@ impl Store {
                     ensure_completed_run(&tx, predecessor_run)?;
                     let adoptions = plan_matching_lineages_tx(&tx, part.run_id, predecessor_run)?;
                     apply_lineage_adoptions_tx(&tx, part.run_id, predecessor_run, &adoptions)?;
+                }
+            }
+            for part in retired_parts {
+                if let Some(reused_run) = part.reused_run {
+                    refresh_reused_run(&tx, reused_run, &part.started_at, &part.finished_at)?;
                 }
             }
             activate_staged_suppressions(&tx, &suppression_union)?;
@@ -371,9 +384,8 @@ impl Store {
 
     /// Complete every partition of one successful multi-partition scan.
     ///
-    /// State transition and retirement of superseded snapshots happen in one
-    /// transaction, so a failure leaves every new row non-readable and every
-    /// prior completed snapshot intact.
+    /// Every partition changes state in one transaction, so a failure leaves
+    /// every new row non-readable. No earlier snapshot is removed.
     ///
     /// # Errors
     ///
@@ -394,6 +406,21 @@ impl Store {
         crate::lifecycle::forget_live_runs(&self.database, run_ids.iter().copied());
         Ok(())
     }
+}
+
+/// Give a reused completed run the recency of the invocation it stands in for.
+fn refresh_reused_run(
+    tx: &Transaction<'_>,
+    run_id: i64,
+    started_at: &str,
+    finished_at: &str,
+) -> Result<(), StoreError> {
+    ensure_completed_run(tx, run_id)?;
+    tx.execute(
+        "UPDATE scan_run SET started_at = ?2, finished_at = ?3 WHERE id = ?1",
+        params![run_id, started_at, finished_at],
+    )?;
+    Ok(())
 }
 
 fn write_snapshot(
@@ -679,11 +706,22 @@ mod tests {
         );
     }
 
+    fn run_times(store: &Store, run_id: i64) -> (String, String) {
+        store
+            .conn
+            .query_row(
+                "SELECT started_at, finished_at FROM scan_run WHERE id = ?1",
+                params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
     #[test]
-    fn activation_refreshes_policy_without_creating_a_run() {
+    fn confirming_a_reused_run_refreshes_policy_and_recency_without_creating_a_run() {
         let variant = variant();
         let mut store = Store::open_in_memory().unwrap();
-        store
+        let reused = store
             .record_snapshot(&snapshot(
                 &variant,
                 None,
@@ -693,10 +731,23 @@ mod tests {
         let runs_before = count(&store, "scan_run");
 
         store
-            .activate_suppressions(&[rule("current-policy/**", "current")])
+            .confirm_reused_run(
+                reused,
+                &[rule("current-policy/**", "current")],
+                "2026-09-01T00:00:00Z",
+                "2026-09-01T00:00:02Z",
+            )
             .unwrap();
 
         assert_eq!(count(&store, "scan_run"), runs_before);
+        assert_eq!(
+            run_times(&store, reused),
+            (
+                "2026-09-01T00:00:00Z".to_string(),
+                "2026-09-01T00:00:02Z".to_string()
+            ),
+            "the reused run carries the recency of the invocation it stands in for"
+        );
         assert_eq!(
             suppression_state(&store, "old-policy/**"),
             Some((false, Some("old".to_string())))
@@ -708,10 +759,10 @@ mod tests {
     }
 
     #[test]
-    fn activation_failure_preserves_the_prior_policy() {
+    fn confirmation_failure_preserves_the_prior_policy_and_recency() {
         let variant = variant();
         let mut store = Store::open_in_memory().unwrap();
-        store
+        let reused = store
             .record_snapshot(&snapshot(
                 &variant,
                 None,
@@ -728,9 +779,19 @@ mod tests {
             .unwrap();
 
         let error = store
-            .activate_suppressions(&[rule("new-policy/**", "new")])
+            .confirm_reused_run(
+                reused,
+                &[rule("new-policy/**", "new")],
+                "2026-09-01T00:00:00Z",
+                "2026-09-01T00:00:02Z",
+            )
             .unwrap_err();
         assert!(matches!(error, StoreError::Sqlite { .. }));
+        assert_eq!(
+            run_times(&store, reused).0,
+            "2026-08-12T00:00:00Z",
+            "a failed confirmation leaves the run's recency as it was"
+        );
         assert_eq!(
             suppression_state(&store, "prior-policy/**"),
             Some((true, Some("prior".to_string())))

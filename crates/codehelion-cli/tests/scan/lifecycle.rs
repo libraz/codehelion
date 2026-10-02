@@ -15,7 +15,7 @@ fn scan_detects_clones_and_records_a_snapshot() {
         .stdout(predicate::str::contains(
             "files: 5 analysed (rust 3, c 2, cpp 0)",
         ))
-        .stdout(predicate::str::contains("2 groups"))
+        .stdout(predicate::str::contains("3 groups"))
         .stdout(predicate::str::contains("type-1"))
         .stdout(predicate::str::contains("src/a.rs"));
 
@@ -41,6 +41,17 @@ fn scan_detects_clones_and_records_a_snapshot() {
             .iter()
             .any(|m| m.unit_name.as_deref() == Some("checksum_block"))
     );
+
+    let verbatim_rust = groups
+        .iter()
+        .find(|group| {
+            group.clone_type == "type-1"
+                && group.members.iter().any(|m| m.file_path == "src/a.rs")
+                && group.members.iter().any(|m| m.file_path == "src/b.rs")
+        })
+        .expect("a renamed fragment covering part of each verbatim copy leaves their whole-unit exact group standing");
+    assert_eq!(verbatim_rust.member_scope, "unit");
+    assert_eq!(verbatim_rust.members.len(), 2);
 
     // The C pair lands in its own Type-1 group.
     let c_group = groups
@@ -385,11 +396,38 @@ fn a_replay_nominates_the_occurrence_the_scan_nominated() {
     // The nomination is made from the occurrences' own identities, so moving a
     // file cannot move it. Under the walk order it would: renaming the first
     // file scanned hands that place to another occurrence.
-    let before = canonical_members(&scanned);
+    let nominated = |report: &serde_json::Value| {
+        canonical_members(report)
+            .into_iter()
+            .map(|(group, canonical)| {
+                let finding = canonical
+                    .rsplit_once(' ')
+                    .map(|(_, finding)| finding.to_string())
+                    .expect("file and finding id");
+                (group, finding)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = nominated(&scanned);
     std::fs::rename(dir.path().join("src/a.rs"), dir.path().join("src/z.rs"))
         .expect("rename a source file");
     let renamed = scan_json(dir.path());
-    assert_eq!(before, canonical_members(&renamed));
+    assert_eq!(
+        before,
+        nominated(&renamed),
+        "a rename keeps every group's nominated finding id, even where byte-identical files trade which of them holds it"
+    );
+    assert_eq!(
+        canonical_members(&scanned)
+            .values()
+            .find(|canonical| canonical.starts_with("src/c.rs "))
+            .expect("the renamed copy is nominated in its group"),
+        canonical_members(&renamed)
+            .values()
+            .find(|canonical| canonical.starts_with("src/c.rs "))
+            .expect("and still is after the rename"),
+        "an occurrence whose content no other member shares keeps its file as well"
+    );
 }
 
 /// Every command that reads the scan database resolves the selected repository
@@ -590,6 +628,152 @@ fn an_identical_rescan_reuses_the_current_snapshot() {
     let latest = store.latest_run().unwrap().expect("a recorded run");
     assert_eq!(latest.id, 1, "a reused scan records no second run");
     assert_eq!(store.table_count("scan_run").unwrap(), 1);
+}
+
+/// Rewrite the recorded runs as an older release of the tool would have left
+/// them.
+fn rewrite_recorded_runs(root: &Path, statement: &str) {
+    Connection::open(root.join(".codehelion/audit.db"))
+        .expect("open audit db")
+        .execute(statement, [])
+        .expect("rewrite recorded runs");
+}
+
+/// A run another binary or another detector recorded may hold rows this one
+/// would not, so an untouched tree is analysed again rather than answered from
+/// it, in every whole-run mode; the run this binary records is then reused.
+#[test]
+fn a_run_recorded_under_other_versions_is_analysed_again() {
+    let rewrites = [
+        "UPDATE scan_run SET tool_version = '0.0.0-older'",
+        "UPDATE detector_version SET version = 'older' WHERE component = 'normalization'",
+    ];
+    for mode in ["fast", "structural"] {
+        for rewrite in rewrites {
+            let dir = fixture();
+            let first = scan_json_with(dir.path(), &["--mode", mode]);
+            rewrite_recorded_runs(dir.path(), rewrite);
+
+            let second = scan_json_with(dir.path(), &["--mode", mode]);
+            assert_ne!(second["run"]["reused"], true, "{mode}, {rewrite}");
+            assert_ne!(
+                second["run"]["run_id"], first["run"]["run_id"],
+                "{mode}, {rewrite}"
+            );
+
+            let third = scan_json_with(dir.path(), &["--mode", mode]);
+            assert_eq!(third["run"]["reused"], true, "{mode}, {rewrite}");
+            assert_eq!(
+                third["run"]["run_id"], second["run"]["run_id"],
+                "{mode}, {rewrite}"
+            );
+        }
+    }
+}
+
+/// A reused run is the scan that just happened: every latest-run lookup names
+/// it, however many runs of other modes were recorded since it first was.
+#[test]
+fn a_reused_run_is_the_latest_run_of_its_root() {
+    let dir = fixture();
+    let fast = scan_json_with(dir.path(), &["--mode", "fast"]);
+    scan_json_with(dir.path(), &["--mode", "structural"]);
+    let reused = scan_json_with(dir.path(), &["--mode", "fast"]);
+    assert_eq!(reused["run"]["reused"], true);
+    assert_eq!(reused["run"]["run_id"], fast["run"]["run_id"]);
+    let run_id = reused["run"]["run_id"].as_i64().expect("recorded run");
+
+    let output = cmd()
+        .current_dir(dir.path())
+        .args(["report", "--format", "json"])
+        .output()
+        .expect("run report");
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
+    assert_eq!(
+        report["run"]["run_id"], run_id,
+        "report renders the reused run"
+    );
+
+    let root = codehelion_store::path_key(&dir.path().canonicalize().expect("canonical root"));
+    let store = open_store(dir.path());
+    assert_eq!(
+        store
+            .latest_completed_run(&root)
+            .unwrap()
+            .map(|origin| origin.id),
+        Some(run_id)
+    );
+    assert_eq!(
+        store
+            .latest_completed_invocation(&root)
+            .unwrap()
+            .iter()
+            .map(|origin| origin.id)
+            .collect::<Vec<_>>(),
+        vec![run_id]
+    );
+}
+
+/// A part of a recorded report that cannot be read back is named and left
+/// out on its own: a broken seam summary costs the seam block, not the group
+/// history or the artifact guidance read beside it.
+#[test]
+fn a_failed_seam_read_is_named_and_leaves_the_rest_of_the_report() {
+    let dir = fixture();
+    scan_json_with(dir.path(), &["--no-reuse"]);
+    let second = scan_json_with(dir.path(), &["--no-reuse"]);
+    let run_id = second["run"]["run_id"].as_i64().expect("recorded run");
+    assert!(!second["summary"]["top_churn"].is_null(), "{second}");
+    let root = codehelion_store::path_key(&dir.path().canonicalize().expect("canonical root"));
+    let mut store = open_store(dir.path());
+    store
+        .record_seam_run(&codehelion_store::seam::SeamRunRecord {
+            root_path: root,
+            settings_digest: "digest".to_string(),
+            first_commit: None,
+            last_commit: None,
+            commit_count: 0,
+            scan_run_id: Some(run_id),
+            recorded_at: "2026-01-01T00:00:00Z".to_string(),
+            entries: Vec::new(),
+        })
+        .expect("record a seam run");
+    drop(store);
+    rewrite_recorded_runs(
+        dir.path(),
+        "ALTER TABLE seam_run_entry RENAME TO seam_run_entry_unreadable",
+    );
+
+    for args in [
+        vec!["scan", ".", "--format", "json"],
+        vec!["report", "--format", "json"],
+    ] {
+        let output = cmd()
+            .current_dir(dir.path())
+            .args(&args)
+            .output()
+            .expect("run the command");
+        assert!(!output.status.success(), "{args:?}: {output:?}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("the report is still written");
+        assert_eq!(report["run"]["run_id"], run_id, "{args:?}");
+        assert!(report["seam"].is_null(), "{args:?}: {report}");
+        assert_eq!(
+            report["summary"]["top_churn"], second["summary"]["top_churn"],
+            "{args:?}: the group history still loads"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("warning: the seam summary was not loaded"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("artifact savings were not loaded"),
+            "{args:?}: {stderr}"
+        );
+    }
 }
 
 #[test]

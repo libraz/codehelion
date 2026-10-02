@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use codehelion_core::discovery::ContentHash;
 use codehelion_store::snapshot::{
     FileRow, GroupRow, Snapshot, StagedSnapshotPart, SummaryRow, UnitRow,
 };
@@ -11,7 +10,7 @@ use codehelion_store::snapshot::{
 use crate::config::Config;
 use crate::report;
 use crate::scan::shared;
-use crate::scan::store::ReuseProfile;
+use crate::scan::store::{ReuseIdentity, ReuseProfile, select_predecessor};
 use crate::scan::structural::ReportInputs;
 use crate::scan::structural::reporting::detector_versions;
 use crate::scan::{literal_norm, open_store, path_key, reuse_config_hash};
@@ -34,10 +33,9 @@ pub(super) struct RecordResult {
     pub reused: bool,
     pub changes: Option<report::TreeChanges>,
     pub staged: Option<StagedSnapshotPart>,
-    /// The key this snapshot was recorded under. A later reuse decision about
-    /// the same invocation reads it back rather than rebuilding the recipe,
-    /// which is how the two could describe different runs.
-    pub reuse_key: ContentHash,
+    /// The completed run a staged partition is identical to, and may stand in
+    /// for when the invocation allows reuse.
+    pub reusable: Option<i64>,
 }
 
 pub(super) fn record(
@@ -70,34 +68,37 @@ pub(super) fn record(
     detector_versions.push(("ranking".to_string(), cfg.priority.weights().recipe()));
     let root_path = path_key(inputs.root);
     let current_tree = shared::file_tree(&files);
-    let compatible = store.latest_compatible_run(
+    let predecessor = select_predecessor(
+        &store,
         &root_path,
         config_hash.as_str(),
         &inputs.variant.fingerprint(),
+        &ReuseIdentity {
+            detector_versions: &detector_versions,
+            baseline_digest: summary.baseline_digest.as_deref(),
+            tree: &current_tree,
+        },
+        !completed || inputs.reuse_allowed,
     )?;
-    let compatible = compatible.map(|run| run.id);
-    let changes = compatible
-        .map(|previous_id| {
-            store.run_tree(previous_id).map(|previous_tree| {
-                shared::tree_changes(previous_id, &previous_tree, &current_tree)
-            })
-        })
-        .transpose()?;
-    if completed
-        && inputs.reuse_allowed
-        && let Some(previous_id) = compatible
-        && store
-            .run_summary_row(previous_id)?
-            .is_some_and(|stored| stored.baseline_digest == summary.baseline_digest)
-        && changes.as_ref().is_some_and(shared::tree_unchanged)
-    {
-        store.activate_suppressions(&inputs.rules.rows)?;
+    let compatible = predecessor.as_ref().map(|previous| previous.id);
+    let reusable = predecessor
+        .as_ref()
+        .filter(|previous| previous.reusable)
+        .map(|previous| previous.id);
+    let changes = predecessor.map(|previous| previous.changes);
+    if completed && let Some(previous_id) = reusable {
+        store.confirm_reused_run(
+            previous_id,
+            &inputs.rules.rows,
+            inputs.started_at,
+            inputs.finished_at,
+        )?;
         return Ok(RecordResult {
             run_id: previous_id,
             reused: true,
             changes,
             staged: None,
-            reuse_key: config_hash,
+            reusable: None,
         });
     }
     let (compiler_helpers, compiler_units) = asked.map_or_else(
@@ -142,7 +143,7 @@ pub(super) fn record(
         reused: false,
         changes,
         staged,
-        reuse_key: config_hash,
+        reusable,
     })
 }
 

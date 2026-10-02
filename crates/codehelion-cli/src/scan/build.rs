@@ -116,8 +116,8 @@ pub(super) fn evaluate_suppression(
 pub(super) struct BuildInputs<'a> {
     pub(super) root: &'a Path,
     pub(super) db_path: &'a Path,
-    /// The `--db` the commands this report prints have to repeat.
-    pub(super) replay_database: Option<&'a str>,
+    /// The flags the commands this report prints have to repeat.
+    pub(super) replay_flags: &'a str,
     pub(super) configuration: &'a report::ConfigurationInfo,
     pub(super) run_id: Option<i64>,
     pub(super) started_at: &'a str,
@@ -232,7 +232,7 @@ pub(super) fn build_report(
         common_run_info(RunInfoInputs {
             root: inputs.root,
             db_path: inputs.db_path,
-            replay_database: inputs.replay_database,
+            replay_flags: inputs.replay_flags,
             configuration: inputs.configuration,
             run_id: inputs.run_id,
             started_at: inputs.started_at,

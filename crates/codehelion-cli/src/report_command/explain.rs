@@ -1,9 +1,11 @@
 //! Resolving a typed identifier to one recorded finding and writing its
 //! detail document.
 
-use super::recorded::{recorded_group, recorded_priority, recorded_sibling, recorded_suppression};
+use super::recorded::{
+    ordered_recorded_groups, recorded_priority, recorded_sibling, recorded_suppression,
+};
 use crate::cli::{DetailFormat, ExplainArgs};
-use crate::{FULL_ID_CHARS, Outcome, report, resolve_db_at, scan, suppress};
+use crate::{FULL_ID_CHARS, Outcome, report, resolve_database, scan, suppress};
 use anyhow::{Context, Result, bail};
 use codehelion_store::query::{IdKind, IdMatch, RunOrigin};
 use codehelion_store::{Store, fingerprint_hex};
@@ -19,7 +21,7 @@ use std::path::Path;
 /// report prints group ids in full, and retyping thirty-two hex digits to ask
 /// about what is on the screen is a break in the trail the ids exist to keep.
 pub(crate) fn explain(args: &ExplainArgs, out: &mut impl Write) -> Result<Outcome> {
-    let path = resolve_db_at(
+    let (_, _, path) = resolve_database(
         scan::DatabaseUse::Reading,
         &args.path,
         args.db.as_deref(),
@@ -95,10 +97,10 @@ pub(crate) fn explain_sibling(
 pub(crate) fn resolve_id(store: &Store, typed: &str, path: &Path) -> Result<IdMatch> {
     let prefix = typed.to_ascii_lowercase();
     if !prefix.chars().all(|c| c.is_ascii_hexdigit()) || prefix.len() > FULL_ID_CHARS {
-        bail!("{typed} is not an id: ids are up to {FULL_ID_CHARS} hexadecimal digits");
+        usage_bail!("{typed} is not an id: ids are up to {FULL_ID_CHARS} hexadecimal digits");
     }
     if prefix.len() < suppress::MIN_CLONE_ID_CHARS {
-        bail!(
+        usage_bail!(
             "{typed} is too short to identify one thing; give at least {} of the {FULL_ID_CHARS} digits",
             suppress::MIN_CLONE_ID_CHARS
         );
@@ -182,13 +184,15 @@ pub(crate) fn explain_clone_group(
     let Some(found) = store.group(fingerprint)? else {
         bail!("no clone group with id {fingerprint} in {}", path.display());
     };
-    let priority = store
-        .run_group_priority(found.run_id, fingerprint)?
-        .with_context(|| format!("clone group {fingerprint} was recorded without a ranking"))?;
     let origin = store.run_origin(found.run_id)?;
     let (latest_scan_run, present_in_latest_run) =
         latest_comparable_run(store, &origin, &found.group.fingerprint_hex)?;
-    let mut group = recorded_group(found.group, &priority)?;
+    // Taken from the whole run as its report settles it, so the ranked-down
+    // verdict and the narrower-cut mark are the report's own.
+    let mut group = ordered_recorded_groups(store, found.run_id, report::Sort::default())?
+        .into_iter()
+        .find(|group| group.fingerprint == found.group.fingerprint_hex)
+        .with_context(|| format!("clone group {fingerprint} was recorded without a ranking"))?;
     scan::hydrate_artifact_savings(store, found.run_id, std::slice::from_mut(&mut group))?;
     // Resolved rather than remembered: the run this one was compared with is
     // recoverable from what it agreed with that run on, so a lookup explains
@@ -420,7 +424,7 @@ pub(crate) fn explain_occurrence(
     };
     match args.format {
         DetailFormat::Json => write!(out, "{}", detail.to_json()?)?,
-        DetailFormat::Text => detail.render_text(out)?,
+        DetailFormat::Text => detail.render_text(args.decoration.resolve(), out)?,
     }
     Ok(Outcome::Success)
 }

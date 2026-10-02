@@ -1012,14 +1012,27 @@ fn vocabulary(names: impl Iterator<Item = &'static str>) -> String {
 }
 
 /// Initialize a new database with the one supported local layout.
+///
+/// The whole baseline, `schema_meta` included, is written in one transaction
+/// that takes the write lock before it looks: a second process opening the
+/// same new file waits, then finds the finished baseline and accepts it.
 pub(crate) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
-    let has_meta: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !has_meta {
-        let has_existing_tables: bool = conn.query_row(
+    if has_meta(conn)? {
+        match version(conn)? {
+            SCHEMA_VERSION => return Ok(()),
+            0 => {}
+            found => return Err(StoreError::UnsupportedSchema { found }),
+        }
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if has_meta(&tx)? {
+        match version(&tx)? {
+            SCHEMA_VERSION => return Ok(()),
+            0 => {}
+            found => return Err(StoreError::UnsupportedSchema { found }),
+        }
+    } else {
+        let has_existing_tables: bool = tx.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM sqlite_master
                  WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -1030,40 +1043,13 @@ pub(crate) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
         if has_existing_tables {
             return Err(StoreError::UnsupportedSchema { found: 0 });
         }
-        conn.execute_batch(
+        tx.execute_batch(
             "CREATE TABLE schema_meta (
                  id      INTEGER PRIMARY KEY CHECK (id = 1),
                  version INTEGER NOT NULL
              ) STRICT;",
         )?;
     }
-
-    match version(conn)? {
-        SCHEMA_VERSION => Ok(()),
-        0 => apply_baseline(conn),
-        found => Err(StoreError::UnsupportedSchema { found }),
-    }
-}
-
-/// Validate an existing database without creating its baseline.
-pub(crate) fn validate_existing(conn: &Connection) -> Result<(), StoreError> {
-    let has_meta: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !has_meta {
-        return Err(StoreError::UnsupportedSchema { found: 0 });
-    }
-    match version(conn)? {
-        SCHEMA_VERSION => Ok(()),
-        found => Err(StoreError::UnsupportedSchema { found }),
-    }
-}
-
-/// Apply the only baseline atomically and record which one it is.
-fn apply_baseline(conn: &mut Connection) -> Result<(), StoreError> {
-    let tx = conn.transaction()?;
     tx.execute_batch(&baseline_sql())?;
     tx.execute(
         "INSERT INTO schema_meta (id, version) VALUES (1, ?1)",
@@ -1071,6 +1057,26 @@ fn apply_baseline(conn: &mut Connection) -> Result<(), StoreError> {
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// Whether `conn` holds a `schema_meta` table.
+fn has_meta(conn: &Connection) -> Result<bool, StoreError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta')",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// Validate an existing database without creating its baseline.
+pub(crate) fn validate_existing(conn: &Connection) -> Result<(), StoreError> {
+    if !has_meta(conn)? {
+        return Err(StoreError::UnsupportedSchema { found: 0 });
+    }
+    match version(conn)? {
+        SCHEMA_VERSION => Ok(()),
+        found => Err(StoreError::UnsupportedSchema { found }),
+    }
 }
 
 /// The schema version currently recorded in `conn`.

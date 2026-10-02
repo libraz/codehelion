@@ -184,6 +184,119 @@ fn a_cpp_source_missing_from_the_database_is_recorded_as_no_build_information() 
     );
 }
 
+/// An invocation that reuses some partitions and records the rest is one
+/// invocation: the latest-invocation lookup names every partition the scan
+/// reported, so a baseline frozen from it covers them all and the next
+/// baseline-checked scan finds a partition for each of its own.
+#[test]
+fn a_partly_reused_invocation_is_read_back_whole() {
+    require_clang_helper();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
+    let unlisted = root.join("src/unlisted.cpp");
+    std::fs::write(&unlisted, "int unlisted() { return 0; }\n").expect("add unlisted source");
+    let first = scan(&root);
+    std::fs::write(&unlisted, "int unlisted() { return 1; }\n").expect("edit unlisted source");
+
+    let second = scan(&root);
+    let partitions = reports(&second);
+    assert!(
+        partitions
+            .iter()
+            .any(|partition| partition["run"]["reused"] == true),
+        "an untouched partition is reused: {second}"
+    );
+    assert!(
+        partitions
+            .iter()
+            .any(|partition| partition["run"]["reused"] != true),
+        "the edited partition is recorded afresh: {second}"
+    );
+    let mut reported: Vec<i64> = partitions
+        .iter()
+        .map(|partition| partition["run"]["run_id"].as_i64().expect("recorded run"))
+        .collect();
+    reported.sort_unstable();
+    assert_eq!(reported.len(), reports(&first).len());
+
+    let store = Store::open(&root.join(".codehelion/audit.db")).expect("open audit database");
+    let key = codehelion_store::path_key(&root.canonicalize().expect("canonical root"));
+    let latest: Vec<i64> = store
+        .latest_completed_invocation(&key)
+        .expect("read the latest invocation")
+        .iter()
+        .map(|origin| origin.id)
+        .collect();
+    assert_eq!(latest, reported);
+    drop(store);
+
+    let created = cmd()
+        .current_dir(&root)
+        .args(["baseline", "create", ".", "--file", "baseline.json"])
+        .output()
+        .expect("create a baseline");
+    assert!(created.status.success(), "{created:?}");
+    let checked = cmd()
+        .current_dir(&root)
+        .args([
+            "scan",
+            ".",
+            "--mode",
+            "semantic",
+            "--format",
+            "json",
+            "--baseline",
+            "baseline.json",
+        ])
+        .output()
+        .expect("scan against the baseline");
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
+/// A report with no `--run` replays the scan it names, which for a
+/// partitioned scan is every partition it printed, in the same document shape.
+#[test]
+fn a_bare_report_replays_every_partition_the_scan_printed() {
+    require_clang_helper();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
+    std::fs::write(
+        root.join("src/unlisted.cpp"),
+        "int unlisted() { return 0; }\n",
+    )
+    .expect("add source absent from the database");
+    let scanned = scan(&root);
+
+    let output = cmd()
+        .current_dir(&root)
+        .args(["report", "--format", "json"])
+        .output()
+        .expect("run report");
+    assert!(output.status.success(), "{output:?}");
+    let replayed: Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+
+    let run_ids = |value: &Value| -> Vec<Value> {
+        reports(value)
+            .iter()
+            .map(|partition| partition["run"]["run_id"].clone())
+            .collect()
+    };
+    assert!(replayed.get("partitions").is_some(), "{replayed}");
+    assert_eq!(replayed["schema_version"], scanned["schema_version"]);
+    assert_eq!(run_ids(&replayed), run_ids(&scanned));
+    let group_counts = |value: &Value| -> Vec<usize> {
+        reports(value)
+            .iter()
+            .map(|partition| partition["groups"].as_array().map_or(0, Vec::len))
+            .collect()
+    };
+    assert_eq!(group_counts(&replayed), group_counts(&scanned));
+}
+
 /// A generated database may legitimately compile the exact same source twice.
 /// The selector is the full command rather than the source path, so both
 /// entries survive planning and each Clang request chooses its own `-D`.

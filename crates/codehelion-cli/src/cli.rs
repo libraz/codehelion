@@ -198,7 +198,7 @@ impl ColorChoice {
 /// Which glyphs a text report draws its structure with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum DecorationChoice {
-    /// Box-drawing characters for a terminal, ASCII stand-ins elsewhere.
+    /// Box-drawing characters everywhere except Windows, ASCII stand-ins there.
     #[default]
     Auto,
     /// Box-drawing characters and symbols.

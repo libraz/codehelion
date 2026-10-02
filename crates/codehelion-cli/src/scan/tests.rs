@@ -76,8 +76,15 @@ fn cross_language_comparison_stays_in_its_own_report_domain() {
         "codehelion/cross-language"
     );
 
-    let text = partitioned_text(&scan_args(false), &[], None, None, Some(&comparison), None)
-        .expect("text report");
+    let text = partitioned_text(
+        &ReportOutput::of_scan(&scan_args(false)),
+        &[],
+        None,
+        None,
+        Some(&comparison),
+        None,
+    )
+    .expect("text report");
     assert!(text.contains("candidate search was truncated"));
 }
 
@@ -134,8 +141,15 @@ fn requested_cross_variant_comparison_that_cannot_run_is_explicit_in_every_forma
     assert_eq!(json["cross_variant_comparison_status"]["status"], "not_run");
     assert!(json.get("cross_variant_comparison").is_none());
 
-    let text = partitioned_text(&scan_args(false), &[], None, Some(&status), None, None)
-        .expect("text report");
+    let text = partitioned_text(
+        &ReportOutput::of_scan(&scan_args(false)),
+        &[],
+        None,
+        Some(&status),
+        None,
+        None,
+    )
+    .expect("text report");
     assert!(text.contains("Cross-build-variant comparison was not run"));
     assert!(text.contains("fewer than two build-variant partitions"));
 
@@ -168,8 +182,15 @@ fn requested_cross_language_comparison_that_cannot_run_is_explicit_in_every_form
     );
     assert!(json.get("cross_language_comparison").is_none());
 
-    let text = partitioned_text(&scan_args(false), &[], None, None, None, Some(&status))
-        .expect("text report");
+    let text = partitioned_text(
+        &ReportOutput::of_scan(&scan_args(false)),
+        &[],
+        None,
+        None,
+        None,
+        Some(&status),
+    )
+    .expect("text report");
     assert!(text.contains("Cross-language comparison was not run"));
     assert!(text.contains("no eligible C++ semantic windows"));
 
@@ -195,9 +216,16 @@ fn partitioned_machine_reports_reject_text_only_flags() {
                 "--show-near-misses" => args.show_near_misses = true,
                 _ => unreachable!("the fixture uses only known text-only flags"),
             }
-            let error =
-                write_partitioned_reports(&args, &mut Vec::new(), &[], None, None, None, None)
-                    .expect_err("machine reports reject text-only flags");
+            let error = write_partitioned_reports(
+                ReportOutput::of_scan(&args),
+                &mut Vec::new(),
+                &[],
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect_err("machine reports reject text-only flags");
             assert!(format!("{error:#}").contains(flag));
         }
     }
@@ -225,9 +253,16 @@ fn partitioned_reports_refuse_to_overwrite_every_format_without_force() {
         args.output = Some(path.clone());
         let mut out = Vec::new();
 
-        let error =
-            write_partitioned_reports(&args, &mut out, &[], None, Some(&status), None, None)
-                .expect_err("partitioned output must not overwrite without --force");
+        let error = write_partitioned_reports(
+            ReportOutput::of_scan(&args),
+            &mut out,
+            &[],
+            None,
+            Some(&status),
+            None,
+            None,
+        )
+        .expect_err("partitioned output must not overwrite without --force");
         assert!(error.to_string().contains("refusing to overwrite"));
         assert_eq!(
             std::fs::read_to_string(path).expect("read existing output"),

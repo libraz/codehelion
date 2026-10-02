@@ -212,6 +212,45 @@ fn a_symbol_confined_to_the_fragments_file_is_attributed_whole() {
     );
 }
 
+/// One file named by several spellings is one extent: counting each spelling
+/// apart would divide by less than the lines the fragment covers and attribute
+/// more bytes than the symbol has.
+#[test]
+fn path_spellings_of_one_file_do_not_inflate_the_attributed_bytes() {
+    let mut symbol = symbol_assembled_from_two_files();
+    symbol.size = 100;
+    let frame = |source: &str, line: u32| codehelion_artifact::ArtifactInlineFrame {
+        evidence_kind: codehelion_artifact::ArtifactSourceLocationEvidenceKind::Dwarf,
+        source: source.to_owned(),
+        line: Some(line),
+        column: None,
+    };
+    symbol.inline_stack = vec![
+        frame("/work/src/main.cpp", 1),
+        frame("/work/src/main.cpp", 2),
+        frame("src/main.cpp", 19),
+        frame("/work/src/../src/./main.cpp", 20),
+        frame("src\\main.cpp", 20),
+    ];
+    let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"spellings");
+    artifact.symbols.push(symbol.clone());
+    let fragment = fragment_over_the_whole_file_extent();
+    let mut mappings = vec![direct_location_mapping(&symbol, &fragment)];
+
+    assign_unambiguous_fragment_bytes(
+        &artifact,
+        FilePath::new("/work"),
+        &[fragment],
+        &mut mappings,
+    );
+
+    assert_eq!(mappings[0].attributed_bytes, Some(100));
+    assert_eq!(
+        mappings[0].evidence.attribution_is_whole_symbol(),
+        Some(true)
+    );
+}
+
 #[test]
 fn same_named_units_remain_ambiguous_name_candidates() {
     let symbol = codehelion_artifact::ArtifactSymbol {

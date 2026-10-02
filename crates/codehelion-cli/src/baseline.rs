@@ -301,12 +301,14 @@ impl Baseline {
         Ok(baseline)
     }
 
-    /// Write the baseline as pretty-printed JSON, with a trailing newline.
+    /// Write the baseline as pretty-printed JSON, with a trailing newline,
+    /// refusing to replace an existing file unless `force` is set.
     ///
     /// # Errors
     ///
-    /// Returns an error when serialization or the write fails.
-    pub fn write(&self, path: &Path) -> Result<()> {
+    /// Returns an error when serialization or the write fails, or when the
+    /// file exists and `force` is unset.
+    pub fn write(&self, path: &Path, force: bool) -> Result<()> {
         let mut text = serde_json::to_string_pretty(self).context("serializing the baseline")?;
         text.push('\n');
         if let Some(parent) = path
@@ -316,7 +318,7 @@ impl Baseline {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+        crate::scan::write_output(path, text.as_bytes(), force)
     }
 
     /// The group ids this baseline covers across all build variants.

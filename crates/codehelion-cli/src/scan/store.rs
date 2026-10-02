@@ -94,6 +94,83 @@ pub(crate) fn reuse_config_hash(cfg: &Config, profile: ReuseProfile<'_>) -> Resu
     Ok(ContentHash::of(config_text.as_bytes()))
 }
 
+/// What the run an invocation is about to record would be, beyond the
+/// configuration and build variant a reuse candidate is selected by.
+pub(crate) struct ReuseIdentity<'a> {
+    /// Every `(component, version)` pair the run would be recorded under.
+    pub(crate) detector_versions: &'a [(String, String)],
+    /// The baseline the run's findings were compared against, if any.
+    pub(crate) baseline_digest: Option<&'a str>,
+    /// The tree the run read, by relative path and content hash.
+    pub(crate) tree: &'a BTreeMap<String, String>,
+}
+
+/// Whether the completed run `previous` would record exactly the rows the
+/// current invocation is about to, and may therefore stand in for it.
+///
+/// The candidate already agrees on root, configuration and build variant.
+/// This compares the rest of what decides the rows: the binary that wrote
+/// them, every detector version, the baseline, and the tree. Every reuse path
+/// asks this one question, so no path can replay a run another would refuse.
+///
+/// # Errors
+///
+/// Returns any error reading the candidate run.
+fn reusable_run(store: &Store, previous: i64, current: &ReuseIdentity<'_>) -> Result<bool> {
+    let origin = store.run_origin(previous)?;
+    if origin.tool_version != env!("CARGO_PKG_VERSION") {
+        return Ok(false);
+    }
+    let mut detectors = current.detector_versions.to_vec();
+    detectors.sort();
+    detectors.dedup();
+    if origin.detector_versions != detectors {
+        return Ok(false);
+    }
+    let same_baseline = store
+        .run_summary_row(previous)?
+        .is_some_and(|stored| stored.baseline_digest.as_deref() == current.baseline_digest);
+    Ok(same_baseline && store.run_tree(previous)? == *current.tree)
+}
+
+/// The completed run a new run is recorded against.
+pub(crate) struct Predecessor {
+    /// Its row id.
+    pub(crate) id: i64,
+    /// What became of the tree since it.
+    pub(crate) changes: report::TreeChanges,
+    /// Whether it may stand in for the new run, per [`reusable_run`].
+    pub(crate) reusable: bool,
+}
+
+/// Select the newest completed run under the same root, configuration and
+/// build variant, and decide whether it may stand in for the run `current`
+/// describes. Reuse is only considered when `consider_reuse` is set.
+///
+/// # Errors
+///
+/// Returns any error reading the audit database.
+pub(crate) fn select_predecessor(
+    store: &Store,
+    root_path: &str,
+    config_hash: &str,
+    variant_fingerprint: &str,
+    current: &ReuseIdentity<'_>,
+    consider_reuse: bool,
+) -> Result<Option<Predecessor>> {
+    let Some(previous) =
+        store.latest_compatible_run(root_path, config_hash, variant_fingerprint)?
+    else {
+        return Ok(None);
+    };
+    let previous_tree = store.run_tree(previous.id)?;
+    Ok(Some(Predecessor {
+        id: previous.id,
+        changes: shared::tree_changes(previous.id, &previous_tree, current.tree),
+        reusable: consider_reuse && reusable_run(store, previous.id, current)?,
+    }))
+}
+
 /// Rank every Fast entry without touching the audit database.
 pub(super) fn rank_groups(
     inputs: &BuildInputs<'_>,
@@ -172,22 +249,27 @@ pub(super) fn record_ranked(
     detector_versions.push(("ranking".to_string(), cfg.priority.weights().recipe()));
     let root_path = path_key(inputs.root);
     let current_tree = shared::file_tree(&files);
-    let predecessor =
-        store.latest_compatible_run(&root_path, config_hash.as_str(), &variant.fingerprint())?;
+    let predecessor = select_predecessor(
+        &store,
+        &root_path,
+        config_hash.as_str(),
+        &variant.fingerprint(),
+        &ReuseIdentity {
+            detector_versions: &detector_versions,
+            baseline_digest: summary.baseline_digest.as_deref(),
+            tree: &current_tree,
+        },
+        inputs.reuse_allowed,
+    )?;
     if let Some(previous) = predecessor.as_ref() {
-        let previous_tree = store.run_tree(previous.id)?;
-        inputs.changes = Some(shared::tree_changes(
-            previous.id,
-            &previous_tree,
-            &current_tree,
-        ));
-        if inputs.reuse_allowed
-            && store
-                .run_summary_row(previous.id)?
-                .is_some_and(|stored| stored.baseline_digest == summary.baseline_digest)
-            && previous_tree == current_tree
-        {
-            store.activate_suppressions(&inputs.rules.rows)?;
+        inputs.changes = Some(previous.changes.clone());
+        if previous.reusable {
+            store.confirm_reused_run(
+                previous.id,
+                &inputs.rules.rows,
+                inputs.started_at,
+                inputs.finished_at,
+            )?;
             inputs.run_id = Some(previous.id);
             inputs.reused = true;
             return Ok(());

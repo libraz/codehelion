@@ -93,7 +93,7 @@ pub(super) fn sample_report() -> Report {
             },
             database: ".codehelion/audit.db".to_string(),
             timings: None,
-            replay_database: None,
+            replay_flags: String::new(),
             run_id: Some(1),
             reused: false,
         },
@@ -125,6 +125,7 @@ pub(super) fn sample_report() -> Report {
                 symlink_directories: 0,
             },
             baseline: None,
+            baseline_not_replayed: false,
             changes: None,
             groups: GroupCounts {
                 total: 2,

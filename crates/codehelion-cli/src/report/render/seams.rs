@@ -61,32 +61,39 @@ impl Report {
 /// and never breached is exactly the case the ledger exists to tell apart from
 /// one that costs a fix every time.
 pub(super) fn seam_clauses(seam: &ReportedSeam) -> Vec<String> {
+    let mut clauses = Vec::new();
     if seam.asymmetric_changes == 0 {
-        // Nothing followed from a change that never happened, so the breach
-        // and finding counts have no crossing to qualify.
-        return vec!["no asymmetric changes".to_owned()];
-    }
-    let mut clauses = vec![plural(seam.asymmetric_changes, "asymmetric change")];
-    if seam.breaches == 0 {
-        clauses.push("no breaches".to_owned());
+        // Nothing followed from a change that never happened, so there is no
+        // breach count to qualify. The findings come from a scan rather than
+        // from the history, and stand on their own.
+        clauses.push("no asymmetric changes".to_owned());
     } else {
-        let last = seam
-            .last_breach
-            .as_deref()
-            .map_or_else(String::new, |commit| {
-                let abbreviated: String = commit.chars().take(ABBREVIATED_COMMIT).collect();
-                format!(" (last {abbreviated})")
-            });
-        clauses.push(format!(
-            "{} {}{last}",
-            thousands(seam.breaches),
-            noun_form_of(seam.breaches, "breach", "breaches"),
-        ));
+        clauses.push(plural(seam.asymmetric_changes, "asymmetric change"));
+        clauses.push(breach_clause(seam));
     }
     if seam.findings > 0 {
         clauses.push(plural(seam.findings, "finding"));
     }
     clauses
+}
+
+/// How often one seam's asymmetric changes were breached, and when last.
+fn breach_clause(seam: &ReportedSeam) -> String {
+    if seam.breaches == 0 {
+        return "no breaches".to_owned();
+    }
+    let last = seam
+        .last_breach
+        .as_deref()
+        .map_or_else(String::new, |commit| {
+            let abbreviated: String = commit.chars().take(ABBREVIATED_COMMIT).collect();
+            format!(" (last {abbreviated})")
+        });
+    format!(
+        "{} {}{last}",
+        thousands(seam.breaches),
+        noun_form_of(seam.breaches, "breach", "breaches"),
+    )
 }
 
 /// What moved for one seam since the previous generation, as the clauses that

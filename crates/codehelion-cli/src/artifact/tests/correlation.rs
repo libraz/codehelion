@@ -769,6 +769,7 @@ fn a_symbol_without_a_usable_name_is_not_reported_as_missing_debug_information()
 }
 
 mod attribution;
+mod linker_map;
 mod matching;
 mod origin;
 mod ratio;

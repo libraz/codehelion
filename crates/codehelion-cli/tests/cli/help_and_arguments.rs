@@ -86,3 +86,63 @@ fn help_flag_succeeds() {
         .success()
         .stdout(predicate::str::contains("codehelion"));
 }
+
+/// A rejection decided from the command line alone exits 2, the code `clap`
+/// uses for its own refusals, and a failure that depends on the environment
+/// stays at 1.
+#[test]
+fn every_command_line_rejection_exits_with_the_usage_status() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    std::fs::write(directory.path().join("lib.rs"), "pub fn tiny() {}\n").expect("write source");
+    for arguments in [
+        vec!["scan", ".", "--include-trivial"],
+        vec!["scan", ".", "--compare-languages"],
+        vec!["scan", ".", "--jobs", "0"],
+        vec!["scan", ".", "--format", "json", "--show-siblings"],
+        vec!["scan", ".", "--helper", "rust=/bin/true"],
+        vec!["scan", ".", "--mode", "semantic", "--helper", "rust"],
+        vec!["scan", ".", "--allow-execution", "build-scripts"],
+        vec![
+            "scan",
+            ".",
+            "--untrusted",
+            "--mode",
+            "semantic",
+            "--allow-execution",
+            "build-scripts",
+        ],
+        vec!["scan", ".", "--force"],
+        vec!["cache", "prune"],
+        vec!["cache", "clear"],
+        vec![
+            "artifact",
+            "compare",
+            "a.wasm",
+            "b.wasm",
+            "--source-run",
+            "1",
+        ],
+        vec![
+            "artifact",
+            "compare",
+            "a.wasm",
+            "b.wasm",
+            "--clone-group",
+            "deadbeef",
+        ],
+    ] {
+        let output = cmd()
+            .current_dir(directory.path())
+            .args(&arguments)
+            .output()
+            .expect("run a rejected command line");
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+    }
+
+    let output = cmd()
+        .current_dir(directory.path())
+        .arg("report")
+        .output()
+        .expect("report with nothing recorded");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+}

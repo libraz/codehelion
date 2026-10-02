@@ -17,21 +17,7 @@ use std::path::Path;
 /// Render the model in the requested format, to `--output` when given,
 /// otherwise to `out`. Colour is used only for text going to a terminal.
 pub(crate) fn write_report(args: &ScanArgs, out: &mut impl Write, model: &Report) -> Result<()> {
-    write_report_options(
-        ReportOutput {
-            format: args.format,
-            output: args.output.as_deref(),
-            force: args.force,
-            view: args.view,
-            show_suppressed: args.show_suppressed,
-            show_siblings: args.show_siblings,
-            show_near_misses: args.show_near_misses,
-            sort: args.sort.axis(),
-            min_identifier_jaccard: args.min_identifier_jaccard,
-        },
-        out,
-        model,
-    )
+    write_report_options(ReportOutput::of_scan(args), out, model)
 }
 
 /// Render a source report when supplemental artifact evidence could not be
@@ -42,22 +28,7 @@ pub(crate) fn write_report_without_artifact_guidance(
     out: &mut impl Write,
     model: &Report,
 ) -> Result<()> {
-    write_report_options_internal(
-        ReportOutput {
-            format: args.format,
-            output: args.output.as_deref(),
-            force: args.force,
-            view: args.view,
-            show_suppressed: args.show_suppressed,
-            show_siblings: args.show_siblings,
-            show_near_misses: args.show_near_misses,
-            sort: args.sort.axis(),
-            min_identifier_jaccard: args.min_identifier_jaccard,
-        },
-        out,
-        model,
-        false,
-    )
+    write_report_options_internal(ReportOutput::of_scan(args), out, model, false)
 }
 
 /// Output choices shared by a freshly scanned and a recorded report.
@@ -88,6 +59,23 @@ pub(crate) struct ReportOutput<'a> {
     pub(crate) min_identifier_jaccard: Option<f64>,
 }
 
+impl<'a> ReportOutput<'a> {
+    /// The output choices a scan's command line makes.
+    pub(crate) fn of_scan(args: &'a ScanArgs) -> Self {
+        Self {
+            format: args.format,
+            output: args.output.as_deref(),
+            force: args.force,
+            view: args.view,
+            show_suppressed: args.show_suppressed,
+            show_siblings: args.show_siblings,
+            show_near_misses: args.show_near_misses,
+            sort: args.sort.axis(),
+            min_identifier_jaccard: args.min_identifier_jaccard,
+        }
+    }
+}
+
 /// Render a complete report with the common output path.
 pub(crate) fn write_report_options(
     options: ReportOutput<'_>,
@@ -95,16 +83,6 @@ pub(crate) fn write_report_options(
     model: &Report,
 ) -> Result<()> {
     write_report_options_internal(options, out, model, true)
-}
-
-/// Render a source report without artifact follow-up guidance after a
-/// supplemental artifact read failed.
-pub(crate) fn write_report_options_without_artifact_guidance(
-    options: ReportOutput<'_>,
-    out: &mut impl Write,
-    model: &Report,
-) -> Result<()> {
-    write_report_options_internal(options, out, model, false)
 }
 
 fn write_report_options_internal(
@@ -167,6 +145,7 @@ pub(crate) fn text_options(options: &ReportOutput<'_>) -> report::TextOptions {
         show_near_misses: options.show_near_misses,
         sort: options.sort,
         min_identifier_jaccard: options.min_identifier_jaccard,
+        ..report::TextOptions::default()
     }
 }
 
@@ -178,28 +157,30 @@ fn validate_presentation_options(
     show_near_misses: bool,
 ) -> Result<()> {
     if show_suppressed && format != Format::Text {
-        bail!(
+        usage_bail!(
             "--show-suppressed applies only to text reports; JSON and SARIF always include suppressed groups"
         );
     }
     if show_siblings && format != Format::Text {
-        bail!(
+        usage_bail!(
             "--show-siblings applies only to text reports; JSON and SARIF always include sibling data"
         );
     }
     if show_near_misses && format != Format::Text {
-        bail!(
+        usage_bail!(
             "--show-near-misses applies only to text reports; JSON and SARIF always include near-miss data"
         );
     }
     Ok(())
 }
 
-/// Write a completed report to a file, refusing to replace one that is
-/// already there unless the caller said to.
+/// Write a file the user named, refusing to replace one that is already there
+/// unless the caller said to.
 ///
-/// Shared by every command that offers `--output`: one spelling of the refusal
-/// means a reader who has met it once has met it everywhere.
+/// Shared by every command that writes a user-named file: the refusal is made
+/// by the exclusive create itself, so no other process can slip a file in
+/// between a check and the write, and one spelling of it means a reader who
+/// has met it once has met it everywhere.
 ///
 /// # Errors
 ///
@@ -215,14 +196,18 @@ pub(crate) fn write_output(path: &Path, text: &[u8], force: bool) -> Result<()> 
         .write(true)
         .create_new(true)
         .open(path)
-        .with_context(|| {
-            format!(
-                "writing {} (refusing to overwrite an existing file; pass --force to replace it)",
-                path.display()
-            )
-        })?;
+        .with_context(|| overwrite_refusal(path))?;
     file.write_all(text)
         .with_context(|| format!("writing {}", path.display()))
+}
+
+/// The context [`write_output`] gives a destination it could not create, and
+/// that a command claiming its destination early gives the same refusal.
+pub(crate) fn overwrite_refusal(path: &Path) -> String {
+    format!(
+        "writing {} (refusing to overwrite an existing file; pass --force to replace it)",
+        path.display()
+    )
 }
 
 /// Restore how each group of a freshly recorded run relates to the run it was
@@ -364,6 +349,180 @@ pub(crate) fn top_group_churn(
     })
 }
 
+/// One part of a recorded run's report that is read back from the database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HydrationStage {
+    /// Reopening the audit database, without which no other stage runs.
+    Database,
+    /// The seam ledger summary.
+    Seam,
+    /// Artifact savings estimates.
+    ArtifactSavings,
+    /// Group identity and churn since the run compared with.
+    History,
+}
+
+/// A part of a recorded run's report that could not be read back, and why.
+pub(crate) struct HydrationFailure {
+    /// The run whose report it belongs to.
+    pub(crate) run_id: i64,
+    /// The part left out.
+    pub(crate) stage: HydrationStage,
+    /// What reading it failed with.
+    pub(crate) error: anyhow::Error,
+}
+
+/// Read back what a recorded run's report carries beyond the run's own rows:
+/// its seam summary, artifact savings, and group identity and churn.
+///
+/// Each stage stands alone. One that fails leaves only its own part out of
+/// `model` and is returned; every stage that succeeded stays in.
+pub(crate) fn hydrate_recorded_run(
+    store: &Store,
+    run_id: i64,
+    churn_top: usize,
+    model: &mut Report,
+) -> Vec<HydrationFailure> {
+    let mut failures = Vec::new();
+    match crate::report_command::recorded_seam(store, run_id) {
+        Ok(seam) => model.seam = seam,
+        Err(error) => failures.push(HydrationFailure {
+            run_id,
+            stage: HydrationStage::Seam,
+            error,
+        }),
+    }
+    if let Err(error) = hydrate_artifact_savings(store, run_id, &mut model.groups) {
+        for group in &mut model.groups {
+            group.artifact_savings.clear();
+        }
+        failures.push(HydrationFailure {
+            run_id,
+            stage: HydrationStage::ArtifactSavings,
+            error,
+        });
+    }
+    let history = store
+        .preceding_compatible_run(run_id)
+        .map_err(anyhow::Error::from)
+        .and_then(|predecessor| {
+            predecessor
+                .map(|predecessor| {
+                    hydrate_group_identity(store, run_id, predecessor, &mut model.groups)?;
+                    top_group_churn(store, run_id, predecessor, churn_top)
+                })
+                .transpose()
+        });
+    match history {
+        Ok(churn) => {
+            if churn.is_some() {
+                model.summary.top_churn = churn;
+            }
+        }
+        Err(error) => failures.push(HydrationFailure {
+            run_id,
+            stage: HydrationStage::History,
+            error,
+        }),
+    }
+    model.refresh_supplemental_summary();
+    failures
+}
+
+/// Read back every recorded report in `models` from the database at
+/// `db_path`, as [`hydrate_recorded_run`] does for one; a report with no run
+/// id is left as it is.
+pub(crate) fn hydrate_recorded_reports(
+    db_path: &Path,
+    churn_top: usize,
+    models: &mut [Report],
+) -> Vec<HydrationFailure> {
+    let recorded: Vec<i64> = models.iter().filter_map(|model| model.run.run_id).collect();
+    let Some(&first) = recorded.first() else {
+        return Vec::new();
+    };
+    let store = match super::open_recorded_store(db_path) {
+        Ok(store) => store,
+        Err(error) => {
+            for model in models.iter_mut() {
+                for group in &mut model.groups {
+                    group.artifact_savings.clear();
+                }
+                model.refresh_supplemental_summary();
+            }
+            return vec![HydrationFailure {
+                run_id: first,
+                stage: HydrationStage::Database,
+                error,
+            }];
+        }
+    };
+    models
+        .iter_mut()
+        .filter_map(|model| model.run.run_id.map(|run_id| (run_id, model)))
+        .flat_map(|(run_id, model)| hydrate_recorded_run(&store, run_id, churn_top, model))
+        .collect()
+}
+
+/// Whether the reports may carry artifact follow-up guidance, given what
+/// failed to load.
+pub(crate) fn artifact_guidance_holds(failures: &[HydrationFailure]) -> bool {
+    !failures.iter().any(|failure| {
+        matches!(
+            failure.stage,
+            HydrationStage::Database | HydrationStage::ArtifactSavings
+        )
+    })
+}
+
+/// Say on the error stream what each failed stage left out of which run's
+/// report, and turn the failures into the command's error.
+///
+/// # Errors
+///
+/// Returns an error naming every failed stage when there was one.
+pub(crate) fn report_hydration_failures(failures: Vec<HydrationFailure>) -> Result<()> {
+    let mut stages = Vec::with_capacity(failures.len());
+    for HydrationFailure {
+        run_id,
+        stage,
+        error,
+    } in failures
+    {
+        let (what, not_loaded, consequence) = match stage {
+            HydrationStage::Database => (
+                "the audit database",
+                "the audit database could not be reopened",
+                "artifact evidence, the seam block and group history are unavailable",
+            ),
+            HydrationStage::Seam => (
+                "the seam summary",
+                "the seam summary was not loaded",
+                "the seam block is left out",
+            ),
+            HydrationStage::ArtifactSavings => (
+                "artifact savings",
+                "artifact savings were not loaded",
+                "artifact evidence and guidance are unavailable",
+            ),
+            HydrationStage::History => (
+                "group history",
+                "group history was not loaded",
+                "group identity and churn since the previous run are left out",
+            ),
+        };
+        eprintln!(
+            "warning: {not_loaded} ({error}); run {run_id} remains recorded, but {consequence} for this report"
+        );
+        stages.push(format!("{what} of run {run_id}"));
+    }
+    if stages.is_empty() {
+        Ok(())
+    } else {
+        bail!("reading recorded data back failed: {}", stages.join(", "))
+    }
+}
+
 /// Restore the artifact estimates that belong to a recorded source run.
 ///
 /// The estimates are not part of the source snapshot because an artifact can
@@ -415,7 +574,7 @@ pub(crate) fn hydrate_artifact_savings(
 /// reports, and SARIF joins its standard `runs` array. None of those sums
 /// findings or coverage across different build variants.
 pub(crate) fn write_partitioned_reports(
-    args: &ScanArgs,
+    options: ReportOutput<'_>,
     out: &mut impl Write,
     models: &[Report],
     cross_variant: Option<&report::CrossVariantComparison>,
@@ -424,7 +583,7 @@ pub(crate) fn write_partitioned_reports(
     cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
 ) -> Result<()> {
     write_partitioned_reports_internal(
-        args,
+        options,
         out,
         models,
         cross_variant,
@@ -438,7 +597,7 @@ pub(crate) fn write_partitioned_reports(
 /// Render partitioned source reports while suppressing artifact follow-up
 /// guidance after supplemental hydration failed.
 pub(crate) fn write_partitioned_reports_without_artifact_guidance(
-    args: &ScanArgs,
+    options: ReportOutput<'_>,
     out: &mut impl Write,
     models: &[Report],
     cross_variant: Option<&report::CrossVariantComparison>,
@@ -447,7 +606,7 @@ pub(crate) fn write_partitioned_reports_without_artifact_guidance(
     cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
 ) -> Result<()> {
     write_partitioned_reports_internal(
-        args,
+        options,
         out,
         models,
         cross_variant,
@@ -463,7 +622,7 @@ pub(crate) fn write_partitioned_reports_without_artifact_guidance(
     reason = "the public partitioned-report shape is mirrored while only the guidance policy varies"
 )]
 fn write_partitioned_reports_internal(
-    args: &ScanArgs,
+    options: ReportOutput<'_>,
     out: &mut impl Write,
     models: &[Report],
     cross_variant: Option<&report::CrossVariantComparison>,
@@ -473,10 +632,10 @@ fn write_partitioned_reports_internal(
     include_artifact_guidance: bool,
 ) -> Result<()> {
     validate_presentation_options(
-        args.format,
-        args.show_suppressed,
-        args.show_siblings,
-        args.show_near_misses,
+        options.format,
+        options.show_suppressed,
+        options.show_siblings,
+        options.show_near_misses,
     )?;
     if let ([model], None, None, None, None) = (
         models,
@@ -485,13 +644,9 @@ fn write_partitioned_reports_internal(
         cross_language,
         cross_language_not_run,
     ) {
-        return if include_artifact_guidance {
-            write_report(args, out, model)
-        } else {
-            write_report_without_artifact_guidance(args, out, model)
-        };
+        return write_report_options_internal(options, out, model, include_artifact_guidance);
     }
-    let text = match args.format {
+    let text = match options.format {
         Format::Json => partitioned_json(
             models,
             cross_variant,
@@ -507,7 +662,7 @@ fn write_partitioned_reports_internal(
             cross_language_not_run,
         )?,
         Format::Text => partitioned_text(
-            args,
+            &options,
             models,
             cross_variant,
             cross_variant_not_run,
@@ -515,12 +670,12 @@ fn write_partitioned_reports_internal(
             cross_language_not_run,
         )?,
     };
-    write_partitioned_text(args, out, &text)?;
+    write_partitioned_text(&options, out, &text)?;
     // After the reports, and on the error stream, for the same reason one
     // report's notes are: they qualify a run rather than answering it.
-    if args.format == Format::Text {
+    if options.format == Format::Text {
         out.flush()?;
-        let options = partition_text_options(args);
+        let options = text_options(&options);
         for model in models {
             model.render_notes_without_artifact_guidance(options, &mut std::io::stderr())?;
         }
@@ -529,21 +684,6 @@ fn write_partitioned_reports_internal(
         }
     }
     Ok(())
-}
-
-/// The text view a partitioned scan renders every partition under.
-fn partition_text_options(args: &ScanArgs) -> report::TextOptions {
-    text_options(&ReportOutput {
-        format: args.format,
-        output: args.output.as_deref(),
-        force: args.force,
-        view: args.view,
-        show_suppressed: args.show_suppressed,
-        show_siblings: args.show_siblings,
-        show_near_misses: args.show_near_misses,
-        sort: args.sort.axis(),
-        min_identifier_jaccard: args.min_identifier_jaccard,
-    })
 }
 
 pub(super) fn partitioned_json(
@@ -768,14 +908,14 @@ fn comparison_uri_bases(root: &str) -> Value {
 }
 
 pub(super) fn partitioned_text(
-    args: &ScanArgs,
+    output: &ReportOutput<'_>,
     models: &[Report],
     cross_variant: Option<&report::CrossVariantComparison>,
     cross_variant_not_run: Option<&report::CrossVariantComparisonNotRun>,
     cross_language: Option<&report::CrossLanguageComparison>,
     cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
 ) -> Result<String> {
-    let options = partition_text_options(args);
+    let options = text_options(output);
     let mut rendered = Vec::new();
     for model in models {
         writeln!(
@@ -939,10 +1079,14 @@ fn append_cross_language_not_run_text(
     Ok(())
 }
 
-fn write_partitioned_text(args: &ScanArgs, out: &mut impl Write, text: &str) -> Result<()> {
-    match args.output.as_deref() {
+fn write_partitioned_text(
+    options: &ReportOutput<'_>,
+    out: &mut impl Write,
+    text: &str,
+) -> Result<()> {
+    match options.output {
         Some(path) => {
-            write_output(path, text.as_bytes(), args.force)?;
+            write_output(path, text.as_bytes(), options.force)?;
             eprintln!("wrote {}", path.display());
         }
         None => out.write_all(text.as_bytes())?,

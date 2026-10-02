@@ -266,6 +266,8 @@ pub fn restored(stored: &SummaryRow, groups: &[Group], analysis_mode: &str) -> S
             symlink_directories: stored.excluded_symlink_directories,
         },
         baseline: None,
+        // Only a replay sets this; a scan fills in the baseline it was given.
+        baseline_not_replayed: false,
         changes: None,
         guardrails: stored.guardrails.as_ref().map(Guardrails::from),
         // Nor this: what a compiler answered belongs to the run that asked

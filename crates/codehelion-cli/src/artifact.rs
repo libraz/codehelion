@@ -96,6 +96,7 @@ mod input;
 mod output;
 mod recorded;
 
+use crate::scan::write_output;
 use calibration_report::{calibration_database, read_build_variant, record_comparison_calibration};
 use input::{
     compare_untrusted_containment, inspect, read_artifact_input, resolve_wasm_source_maps,
@@ -105,7 +106,7 @@ use input::{
 use input::{input_format, parse_input_format, resolve_wasm_source_map, source_map_locations};
 #[cfg(test)]
 use output::CappedArtifactIrBuffer;
-use output::{OutputReservation, write_output};
+use output::OutputReservation;
 use recorded::{record, recorded_containment, recorded_correlation, recorded_source_maps};
 
 mod worker;
@@ -133,7 +134,13 @@ pub fn run(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
 /// Run the artifact pipeline in the already isolated worker process.
 fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
     worker::set_stage("persistence setup");
-    let database = crate::resolve_db(crate::scan::DatabaseUse::Recording, args.db.as_deref())?;
+    let (_, _, database) = crate::resolve_database(
+        crate::scan::DatabaseUse::Recording,
+        std::path::Path::new("."),
+        args.db.as_deref(),
+        None,
+        false,
+    )?;
     let _database_lock = crate::scan_lock::acquire(&database)?;
     let started_at = crate::scan::rfc3339_now();
     worker::set_stage("parsing");
@@ -211,7 +218,13 @@ use calibration::{csv, optional_f64};
 pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome> {
     // A report only reads a committed SQLite snapshot. WAL lets this proceed
     // alongside one writer, so it deliberately does not take the writer lease.
-    let db = crate::resolve_db(crate::scan::DatabaseUse::Reading, args.db.as_deref())?;
+    let (_, _, db) = crate::resolve_database(
+        crate::scan::DatabaseUse::Reading,
+        std::path::Path::new("."),
+        args.db.as_deref(),
+        None,
+        false,
+    )?;
     let store = crate::scan::open_recorded_store(&db)?;
     let analysis_id = args.analysis.map_or_else(
         || {

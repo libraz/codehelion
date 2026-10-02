@@ -234,8 +234,15 @@ fn a_calibration_request_without_a_database_flag_resolves_the_configured_default
         .expect("a calibration request selects a database");
     assert_eq!(
         resolved,
-        crate::resolve_db(crate::scan::DatabaseUse::Recording, None)
-            .expect("the configured default database")
+        crate::resolve_database(
+            crate::scan::DatabaseUse::Recording,
+            std::path::Path::new("."),
+            None,
+            None,
+            false
+        )
+        .expect("the configured default database")
+        .2
     );
 }
 

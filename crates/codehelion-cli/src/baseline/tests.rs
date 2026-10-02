@@ -339,7 +339,7 @@ fn a_baseline_round_trips_through_a_file() {
     let path = dir.path().join("nested/baseline.json");
     let baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
 
-    baseline.write(&path).unwrap();
+    baseline.write(&path, false).unwrap();
     assert_eq!(Baseline::load(&path).unwrap(), baseline);
 
     let text = std::fs::read_to_string(&path).unwrap();
@@ -353,7 +353,7 @@ fn a_file_from_a_schema_this_build_does_not_read_is_an_error() {
     let path = dir.path().join("baseline.json");
     let mut baseline = Baseline::from_run(&origin(), &[], "2026-07-27T01:00:00Z");
     baseline.schema_version = SCHEMA_VERSION + 1;
-    baseline.write(&path).unwrap();
+    baseline.write(&path, false).unwrap();
 
     let err = Baseline::load(&path).expect_err("an unreadable schema version");
     assert!(format!("{err:#}").contains("schema version"));
@@ -424,7 +424,7 @@ fn a_baseline_within_the_ceiling_is_read_whole() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("baseline.json");
     let baseline = Baseline::from_run(&origin(), &[group("aa11")], "2026-07-27T01:00:00Z");
-    baseline.write(&path).unwrap();
+    baseline.write(&path, false).unwrap();
 
     assert_eq!(Baseline::load(&path).unwrap(), baseline);
 }

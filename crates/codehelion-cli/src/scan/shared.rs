@@ -344,11 +344,6 @@ pub(super) fn tree_changes(
     }
 }
 
-/// Whether the compared trees hold the same files with the same content.
-pub(super) const fn tree_unchanged(changes: &report::TreeChanges) -> bool {
-    changes.modified == 0 && changes.added == 0 && changes.removed == 0
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;

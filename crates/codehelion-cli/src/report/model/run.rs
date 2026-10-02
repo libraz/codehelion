@@ -58,8 +58,10 @@ pub struct RunInfo {
     /// whose other values are all derived from content.
     #[serde(skip)]
     pub timings: Option<RunTimings>,
-    /// The `--db` a printed follow-up command has to repeat, when running one
-    /// without it would open a different database.
+    /// The flags a printed follow-up command has to carry — `--path`,
+    /// `--config`, `--db`, `--untrusted` — each with a leading space, so that
+    /// run from the same directory it reaches the same root, configuration and
+    /// database. Empty when a bare invocation reaches them.
     ///
     /// Not serialized: [`Self::database`] already publishes where the run was
     /// recorded, and a consumer reading JSON is not the one pasting a command
@@ -67,12 +69,12 @@ pub struct RunInfo {
     /// prints are commands that run — a report that names a next step the
     /// reader cannot take is worse than one that names none.
     #[serde(skip)]
-    pub replay_database: Option<String>,
+    pub replay_flags: String,
     /// Row id of the recorded scan run.
     ///
-    /// Not a counter and not an ordering: a scan replaces the snapshot before
-    /// it, so the database holds one run at a time. The id exists to name the
-    /// recorded run to `report --run`, not to place it in a sequence.
+    /// Not a counter and not an ordering: a reused run keeps its id while
+    /// newer runs are recorded beside it. The id exists to name the recorded
+    /// run to `report --run`, not to place it in a sequence.
     ///
     /// `None` means analysis completed but persistence did not. Such a report
     /// is intentionally not replayable: publishing a sentinel id would make
@@ -153,6 +155,13 @@ pub struct Summary {
     /// What the baseline hid, when the scan was given one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline: Option<BaselineStatus>,
+    /// Set on a replay of a run that was scanned against a baseline.
+    ///
+    /// The baseline's status and each group's state against it are not
+    /// recorded, so a replay carries neither; this says so rather than leaving
+    /// the absence to read as a scan that was given no baseline.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub baseline_not_replayed: bool,
     /// File-tree delta from the preceding compatible completed run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changes: Option<TreeChanges>,

@@ -64,6 +64,62 @@ fn fast_mode_refuses_structural_only_diagnostic_flags() {
     }
 }
 
+/// A replay of a Fast run refuses the flags a Fast scan refuses, by the same
+/// rule, and a replay of a Structural run accepts them.
+#[test]
+fn a_replay_refuses_the_flags_its_runs_mode_does_not_measure() {
+    let dir = fixture();
+    let fast = scan_json_with(dir.path(), &["--mode", "fast"]);
+    let structural = scan_json_with(dir.path(), &["--mode", "structural"]);
+    let fast_run = fast["run"]["run_id"].to_string();
+    let structural_run = structural["run"]["run_id"].to_string();
+
+    for (flag, name) in [
+        (vec!["--show-siblings"], "--show-siblings"),
+        (vec!["--show-near-misses"], "--show-near-misses"),
+        (
+            vec!["--sort", "identifier-jaccard"],
+            "--sort identifier-jaccard",
+        ),
+        (
+            vec!["--min-identifier-jaccard", "0.7"],
+            "--min-identifier-jaccard",
+        ),
+    ] {
+        let mut scan = vec!["scan", "."];
+        scan.extend(&flag);
+        let scanned = cmd()
+            .current_dir(dir.path())
+            .args(&scan)
+            .output()
+            .expect("scan");
+        let mut replay = vec!["report", "--run", &fast_run];
+        replay.extend(&flag);
+        let replayed = cmd()
+            .current_dir(dir.path())
+            .args(&replay)
+            .output()
+            .expect("report");
+        assert_eq!(replayed.status.code(), scanned.status.code(), "{flag:?}");
+        assert_eq!(scanned.status.code(), Some(2), "{flag:?} is a usage error");
+        let refusal = format!("{name} requires --mode structural or --mode semantic");
+        for output in [&scanned, &replayed] {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(&refusal),
+                "{flag:?}: {output:?}"
+            );
+        }
+
+        let mut accepted = vec!["report", "--run", &structural_run];
+        accepted.extend(&flag);
+        cmd()
+            .current_dir(dir.path())
+            .args(&accepted)
+            .assert()
+            .success();
+    }
+}
+
 /// What a group measures on one axis, in the order the report listed them.
 ///
 /// Structural mode, because raw identifier agreement is measured on whole
@@ -283,27 +339,10 @@ fn a_fast_record_replay_names_exactly_which_floor_candidates_were_unmeasured() {
 
     let output = cmd()
         .current_dir(dir.path())
-        .args([
-            "report",
-            "--format",
-            "text",
-            "--min-identifier-jaccard",
-            "0.90",
-        ])
+        .args(["report", "--format", "text"])
         .output()
-        .expect("replay Fast report with an identifier floor");
+        .expect("replay the Fast report");
     assert!(output.status.success(), "{output:?}");
-    let text = String::from_utf8(output.stdout).expect("text output");
-    // Every Fast group is unmeasured, so the count the line names is the
-    // unmeasured one, and the floor it was given cannot be a second reason
-    // any of them is missing.
-    assert!(
-        text.contains(&format!(
-            "{unmeasured} group(s) are not listed: raw identifier agreement is not measured in this mode"
-        )),
-        "{text}"
-    );
-    assert!(!text.contains("raw identifier agreement below"), "{text}");
     let notes = String::from_utf8(output.stderr).expect("notes output");
     assert!(
         notes.contains(

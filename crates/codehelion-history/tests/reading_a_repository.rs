@@ -428,6 +428,115 @@ fn an_until_starts_the_walk_where_it_names_and_refuses_a_name_that_is_nothing() 
     assert_eq!(revision, "no-such-revision");
 }
 
+/// Run git in `root` with a fixed identity, for the repository shapes the
+/// planter does not build itself.
+#[allow(
+    clippy::disallowed_types,
+    reason = "the fixture repository is built by git itself"
+)]
+fn git_in(root: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .current_dir(root)
+        .args([
+            "-c",
+            "user.name=planter",
+            "-c",
+            "user.email=planter@example.invalid",
+        ])
+        .args(args)
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// Every spelling of one commit starts the walk at that commit: an annotated
+/// tag is peeled to the commit it names, as `changes_since` already reads it,
+/// and a revision naming something other than a commit is unknown as a commit.
+#[test]
+fn an_until_naming_a_commit_any_way_starts_the_walk_at_that_commit() {
+    let repository = tempfile::tempdir().unwrap();
+    let mut planter = Planter::initialise(repository.path()).unwrap();
+    for planned in &GOLDEN[..4] {
+        planter.commit(planned).unwrap();
+    }
+    planter.tag("lightweight").unwrap();
+    git_in(
+        repository.path(),
+        &["tag", "-a", "annotated", "-m", "release"],
+    );
+    let tagged = planter.ids()[3].clone();
+    for planned in &GOLDEN[4..] {
+        planter.commit(planned).unwrap();
+    }
+
+    let until = |revision: &str| {
+        read(
+            repository.path(),
+            &HistoryRequest {
+                limit: 100,
+                until: Some(revision.to_string()),
+            },
+        )
+    };
+    for revision in [
+        "lightweight",
+        "annotated",
+        "annotated^{commit}",
+        &tagged[..12],
+    ] {
+        let history = until(revision).unwrap_or_else(|error| panic!("{revision}: {error}"));
+        assert_eq!(
+            history.range().last.map(|id| id.as_str().to_string()),
+            Some(tagged.clone()),
+            "{revision}"
+        );
+        assert_eq!(history.commits().len(), 4, "{revision}");
+    }
+    assert_eq!(
+        changes_since(repository.path(), "annotated").unwrap(),
+        changes_since(repository.path(), "lightweight").unwrap()
+    );
+
+    let error = until("HEAD^{tree}").unwrap_err();
+    let HistoryError::UnknownRevision { revision, .. } = &error else {
+        panic!("a revision naming no commit is not reported as such: {error:?}");
+    };
+    assert_eq!(revision, "HEAD^{tree}");
+}
+
+/// A shallow clone is read up to its depth: the boundary commit, whose parent
+/// the clone does not hold, cannot say what it changed and is left out, and the
+/// history says it was cut.
+#[test]
+fn a_shallow_clone_is_read_up_to_its_boundary() {
+    let origin = planted(&GOLDEN);
+    let clone = tempfile::tempdir().unwrap();
+    let source = format!("file://{}", origin.path().display());
+    let target = clone.path().join("shallow");
+    git_in(
+        clone.path(),
+        &[
+            "clone",
+            "--quiet",
+            "--depth",
+            "3",
+            &source,
+            target.to_str().unwrap(),
+        ],
+    );
+
+    let history = read_all(&target);
+
+    assert!(history.is_shallow());
+    assert_eq!(
+        subjects(&history),
+        [
+            "refactor: fold the helper away",
+            "feat(docs): add a second page",
+        ]
+    );
+}
+
 /// A merge is followed along its first parent alone. What a topic branch did
 /// on its way is not what the trunk received, and counting both would make a
 /// history's numbers depend on whether the branch was squashed.

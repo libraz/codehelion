@@ -268,6 +268,47 @@ fn readers_open_the_database_the_scan_recorded_into() {
     }
 }
 
+/// Removing the old default once its history was moved on is the reader's
+/// own decision, and it loses nothing: every default-path command keeps
+/// resolving the neighbour this build has been recording into.
+#[test]
+fn removing_the_old_default_keeps_every_command_on_the_recorded_neighbour() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = resolved_root(&directory);
+    let cache = root.join(".codehelion");
+    tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
+    cmd()
+        .args(["scan", root.to_str().expect("scan path")])
+        .assert()
+        .success();
+    let recorded = cache.join(database_name_for_this_schema());
+    std::fs::remove_file(cache.join("audit.db")).expect("remove the old default");
+
+    for arguments in [vec!["report"], vec!["scan", "."]] {
+        let output = cmd()
+            .current_dir(&root)
+            .args(&arguments)
+            .output()
+            .expect("run a command after the old default is gone");
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("codehelion used {}", recorded.display())),
+            "{arguments:?}: {output:?}"
+        );
+    }
+    assert!(
+        !cache.join("audit.db").exists(),
+        "no fresh history was started at the old default"
+    );
+    let store = codehelion_store::Store::open_existing(&recorded).expect("open the neighbour");
+    assert_eq!(
+        store.table_count("scan_run").expect("runs"),
+        1,
+        "the rescan reused it"
+    );
+}
+
 /// A reader makes no database. Being unable to open the one that is there and
 /// having nothing scanned yet are different situations, and inventing an empty
 /// neighbour would report the second when the first is true.
@@ -492,5 +533,51 @@ fn scan_rejects_an_incompatible_database_without_replacing_it() {
                 .get::<_, String>(0))
             .expect("read preserved sentinel"),
         "keep-me"
+    );
+}
+
+/// A relative `--db` names a file against the working directory for every
+/// reader, whatever `--path` selects, and the refusal names that same file.
+#[test]
+fn every_reader_resolves_a_relative_database_against_the_working_directory() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = resolved_root(&directory);
+    let tree = root.join("tree");
+    std::fs::create_dir_all(&tree).expect("create scanned tree");
+    std::fs::write(tree.join("lib.rs"), "pub fn tiny() {}\n").expect("write source");
+
+    for arguments in [
+        vec!["report", "--path", "tree", "--db", "elsewhere.db"],
+        vec![
+            "explain",
+            "0123abcd",
+            "--path",
+            "tree",
+            "--db",
+            "elsewhere.db",
+        ],
+        vec!["baseline", "create", "tree", "--db", "elsewhere.db"],
+    ] {
+        let output = cmd()
+            .current_dir(&root)
+            .args(&arguments)
+            .output()
+            .expect("run a reader with no database");
+        assert!(!output.status.success(), "{arguments:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("no local database at elsewhere.db;"),
+            "{arguments:?} named another file: {stderr}"
+        );
+    }
+    cmd()
+        .current_dir(&root)
+        .args(["cache", "status", "--path", "tree", "--db", "elsewhere.db"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("database: elsewhere.db (absent)"));
+    assert!(
+        !root.join("elsewhere.db").exists() && !tree.join("elsewhere.db").exists(),
+        "a reader creates no database"
     );
 }

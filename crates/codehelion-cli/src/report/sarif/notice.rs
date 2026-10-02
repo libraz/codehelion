@@ -54,19 +54,27 @@ pub(super) enum Notice {
     ParserCoverage,
     /// Fast mode could not apply configured structural suppression policies.
     UnappliedSuppressionPolicies,
+    /// Structural parsing left the deepest region of some files out.
+    DepthLimit,
+    /// Fast fragment extraction left blocks below its nesting limit uncut.
+    NestingLimit,
+    /// A replay of a run scanned against a baseline, which does not carry
+    /// the baseline's status.
+    BaselineNotReplayed,
 }
 
 /// The notifications this tool can emit, in the order they are declared: a
 /// notification's `descriptor.index` is a position in this table, which stays
 /// fixed for the same reason [`RULES`](super::RULES) does.
 ///
-/// Every entry says one kind of thing — the run saw less than the tree holds —
-/// because that is the statement a result set cannot make about itself. How
+/// Every entry says one kind of thing — the run, or this rendering of it, says
+/// less than the tree holds — because that is the statement a result set cannot
+/// make about itself. How
 /// often a helper had to be restarted is deliberately not here: a restart the
 /// run recovered from cost no coverage, and one that did not shows up as the
 /// files it could not answer for. A notification for it would put a fact about
 /// the tool's health in the list a reader is using to judge the tool's reach.
-pub(super) const NOTICES: [NoticeSpec; 6] = [
+pub(super) const NOTICES: [NoticeSpec; 9] = [
     NoticeSpec {
         kind: Notice::NotAsked,
         id: "coverage/not-asked",
@@ -127,6 +135,36 @@ pub(super) const NOTICES: [NoticeSpec; 6] = [
         full: "Fast mode compares tokens but does not classify boilerplate, test-only code, or integer-width families. The named suppression policies were not applied; use Structural or Semantic mode to apply them.",
         level: "note",
     },
+    NoticeSpec {
+        kind: Notice::DepthLimit,
+        id: "coverage/depth-limit",
+        name: "StructuralParsingReachedItsDepthLimit",
+        short: "Structural parsing left the deepest region of some files out",
+        full: "Structural parsing reached its depth limit in these files, and the deepest \
+               region of each was left out of analysis. Duplication inside those regions \
+               may be absent from these results.",
+        level: "warning",
+    },
+    NoticeSpec {
+        kind: Notice::NestingLimit,
+        id: "coverage/nesting-limit",
+        name: "FragmentExtractionReachedItsNestingLimit",
+        short: "Fragment extraction left deeply nested blocks uncut",
+        full: "Fast fragment extraction reached its nesting limit in these blocks. The \
+               files were read whole, but duplication confined to those block bodies is \
+               not reported.",
+        level: "warning",
+    },
+    NoticeSpec {
+        kind: Notice::BaselineNotReplayed,
+        id: "replay/baseline-not-replayed",
+        name: "ReplayDoesNotReproduceBaselineStatus",
+        short: "A replay does not reproduce the baseline status",
+        full: "This run was scanned against a baseline. A replay does not reproduce the \
+               baseline status or each result's state against it; scan again with \
+               --baseline to see them.",
+        level: "note",
+    },
 ];
 
 /// Notification metadata, as the driver declares it.
@@ -170,7 +208,7 @@ pub(super) struct DescriptorReference {
 
 /// Notification property bag: what the sentence says, as numbers a consumer can
 /// act on without reading it.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub(super) struct NotificationProperties {
     #[serde(skip_serializing_if = "Option::is_none")]
     files: Option<u64>,
@@ -189,6 +227,9 @@ pub(super) struct NotificationProperties {
     /// Suppression configuration paths Fast mode could not apply.
     #[serde(skip_serializing_if = "Option::is_none")]
     policies: Option<Vec<String>>,
+    /// Block bodies left uncut at a nesting limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocks: Option<u64>,
 }
 
 /// Everything this run has to say about what it did not see.
@@ -241,6 +282,7 @@ pub(super) fn occurrences(kind: Notice, report: &Report) -> Vec<(String, Notific
                         unparsed_tokens: None,
                         unparsed_share: None,
                         policies: None,
+                        blocks: None,
                     },
                 )]
             } else {
@@ -266,12 +308,56 @@ pub(super) fn occurrences(kind: Notice, report: &Report) -> Vec<(String, Notific
                             unparsed_tokens: None,
                             unparsed_share: None,
                             policies: Some(report.summary.unapplied_suppression_policies.clone()),
+                            blocks: None,
                         },
                     )
                 })
                 .into_iter()
                 .collect()
         }
+        Notice::DepthLimit => crate::report::notes::depth_truncation_files(&report.summary.funnel)
+            .map(|files| {
+                (
+                    format!(
+                        "structural parsing reached its depth limit in {files} file(s); the \
+                         deepest region of each was left out of analysis"
+                    ),
+                    NotificationProperties {
+                        files: Some(files),
+                        ..NotificationProperties::default()
+                    },
+                )
+            })
+            .into_iter()
+            .collect(),
+        Notice::NestingLimit => {
+            crate::report::notes::nesting_truncation_bodies(&report.summary.funnel)
+                .map(|bodies| {
+                    (
+                        format!(
+                            "fragment extraction reached its nesting limit in {bodies} \
+                             block(s); duplication confined to those bodies is not reported"
+                        ),
+                        NotificationProperties {
+                            blocks: Some(bodies),
+                            ..NotificationProperties::default()
+                        },
+                    )
+                })
+                .into_iter()
+                .collect()
+        }
+        Notice::BaselineNotReplayed => report
+            .summary
+            .baseline_not_replayed
+            .then(|| {
+                (
+                    crate::report::notes::BASELINE_NOT_REPLAYED.to_string(),
+                    NotificationProperties::default(),
+                )
+            })
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -296,6 +382,7 @@ pub(super) fn not_asked_occurrences(
                             unparsed_tokens: None,
                             unparsed_share: None,
                             policies: None,
+                            blocks: None,
                         },
                     )
                 })
@@ -330,6 +417,7 @@ pub(super) fn unanswered_occurrences(
                             unparsed_tokens: None,
                             unparsed_share: None,
                             policies: None,
+            blocks: None,
                         },
                     )
                 })
@@ -382,6 +470,7 @@ pub(super) fn grouping_ceiling_occurrences(
                     unparsed_tokens: None,
                     unparsed_share: None,
                     policies: None,
+                    blocks: None,
                 },
             )
         })
@@ -414,6 +503,7 @@ pub(super) fn parser_coverage_occurrences(
                     unparsed_tokens: Some(unparsed.tokens),
                     unparsed_share: Some(unparsed.share),
                     policies: None,
+                    blocks: None,
                 },
             )
         })

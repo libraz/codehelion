@@ -366,26 +366,30 @@ impl Store {
         &self,
         root_path: &str,
     ) -> Result<Vec<RunOrigin>, StoreError> {
-        let started_at: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT started_at FROM scan_run
-                 WHERE root_path = ?1 AND status = 'completed'
-                 ORDER BY started_at DESC, id DESC LIMIT 1",
-                params![root_path],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(started_at) = started_at else {
-            return Ok(Vec::new());
-        };
+        self.completed_run_id(root_path, None)?
+            .map_or_else(|| Ok(Vec::new()), |run_id| self.run_invocation(run_id))
+    }
+
+    /// Every completed partition of the scan invocation that recorded or
+    /// reused `run_id`, `run_id` among them, in row-id order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::RunNotFound`] or [`StoreError::RunNotCompleted`]
+    /// for a run that is not a completed one, or any database error.
+    pub fn run_invocation(&self, run_id: i64) -> Result<Vec<RunOrigin>, StoreError> {
+        self.ensure_completed_run(run_id)?;
         let mut statement = self.conn.prepare(
-            "SELECT id FROM scan_run
-             WHERE root_path = ?1 AND started_at = ?2 AND status = 'completed'
-             ORDER BY id ASC",
+            "SELECT other.id FROM scan_run run
+             JOIN scan_run other
+                  ON other.root_path = run.root_path
+                 AND other.started_at = run.started_at
+                 AND other.status = 'completed'
+             WHERE run.id = ?1
+             ORDER BY other.id ASC",
         )?;
         let ids = statement
-            .query_map(params![root_path, started_at], |row| row.get::<_, i64>(0))?
+            .query_map(params![run_id], |row| row.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         ids.into_iter().map(|id| self.run_origin(id)).collect()

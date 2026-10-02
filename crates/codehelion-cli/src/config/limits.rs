@@ -123,6 +123,92 @@ impl Default for Limits {
     }
 }
 
+/// One optional ceiling: the key it is written under and what leaving it out
+/// selects. This table is the single list `config show` reports unset ceilings
+/// from, and the tests hold the `config init` template to it.
+pub(super) struct OptionalLimit {
+    /// The TOML key inside `[limits]`.
+    pub(super) key: &'static str,
+    /// Whether the ceiling is left to its default.
+    pub(super) is_unset: fn(&Limits) -> bool,
+    /// What the absence selects.
+    pub(super) absence: &'static str,
+}
+
+const MODE_DEFAULT: &str = "mode-specific default";
+const STRUCTURAL_DEFAULT: &str = "structural default";
+const VERIFIER_DEFAULT: &str = "verifier default";
+const SIGNATURE_DEFAULT: &str = "default used only with --siblings-by-signature";
+
+/// Every optional ceiling in [`Limits`], in the order `config show` lists them.
+pub(super) const OPTIONAL_LIMITS: &[OptionalLimit] = &[
+    OptionalLimit {
+        key: "posting-cap",
+        is_unset: |l| l.posting_cap.is_none(),
+        absence: MODE_DEFAULT,
+    },
+    OptionalLimit {
+        key: "pair-budget",
+        is_unset: |l| l.pair_budget.is_none(),
+        absence: MODE_DEFAULT,
+    },
+    OptionalLimit {
+        key: "near-miss-delta",
+        is_unset: |l| l.near_miss_delta.is_none(),
+        absence: STRUCTURAL_DEFAULT,
+    },
+    OptionalLimit {
+        key: "near-miss-cap",
+        is_unset: |l| l.near_miss_cap.is_none(),
+        absence: STRUCTURAL_DEFAULT,
+    },
+    OptionalLimit {
+        key: "sibling-candidate-budget",
+        is_unset: |l| l.sibling_candidate_budget.is_none(),
+        absence: STRUCTURAL_DEFAULT,
+    },
+    OptionalLimit {
+        key: "sibling-per-group-cap",
+        is_unset: |l| l.sibling_per_group_cap.is_none(),
+        absence: STRUCTURAL_DEFAULT,
+    },
+    OptionalLimit {
+        key: "sibling-total-cap",
+        is_unset: |l| l.sibling_total_cap.is_none(),
+        absence: STRUCTURAL_DEFAULT,
+    },
+    OptionalLimit {
+        key: "signature-sibling-candidate-budget",
+        is_unset: |l| l.signature_sibling_candidate_budget.is_none(),
+        absence: SIGNATURE_DEFAULT,
+    },
+    OptionalLimit {
+        key: "signature-sibling-per-group-cap",
+        is_unset: |l| l.signature_sibling_per_group_cap.is_none(),
+        absence: SIGNATURE_DEFAULT,
+    },
+    OptionalLimit {
+        key: "signature-sibling-total-cap",
+        is_unset: |l| l.signature_sibling_total_cap.is_none(),
+        absence: SIGNATURE_DEFAULT,
+    },
+    OptionalLimit {
+        key: "signature-sibling-max-units-per-signature",
+        is_unset: |l| l.signature_sibling_max_units_per_signature.is_none(),
+        absence: SIGNATURE_DEFAULT,
+    },
+    OptionalLimit {
+        key: "verification-budget",
+        is_unset: |l| l.verification_budget.is_none(),
+        absence: STRUCTURAL_DEFAULT,
+    },
+    OptionalLimit {
+        key: "max-alignment-cells",
+        is_unset: |l| l.max_alignment_cells.is_none(),
+        absence: VERIFIER_DEFAULT,
+    },
+];
+
 impl Limits {
     /// Reject ceilings that would turn an enabled scan mode into an empty run.
     ///

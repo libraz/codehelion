@@ -92,17 +92,23 @@ pub(super) fn calibration_database(
     args: &ArtifactCompareArgs,
 ) -> Result<Option<std::path::PathBuf>> {
     match (args.source_run.is_some(), args.clone_group.is_some()) {
-        (true, true) => Ok(Some(crate::resolve_db(
-            crate::scan::DatabaseUse::Recording,
-            args.db.as_deref(),
-        )?)),
-        (true, false) => bail!(
+        (true, true) => Ok(Some(
+            crate::resolve_database(
+                crate::scan::DatabaseUse::Recording,
+                std::path::Path::new("."),
+                args.db.as_deref(),
+                None,
+                false,
+            )?
+            .2,
+        )),
+        (true, false) => usage_bail!(
             "--source-run was given without --clone-group; artifact compare records a calibration for one clone group of that run"
         ),
-        (false, true) => bail!(
+        (false, true) => usage_bail!(
             "--clone-group was given without --source-run; artifact compare records a calibration for that group in one scan run"
         ),
-        (false, false) if args.db.is_some() => bail!(
+        (false, false) if args.db.is_some() => usage_bail!(
             "--db was given without --source-run and --clone-group; artifact compare uses --db only to record a calibration"
         ),
         (false, false) => Ok(None),
@@ -125,9 +131,9 @@ pub(super) fn record_comparison_calibration(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("calibration clone group is absent"))?;
     let before_variant = before_variant
-        .ok_or_else(|| anyhow::anyhow!("calibration requires --before-build-variant"))?;
+        .ok_or_else(|| crate::UsageError::new("calibration requires --before-build-variant"))?;
     let after_variant = after_variant
-        .ok_or_else(|| anyhow::anyhow!("calibration requires --after-build-variant"))?;
+        .ok_or_else(|| crate::UsageError::new("calibration requires --after-build-variant"))?;
     if before.format != after.format {
         bail!("calibration requires before and after artifacts of the same format");
     }

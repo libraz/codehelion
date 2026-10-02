@@ -548,3 +548,177 @@ fn nested_cuts_of_one_duplication_are_folded_into_the_longest_and_counted() {
     // longer finding is accounted for.
     assert_eq!(value["summary"]["groups"]["subsumed_runs"], 2);
 }
+
+/// Every group `report` lists, beside what `explain` prints for it: a lookup of
+/// one group is the report's own entry, so the two agree field for field.
+fn assert_explain_matches_report(root: &Path) -> Vec<serde_json::Value> {
+    scan_json(root);
+    let output = cmd()
+        .current_dir(root)
+        .args(["report", "--format", "json", "--limit", "0"])
+        .output()
+        .expect("run report");
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    let groups = report["groups"].as_array().expect("groups").clone();
+    for group in &groups {
+        let fingerprint = group["fingerprint"].as_str().expect("fingerprint");
+        let output = cmd()
+            .current_dir(root)
+            .args(["explain", fingerprint, "--format", "json"])
+            .output()
+            .expect("run explain");
+        assert!(output.status.success(), "{output:?}");
+        let detail: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("explain JSON");
+        assert_eq!(&detail["group"], group, "{fingerprint}");
+    }
+    groups
+}
+
+#[test]
+fn explain_names_the_wider_cut_the_report_names() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/left.rs"), LOCAL_LEFT_RS).unwrap();
+    std::fs::write(root.join("src/right.rs"), LOCAL_RIGHT_RS).unwrap();
+
+    let groups = assert_explain_matches_report(root);
+    assert!(
+        groups
+            .iter()
+            .any(|group| group["narrower_cut_of"].is_string()),
+        "the fixture holds a narrower cut"
+    );
+}
+
+#[test]
+fn explain_says_a_group_is_ranked_down_when_the_report_does() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/measure.rs"),
+        "pub fn width_of(text: &str) -> usize {
+    text.trim().chars().count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_measures_a_short_string() {
+        let input = String::from(\"  hi  \");
+        let measured = width_of(&input);
+        let doubled = measured * 2;
+        assert_eq!(measured, 2);
+        assert_eq!(doubled, 4);
+    }
+
+    #[test]
+    fn it_measures_a_longer_string() {
+        let input = String::from(\"  hello  \");
+        let measured = width_of(&input);
+        let doubled = measured * 2;
+        assert_eq!(measured, 5);
+        assert_eq!(doubled, 10);
+    }
+}
+",
+    )
+    .unwrap();
+
+    let groups = assert_explain_matches_report(root);
+    assert!(
+        groups.iter().any(|group| group["ranked_down"] == true),
+        "test code is ranked down by default"
+    );
+}
+
+/// JSON `groups` and SARIF `results` come in the order the schema states:
+/// ranked-down groups after every other, the rest by priority descending.
+#[test]
+fn exports_list_ranked_down_groups_after_every_other() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/left.rs"), LOCAL_LEFT_RS).unwrap();
+    std::fs::write(root.join("src/right.rs"), LOCAL_RIGHT_RS).unwrap();
+    std::fs::write(
+        root.join("src/suite.rs"),
+        "#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_measures_a_short_string() {
+        let input = String::from(\"  hi  \");
+        let measured = input.trim().chars().count();
+        let doubled = measured * 2;
+        assert_eq!(measured, 2);
+        assert_eq!(doubled, 4);
+    }
+
+    #[test]
+    fn it_measures_a_longer_string() {
+        let input = String::from(\"  hello  \");
+        let measured = input.trim().chars().count();
+        let doubled = measured * 2;
+        assert_eq!(measured, 5);
+        assert_eq!(doubled, 10);
+    }
+}
+",
+    )
+    .unwrap();
+
+    let report = scan_json(root);
+    let groups = report["groups"].as_array().expect("groups");
+    let ranked_down: Vec<bool> = groups
+        .iter()
+        .map(|group| group["ranked_down"] == true)
+        .collect();
+    assert!(
+        ranked_down.contains(&true) && ranked_down.contains(&false),
+        "{report}"
+    );
+    assert!(
+        ranked_down.windows(2).all(|pair| pair[0] <= pair[1]),
+        "ranked-down groups come last: {ranked_down:?}"
+    );
+    for part in [false, true] {
+        let priorities: Vec<f64> = groups
+            .iter()
+            .filter(|group| (group["ranked_down"] == true) == part)
+            .map(|group| group["priority"]["value"].as_f64().expect("priority"))
+            .collect();
+        assert!(
+            priorities.windows(2).all(|pair| pair[0] >= pair[1]),
+            "{priorities:?}"
+        );
+    }
+
+    let output = cmd()
+        .current_dir(root)
+        .args(["report", "--format", "sarif"])
+        .output()
+        .expect("run report");
+    assert!(output.status.success(), "{output:?}");
+    let sarif: serde_json::Value = serde_json::from_slice(&output.stdout).expect("SARIF");
+    let results: Vec<&serde_json::Value> = sarif["runs"][0]["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .filter_map(|result| result["partialFingerprints"].as_object())
+        .flat_map(|fingerprints| fingerprints.values())
+        .collect();
+    let expected: Vec<&serde_json::Value> = groups
+        .iter()
+        .filter(|group| group["suppressed"].is_null())
+        .map(|group| &group["fingerprint"])
+        .collect();
+    assert_eq!(results, expected);
+}

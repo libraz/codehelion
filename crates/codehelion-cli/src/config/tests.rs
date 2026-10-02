@@ -153,3 +153,120 @@ fn the_template_offers_every_setting_a_configuration_accepts() {
         "the template offers no entry for {missing:?}"
     );
 }
+
+/// The template with every key and table header uncommented where it stands,
+/// so a key's table is the one the file actually places it under.
+fn template_uncommented_in_place() -> String {
+    let mut out = String::new();
+    for line in TEMPLATE.lines() {
+        let body = line.strip_prefix("# ").unwrap_or("");
+        let is_header = body.starts_with('[') && body.ends_with(']');
+        let is_assignment = body.split_once(" = ").is_some_and(|(key, _)| {
+            !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+        });
+        out.push_str(if is_header || is_assignment {
+            body
+        } else {
+            line
+        });
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn every_template_key_parses_under_the_table_it_sits_in() {
+    let text = template_uncommented_in_place();
+    let config = Config::from_toml(&text).expect("the template parses with every key uncommented");
+    // The keys really were uncommented rather than skipped.
+    assert_eq!(config.limits.verification_budget, Some(2_000_000));
+    assert_eq!(config.seam.len(), 1);
+    assert_eq!(config.report.churn_top, 100);
+    assert_eq!(config.suppression.split_pairs, CategoryAction::RankDown);
+    assert_eq!(config.suppression.width_family, CategoryAction::Hide);
+}
+
+#[test]
+fn template_limits_match_the_defaults_the_engines_use() {
+    let limits = Config::from_toml(&template_uncommented_in_place())
+        .unwrap()
+        .limits;
+    let fast = codehelion_core::engine::EngineConfig::default();
+    assert_eq!(limits.posting_cap, Some(fast.posting_cap));
+    assert_eq!(limits.pair_budget, Some(fast.pair_budget));
+    let structural = codehelion_core::structural::StructuralConfig::default();
+    assert_eq!(
+        limits.verification_budget,
+        Some(structural.verification_budget)
+    );
+    assert_eq!(
+        limits.max_alignment_cells,
+        Some(structural.verify.max_alignment_cells)
+    );
+    assert_eq!(
+        limits.near_miss_delta,
+        Some(structural.near_match.near_miss_delta)
+    );
+    assert_eq!(
+        limits.near_miss_cap,
+        Some(structural.near_match.near_miss_cap)
+    );
+    assert_eq!(
+        limits.sibling_candidate_budget,
+        Some(structural.siblings.candidate_budget)
+    );
+    assert_eq!(
+        limits.sibling_per_group_cap,
+        Some(structural.siblings.per_group_cap)
+    );
+    assert_eq!(
+        limits.sibling_total_cap,
+        Some(structural.siblings.total_cap)
+    );
+    let signature = &structural.signature_siblings;
+    assert_eq!(
+        limits.signature_sibling_candidate_budget,
+        Some(signature.candidate_budget)
+    );
+    assert_eq!(
+        limits.signature_sibling_per_group_cap,
+        Some(signature.per_group_cap)
+    );
+    assert_eq!(
+        limits.signature_sibling_total_cap,
+        Some(signature.total_cap)
+    );
+    assert_eq!(
+        limits.signature_sibling_max_units_per_signature,
+        Some(signature.max_units_per_signature)
+    );
+    // The mode-dependent defaults are stated per mode, not as one number.
+    assert!(TEMPLATE.contains("Defaults: Fast 64, Structural 256."));
+    assert_eq!(structural.near_match.posting_cap, 256);
+    assert!(TEMPLATE.contains("Defaults: Fast 1000000, Structural 2000000."));
+    assert_eq!(structural.near_match.pair_budget, 2_000_000);
+}
+
+#[test]
+fn config_show_lists_every_unset_optional_limit_and_only_those() {
+    let shown = Config::default().to_display_toml().unwrap();
+    for limit in limits::OPTIONAL_LIMITS {
+        assert!(
+            shown.contains(&format!("# limits.{}: {}", limit.key, limit.absence)),
+            "{} missing from\n{shown}",
+            limit.key
+        );
+    }
+    assert!(shown.contains("# limits.verification-budget: structural default"));
+    assert!(shown.contains("# limits.max-alignment-cells: verifier default"));
+
+    let mut config = every_setting_carried();
+    config.jobs = Some(2);
+    config.limits.near_miss_delta = Some(0.05);
+    let shown = config.to_display_toml().unwrap();
+    assert!(!shown.contains("Unset optional settings"), "{shown}");
+    assert!(
+        shown.contains("verification-budget"),
+        "set ceilings are printed"
+    );
+}

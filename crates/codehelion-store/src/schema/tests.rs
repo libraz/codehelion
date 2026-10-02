@@ -30,12 +30,7 @@ INSERT INTO clone_group_member (clone_group_id, scan_run_id, fragment_id, findin
 /// A current baseline database seeded with a group and its one member.
 fn seeded() -> Connection {
     let mut conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1),
-                                       version INTEGER NOT NULL) STRICT;",
-    )
-    .unwrap();
-    apply_baseline(&mut conn).unwrap();
+    initialize(&mut conn).unwrap();
     conn.execute_batch(SEED).unwrap();
     conn
 }
@@ -499,4 +494,24 @@ fn lineage_group_lookup_is_constrained_to_group_fingerprints() {
         !plan.iter().any(|step| step.contains("SCAN fingerprint")),
         "the lineage lookup reads every fingerprint: {plan:?}"
     );
+}
+
+/// A database whose creation stopped after `schema_meta` and before the
+/// baseline holds nothing else, so opening it again completes the baseline.
+#[test]
+fn an_initialization_cut_short_is_completed_on_the_next_open() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK (id = 1),
+                                   version INTEGER NOT NULL) STRICT;",
+    )
+    .unwrap();
+
+    initialize(&mut conn).unwrap();
+
+    assert_eq!(version(&conn).unwrap(), SCHEMA_VERSION);
+    assert_eq!(count(&conn, "scan_run"), 0);
+    // And a second open finds it current and changes nothing.
+    initialize(&mut conn).unwrap();
+    assert_eq!(version(&conn).unwrap(), SCHEMA_VERSION);
 }

@@ -194,20 +194,23 @@ fn record_evaluation(
     evaluation: &codehelion_seam::Evaluation,
 ) -> Result<i64> {
     let path = scan::database_path_for(scan::DatabaseUse::Recording, root, db, resolved, false)?;
+    // Held for the whole write, as every other writer holds it, so a cache
+    // clear cannot remove the database between the read and the record.
+    let _database_lock = crate::scan_lock::acquire(&path)?;
     let mut store = scan::open_store(&path)?;
     // Spelled through the same key a scan records its run under, because that
     // is what a later report looks this run up by.
     let root_path = scan::path_key(root);
-    // Findings come from the newest completed scan of this tree, if there is
-    // one. Without a scan there is nothing to map, and every count stays zero
-    // beside a run id that says why.
-    let scan_run_id = store
-        .latest_completed_run(&root_path)?
-        .map(|origin| origin.id);
-    let locations = match scan_run_id {
-        Some(run_id) => store.run_finding_locations(run_id)?,
-        None => Vec::new(),
-    };
+    // Findings come from every partition of the newest completed scan of this
+    // tree, if there is one, and the run recorded is the first of them: any
+    // one partition names the invocation. Without a scan there is nothing to
+    // map, and every count stays zero beside a run id that says why.
+    let invocation = store.latest_completed_invocation(&root_path)?;
+    let scan_run_id = invocation.first().map(|origin| origin.id);
+    let mut locations = Vec::new();
+    for origin in &invocation {
+        locations.extend(store.run_finding_locations(origin.id)?);
+    }
     let entries = evaluation
         .seams
         .iter()
@@ -302,7 +305,11 @@ pub fn guard(args: &GuardArgs, out: &mut impl Write) -> Result<Outcome> {
         // belongs to has not committed anything yet, and requiring a readable
         // history to answer would make the question unanswerable exactly when
         // it is worth asking.
-        let paths: Vec<RepoPath> = args.paths.iter().map(RepoPath::new).collect();
+        let paths = args
+            .paths
+            .iter()
+            .map(|given| repository_path(&root, given))
+            .collect::<Result<Vec<_>>>()?;
         let lookups = codehelion_seam::look_up(&ledger, &paths);
         let text = match args.common.format {
             SeamFormat::Json => json(&LookupReport {
@@ -356,6 +363,63 @@ fn resolve(common: &SeamCommonArgs) -> Result<(std::path::PathBuf, ResolvedConfi
         .with_context(|| format!("resolving path {}", common.path.display()))?;
     let resolved = config::load(common.config.as_deref(), &root)?;
     Ok((root, resolved))
+}
+
+/// A path given to `guard --paths`, spelled the way the ledger's globs are:
+/// relative to the repository root, with `.` and `..` resolved lexically and
+/// forward slashes.
+///
+/// A relative path is read against `root`, an absolute one is taken relative
+/// to it. A path that leaves `root` is refused rather than reported as sitting
+/// in no seam. Nothing is opened but the filesystem's own path resolution.
+fn repository_path(root: &Path, given: &str) -> Result<RepoPath> {
+    let outside = || {
+        anyhow::anyhow!(
+            "path {given} is outside the repository at {}",
+            root.display()
+        )
+    };
+    let spelled = Path::new(given);
+    let relative = if spelled.is_absolute() {
+        match spelled.strip_prefix(root) {
+            Ok(relative) => relative.to_path_buf(),
+            Err(_) => resolved_through_existing_ancestor(spelled)
+                .strip_prefix(root)
+                .map_err(|_| outside())?
+                .to_path_buf(),
+        }
+    } else {
+        spelled.to_path_buf()
+    };
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                parts.pop().ok_or_else(outside)?;
+            }
+            std::path::Component::Normal(part) => parts.push(part),
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(outside());
+            }
+        }
+    }
+    Ok(RepoPath::from_host_path(
+        &parts.into_iter().collect::<std::path::PathBuf>(),
+    ))
+}
+
+/// `path` with its longest existing ancestor resolved through links, so an
+/// absolute spelling through a linked directory compares with a canonical root.
+fn resolved_through_existing_ancestor(path: &Path) -> std::path::PathBuf {
+    for ancestor in path.ancestors() {
+        if let Ok(resolved) = codehelion_core::paths::canonical(ancestor) {
+            return path
+                .strip_prefix(ancestor)
+                .map_or_else(|_| path.to_path_buf(), |rest| resolved.join(rest));
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Read the history under the configured ceiling, saying when it is cut.

@@ -45,12 +45,7 @@ impl OutputReservation {
             Ok(file) => Ok(reserve(file, true)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 if !force {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "writing {} (refusing to overwrite an existing file; pass --force to replace it)",
-                            path.display()
-                        )
-                    });
+                    return Err(error).with_context(|| crate::scan::overwrite_refusal(path));
                 }
                 // Opening the existing file establishes that replacing it is
                 // permitted, and leaves its current contents alone until the
@@ -89,25 +84,6 @@ impl Drop for OutputReservation {
         // that cannot be removed leaves nothing else to try.
         let _ = fs::remove_file(&self.path);
     }
-}
-
-pub(super) fn write_output(path: &FilePath, bytes: &[u8], force: bool) -> Result<()> {
-    if force {
-        fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
-        return Ok(());
-    }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| {
-            format!(
-                "writing {} (refusing to overwrite an existing file; pass --force to replace it)",
-                path.display()
-            )
-        })?;
-    file.write_all(bytes)
-        .with_context(|| format!("writing {}", path.display()))
 }
 
 /// Serialize a persisted artifact IR without allowing its temporary buffer to

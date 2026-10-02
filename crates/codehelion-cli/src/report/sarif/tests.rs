@@ -477,6 +477,40 @@ fn grouping_and_parser_coverage_have_distinct_warnings() {
     assert_eq!(parser["properties"]["unparsed_share"], 0.25);
 }
 
+/// What the text view warns was left out at a depth or nesting limit is a
+/// coverage notification in SARIF too, against descriptors appended after
+/// the existing ones so their indexes stay put.
+#[test]
+fn depth_and_nesting_limits_are_coverage_notifications() {
+    let mut report = sample_report();
+    report.summary.search_truncated = false;
+    report.summary.funnel.push(
+        crate::report::FunnelStage::new("parsing", 20)
+            .dropping(FunnelCause::DepthLimit, 3)
+            .dropping(FunnelCause::NestingLimit, 5),
+    );
+
+    let value = sarif(&report);
+    let notifications = value["runs"][0]["invocations"][0]["toolExecutionNotifications"]
+        .as_array()
+        .expect("coverage notifications");
+    let find = |id: &str| {
+        notifications
+            .iter()
+            .find(|notification| notification["descriptor"]["id"] == id)
+            .expect("the limit is a coverage notification")
+            .clone()
+    };
+    let depth = find("coverage/depth-limit");
+    assert_eq!(depth["level"], "warning");
+    assert_eq!(depth["descriptor"]["index"], 6);
+    assert_eq!(depth["properties"]["files"], 3);
+    let nesting = find("coverage/nesting-limit");
+    assert_eq!(nesting["descriptor"]["index"], 7);
+    assert_eq!(nesting["properties"]["blocks"], 5);
+    assert!(nesting["properties"].get("files").is_none());
+}
+
 /// Silence and an empty complaint are different claims. A mode that asks no
 /// compiler never had one to make, and a run that asked about everything it
 /// read has nothing outstanding — neither is served by an empty array that

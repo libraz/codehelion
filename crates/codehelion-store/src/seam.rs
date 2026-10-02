@@ -186,6 +186,47 @@ impl Store {
         self.with_entries(found)
     }
 
+    /// The seam run a report of the scan run `scan_run_id` carries: the newest
+    /// one that either mapped its findings to that run's invocation or was
+    /// recorded no later than the run finished.
+    ///
+    /// A seam run recorded after a later scan, and mapped to it, belongs to that
+    /// scan, so replaying an earlier run never shows a measurement taken after
+    /// it was superseded.
+    ///
+    /// # Errors
+    ///
+    /// Returns any underlying database error.
+    pub fn seam_run_for_scan(
+        &self,
+        root_path: &str,
+        scan_run_id: i64,
+    ) -> Result<Option<StoredSeamRun>, StoreError> {
+        let found = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {SEAM_RUN_COLUMNS}
+                     FROM seam_run
+                     WHERE root_path = ?1
+                       AND (scan_run_id IN (
+                                SELECT other.id FROM scan_run run
+                                JOIN scan_run other
+                                     ON other.root_path = run.root_path
+                                    AND other.started_at = run.started_at
+                                    AND other.status = 'completed'
+                                WHERE run.id = ?2)
+                            OR recorded_at <= (SELECT finished_at FROM scan_run WHERE id = ?2))
+                     ORDER BY {SEAM_RUN_RECENCY}
+                     LIMIT 1"
+                ),
+                params![root_path, scan_run_id],
+                seam_run_row,
+            )
+            .optional()?;
+        self.with_entries(found)
+    }
+
     /// The seam run that directly precedes `before` under the same settings.
     ///
     /// The settings digest has to agree for two runs to be two generations of

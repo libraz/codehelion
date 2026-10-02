@@ -15,7 +15,7 @@ use codehelion_core::discovery::{BuildVariant, Language};
 use codehelion_store::snapshot::{FileCountsRow, GuardrailsRow, PriorityRow};
 
 use super::build::as_u64;
-use super::{database_path, path_label};
+use super::{DatabaseUse, database_path_for, path_label};
 use crate::cli::ScanArgs;
 use crate::config::{self, ConfigSource};
 use crate::report;
@@ -78,7 +78,13 @@ pub(crate) fn new_database_directory_hint(
         return Ok(None);
     }
     let resolved_config = config::load(args.config.as_deref(), &root)?;
-    let db_path = database_path(&root, None, &resolved_config, args.untrusted)?;
+    let db_path = database_path_for(
+        DatabaseUse::Literal,
+        &root,
+        None,
+        &resolved_config,
+        args.untrusted,
+    )?;
     let Some(directory) = db_path.parent().filter(|path| !path.as_os_str().is_empty()) else {
         return Ok(None);
     };
@@ -156,12 +162,9 @@ pub(crate) struct RunInfoInputs<'a> {
     pub root: &'a Path,
     /// Local audit database path.
     pub db_path: &'a Path,
-    /// The `--db` the commands this report prints have to repeat.
-    ///
-    /// A database nobody named is the one every other command resolves for
-    /// itself, so those commands leave `--db` off. A named one has to be
-    /// repeated, or the next command reads somewhere else.
-    pub replay_database: Option<&'a str>,
+    /// The flags the commands this report prints have to repeat, as
+    /// [`replay_flags`] spells them.
+    pub replay_flags: &'a str,
     /// Effective configuration recorded with the scan.
     pub configuration: &'a report::ConfigurationInfo,
     /// Persisted scan run identifier.
@@ -218,13 +221,50 @@ pub(crate) fn common_run_info(mut inputs: RunInfoInputs<'_>) -> report::RunInfo 
             refactoring_ease: inputs.weights.refactoring_ease,
         },
         database: inputs.db_path.display().to_string(),
-        replay_database: inputs.replay_database.map(ToOwned::to_owned),
+        replay_flags: inputs.replay_flags.to_owned(),
         // Filled in after recording, which is the half this cannot know about
         // yet, by the same code that fills in the run id.
         timings: None,
         run_id: inputs.run_id,
         reused: false,
     }
+}
+
+/// The flags a command printed for the reader has to carry to reach the scan
+/// root `root`, its configuration and its database from the current
+/// directory, each with a leading space.
+///
+/// `--path` is repeated when `root` is not the current directory, `--config`
+/// and `--db` when the invocation named them, and `--untrusted` when it was
+/// given, because each decides which database and configuration a command
+/// resolves. A database nobody named is the one every other command resolves
+/// for itself, so `db` is `Some` only when `--db` was given.
+pub(crate) fn replay_flags(
+    root: &Path,
+    config: Option<&Path>,
+    db: Option<&Path>,
+    untrusted: bool,
+) -> String {
+    let here = std::env::current_dir()
+        .ok()
+        .and_then(|current| codehelion_core::paths::canonical(&current).ok());
+    let mut flags = String::new();
+    if here.as_deref() != Some(root) {
+        flags.push_str(" --path ");
+        flags.push_str(&spelled_for_a_command(root));
+    }
+    for (flag, path) in [("--config", config), ("--db", db)] {
+        if let Some(path) = path {
+            flags.push(' ');
+            flags.push_str(flag);
+            flags.push(' ');
+            flags.push_str(&spelled_for_a_command(path));
+        }
+    }
+    if untrusted {
+        flags.push_str(" --untrusted");
+    }
+    flags
 }
 
 /// `path`, spelled the way it is shortest to type from here.

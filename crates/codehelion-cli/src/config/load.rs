@@ -1,9 +1,10 @@
 //! Discovering a configuration file, reading it, and recording where it
 //! came from.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::Config;
 
@@ -72,7 +73,7 @@ pub fn load(explicit: Option<&Path>, start_dir: &Path) -> Result<ResolvedConfig>
             source: ConfigSource::Explicit(path.to_path_buf()),
         });
     }
-    match find_at_root(start_dir) {
+    match find_at_root(start_dir)? {
         Some(path) => {
             let config = read_file(&path)?;
             Ok(ResolvedConfig {
@@ -87,16 +88,57 @@ pub fn load(explicit: Option<&Path>, start_dir: &Path) -> Result<ResolvedConfig>
     }
 }
 
+/// The most of a configuration file that is read.
+///
+/// A real configuration is a few kilobytes. The ceiling exists because a
+/// discovered file is supplied by the tree being inspected, and one large
+/// enough to exhaust memory must be refused with a sentence instead.
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
 fn read_file(path: &Path) -> Result<Config> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading configuration file {}", path.display()))?;
+    let text = read_config_text(path)?;
     Config::from_toml(&text).with_context(|| format!("in configuration file {}", path.display()))
 }
 
+/// Read a configuration file's text, refusing one above [`MAX_CONFIG_BYTES`].
+///
+/// The byte count comes from the read rather than from metadata, so a file
+/// that reports a misleading length is still bounded before it is held.
+fn read_config_text(path: &Path) -> Result<String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| {
+            file.take(MAX_CONFIG_BYTES.saturating_add(1))
+                .read_to_end(&mut bytes)
+        })
+        .with_context(|| format!("reading configuration file {}", path.display()))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CONFIG_BYTES {
+        bail!(
+            "configuration file {} exceeds the maximum of {MAX_CONFIG_BYTES} bytes",
+            path.display()
+        );
+    }
+    String::from_utf8(bytes)
+        .with_context(|| format!("reading configuration file {}", path.display()))
+}
+
 /// Return the configuration file immediately inside `start_dir`, if present.
-fn find_at_root(start_dir: &Path) -> Option<PathBuf> {
+///
+/// The file is supplied by the tree being inspected, so it is read only as a
+/// regular file sitting in it: a link could point anywhere on the machine, and
+/// the first line that failed to parse would be quoted back in the error.
+fn find_at_root(start_dir: &Path) -> Result<Option<PathBuf>> {
     let candidate = start_dir.join(CONFIG_FILE_NAME);
-    candidate.is_file().then_some(candidate)
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(metadata) if metadata.file_type().is_symlink() => bail!(
+            "refusing configuration file {}: it is a link, and a configuration found in the scanned tree is read only as a regular file inside it; name the file with --config to use it",
+            candidate.display()
+        ),
+        Ok(metadata) => Ok(metadata.is_file().then_some(candidate)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("checking configuration file {}", candidate.display())),
+    }
 }
 
 #[cfg(test)]
@@ -115,6 +157,37 @@ mod tests {
         let rendered = format!("{error:#}");
         assert!(rendered.contains("limits.pair-budget"));
         assert!(rendered.contains(&path.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_discovered_configuration_that_is_a_link_is_refused_without_quoting_it() {
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("secret");
+        std::fs::write(&target, "private-key-material\n").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let link = root.path().join(CONFIG_FILE_NAME);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let rendered = format!("{:#}", load(None, root.path()).unwrap_err());
+        assert!(rendered.contains("is a link"), "{rendered}");
+        assert!(rendered.contains(&link.display().to_string()), "{rendered}");
+        assert!(!rendered.contains("private-key-material"), "{rendered}");
+
+        // Named on the command line, the same file keeps operator authority.
+        let named = load(Some(&link), root.path()).unwrap_err();
+        assert!(!format!("{named:#}").contains("is a link"));
+    }
+
+    #[test]
+    fn a_configuration_above_the_ceiling_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(CONFIG_FILE_NAME);
+        let oversized = usize::try_from(MAX_CONFIG_BYTES).unwrap() + 1;
+        std::fs::write(&path, "#".repeat(oversized)).unwrap();
+
+        let rendered = format!("{:#}", load(None, root.path()).unwrap_err());
+        assert!(rendered.contains("exceeds the maximum"), "{rendered}");
     }
 
     #[test]

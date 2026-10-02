@@ -452,7 +452,7 @@ fn untrusted_reading_commands_confine_a_configured_database_but_not_explicit_db(
     let config = repository.path().join("untrusted.toml");
     std::fs::write(&config, "database = \"../outside.db\"").expect("write configuration");
 
-    let error = resolve_db_at(
+    let error = resolve_database(
         scan::DatabaseUse::Reading,
         repository.path(),
         None,
@@ -464,14 +464,15 @@ fn untrusted_reading_commands_confine_a_configured_database_but_not_explicit_db(
 
     let explicit = PathBuf::from("../operator-selected.db");
     assert_eq!(
-        resolve_db_at(
+        resolve_database(
             scan::DatabaseUse::Reading,
             repository.path(),
             Some(&explicit),
             Some(&config),
             true,
         )
-        .expect("an explicit database remains an operator choice"),
+        .expect("an explicit database remains an operator choice")
+        .2,
         explicit
     );
 }

@@ -50,7 +50,7 @@ use codehelion_store::snapshot::SuppressionRuleRow;
 use globset::{Glob, GlobMatcher};
 
 use crate::FULL_ID_CHARS;
-use crate::config::Suppression;
+use crate::config::{DEFAULT_VENDORED_PATHS, Suppression};
 use crate::provenance::FromScannedTree;
 
 /// The marker text an inline suppression comment must contain.
@@ -219,6 +219,17 @@ impl<'a> CommentScan<'a> {
             .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
     }
 
+    /// Whether the token ending at the cursor is exactly a character-literal
+    /// encoding prefix: `L`, `u`, `U` or `u8`.
+    fn after_encoding_prefix(&self) -> bool {
+        let before = self.text.as_bytes().get(..self.index).unwrap_or_default();
+        let start = before
+            .iter()
+            .rposition(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
+            .map_or(0, |at| at.saturating_add(1));
+        matches!(before.get(start..), Some(b"L" | b"u" | b"U" | b"u8"))
+    }
+
     /// Consume `//` to the end of the line.
     ///
     /// C and C++ splice a line ending in a backslash onto the next one, and a
@@ -330,8 +341,9 @@ impl<'a> CommentScan<'a> {
     /// A C or C++ apostrophe opens a character literal, separates the digits
     /// of a number, or is prose in a preprocessor message.
     fn c_character_literal(&mut self) {
-        // `1'000'000`: a separator, not a literal.
-        if self.preceded_by_identifier() {
+        // `1'000'000`: a separator, not a literal. An encoding prefix (`L'x'`,
+        // `u8'x'`) is the one identifier-like token that opens a literal.
+        if self.preceded_by_identifier() && !self.after_encoding_prefix() {
             self.advance(1);
             return;
         }
@@ -461,6 +473,9 @@ pub(crate) struct Rules {
     path_matchers: Vec<(GlobMatcher, usize)>,
     /// Vendored-tree globs paired with their rule index in `rows`.
     vendored_matchers: Vec<(GlobMatcher, usize)>,
+    /// Rows of vendored globs the configuration spells out itself, as opposed
+    /// to the built-in defaults, which never count as unused.
+    written_vendored: BTreeSet<usize>,
     /// Symbol globs paired with their rule index in `rows`.
     symbol_matchers: Vec<(GlobMatcher, usize)>,
     /// Lower-case clone-id prefixes paired with their rule index in `rows`.
@@ -528,6 +543,7 @@ impl Rules {
             path_matchers.push((glob.compile_matcher(), rows.len() - 1));
         }
         let mut vendored_matchers = Vec::with_capacity(suppression.vendored_paths.len());
+        let mut written_vendored = BTreeSet::new();
         for pattern in &suppression.vendored_paths {
             let glob = Glob::new(pattern)
                 .with_context(|| format!("suppression vendored path glob {pattern:?}"))?;
@@ -536,6 +552,9 @@ impl Rules {
                 pattern: pattern.clone(),
                 reason: Some("vendored code, which this project does not write".to_string()),
             });
+            if !DEFAULT_VENDORED_PATHS.contains(&pattern.as_str()) {
+                written_vendored.insert(rows.len() - 1);
+            }
             vendored_matchers.push((glob.compile_matcher(), rows.len() - 1));
         }
         for pattern in &suppression.symbols {
@@ -568,6 +587,7 @@ impl Rules {
         Ok(Self {
             path_matchers,
             vendored_matchers,
+            written_vendored,
             symbol_matchers,
             clone_ids,
             inline_rule,
@@ -629,7 +649,8 @@ impl Rules {
     ///
     /// Source selectors are counted when they match, even if a
     /// higher-precedence selector later decides which rule the report cites.
-    /// Only rules the user wrote are considered. The inline-marker rule is
+    /// Only rules the user wrote are considered, which for vendored globs
+    /// means those not among the built-in defaults. The inline-marker rule is
     /// registered from markers actually found in the sources, and the shape
     /// and attribute rules are registered from categories this run actually
     /// produced, so neither can be stale in this sense.
@@ -639,10 +660,11 @@ impl Rules {
             .enumerate()
             .filter(|(index, row)| {
                 !used.contains(index)
-                    && matches!(
-                        row.scope.as_str(),
-                        "path_glob" | "symbol_pattern" | CLONE_ID_SCOPE
-                    )
+                    && (self.written_vendored.contains(index)
+                        || matches!(
+                            row.scope.as_str(),
+                            "path_glob" | "symbol_pattern" | CLONE_ID_SCOPE
+                        ))
             })
             .map(|(_, row)| row)
             .collect()
@@ -905,6 +927,25 @@ mod tests {
             );
         }
 
+        // An encoding prefix opens a character literal, so a quote inside it
+        // cannot start a string that swallows a real comment's neighbours.
+        let prefixed = concat!(
+            "wchar_t a = L'\"';\n",
+            "char16_t b = u'\"';\n",
+            "char32_t c = U'\"';\n",
+            "char8_t d = u8'\"';\n",
+            "const char *e = \"codehelion:ignore\";\n",
+            "int f = 0x1'F; // codehelion:ignore\n",
+        );
+        for language in [Language::C, Language::Cpp] {
+            assert_eq!(
+                markers(prefixed, language).len(),
+                1,
+                "{language:?}: only the trailing comment carries a marker: {:?}",
+                markers(prefixed, language)
+            );
+        }
+
         let cpp_raw = "auto embedded = R\"sql(a \"b\" // codehelion:ignore)sql\";\n";
         assert!(markers(cpp_raw, Language::Cpp).is_empty());
     }
@@ -1066,6 +1107,23 @@ mod tests {
         // no effect. Saying that about a default would fire on every project
         // that vendors nothing, which is most of them.
         assert!(rules.unused(&BTreeSet::new()).is_empty());
+        let all_defaults = Rules::compile(&Suppression::default(), false).unwrap();
+        assert!(all_defaults.unused(&BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn a_written_vendored_glob_that_matched_nothing_is_reported_as_an_unused_rule() {
+        let mut config = suppression(&[], &[], &[]);
+        config.vendored_paths = vec!["**/external/**".to_string(), "**/our_vendor/**".to_string()];
+        let rules = Rules::compile(&config, false).unwrap();
+
+        let unused = rules.unused(&BTreeSet::new());
+        let patterns: Vec<&str> = unused.iter().map(|row| row.pattern.as_str()).collect();
+        assert_eq!(patterns, ["**/our_vendor/**"]);
+
+        let hit = rules.evaluate_file("our_vendor/lib.rs", &[], &[unit(None, (1, 5))]);
+        let used: BTreeSet<usize> = hit.matched_rules().collect();
+        assert!(rules.unused(&used).is_empty());
     }
 
     #[test]

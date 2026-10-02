@@ -143,6 +143,117 @@ fn history_counts_commits_without_a_ledger_and_without_reading_source() {
     assert_eq!(document["shallow"], false);
 }
 
+/// Run git in `root` with a fixed identity, for the repository shapes the
+/// planter does not build itself.
+#[allow(
+    clippy::disallowed_types,
+    reason = "the fixture repository is built by git itself"
+)]
+fn git_in(root: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .current_dir(root)
+        .args([
+            "-c",
+            "user.name=planter",
+            "-c",
+            "user.email=planter@example.invalid",
+        ])
+        .args(args)
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// The commits a `history --until` read, as its JSON range counts them.
+fn history_commits(root: &Path, until: &str) -> serde_json::Value {
+    let output = cmd()
+        .args([
+            "history",
+            "--path",
+            root.to_str().unwrap(),
+            "--until",
+            until,
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let document: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    document["range"]["commits"].clone()
+}
+
+#[test]
+fn an_annotated_tag_bounds_history_and_seam_like_the_commit_it_names() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    let mut planter = Planter::initialise(root).expect("initialise a repository");
+    for planned in &PAIR_HISTORY[..2] {
+        planter.commit(planned).expect("commit");
+    }
+    git_in(root, &["tag", "-a", "v1", "-m", "release"]);
+    for planned in &PAIR_HISTORY[2..] {
+        planter.commit(planned).expect("commit");
+    }
+    std::fs::write(root.join("codehelion.toml"), LEDGER).expect("writing the ledger");
+
+    assert_eq!(history_commits(root, "v1"), 2);
+    assert_eq!(
+        history_commits(root, "v1"),
+        history_commits(root, "v1^{commit}")
+    );
+    cmd()
+        .args([
+            "seam",
+            "--path",
+            root.to_str().unwrap(),
+            "--until",
+            "v1",
+            "--no-record",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn a_shallow_clone_is_read_up_to_its_depth_with_a_warning() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let origin = directory.path().join("origin");
+    std::fs::create_dir_all(&origin).expect("origin directory");
+    planted(&origin);
+    let source = format!("file://{}", origin.display());
+    git_in(
+        directory.path(),
+        &["clone", "--quiet", "--depth", "2", &source, "shallow"],
+    );
+    let shallow = directory.path().join("shallow");
+
+    let output = cmd()
+        .args([
+            "history",
+            "--path",
+            shallow.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let document: serde_json::Value = serde_json::from_slice(&output).expect("valid JSON");
+    assert_eq!(document["shallow"], true);
+    assert_eq!(document["range"]["commits"], 1);
+
+    cmd()
+        .args(["seam", "--path", shallow.to_str().unwrap(), "--no-record"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("this is a shallow clone"));
+}
+
 #[test]
 fn seam_reports_the_ledgers_asymmetric_changes_and_breaches() {
     let directory = tempfile::tempdir().expect("temporary directory");
@@ -670,4 +781,254 @@ fn a_suggestion_leaves_out_units_the_tree_no_longer_has() {
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0]["left"], "crates/live-a");
     assert_eq!(candidates[0]["right"], "crates/live-b");
+}
+
+/// A function long enough to be reported as a clone when it is written twice.
+const DUPLICATED_RS: &str = "pub fn checksum_block(seed: u64, data: &[u64]) -> u64 {
+    let mut acc = seed;
+    for (index, value) in data.iter().enumerate() {
+        acc = acc.wrapping_mul(31).wrapping_add(*value ^ index as u64);
+        if acc % 7 == 0 {
+            acc = acc.rotate_left(3);
+        }
+    }
+    acc
+}
+";
+
+/// A repository whose seam holds the same function on both sides, so a scan of
+/// it has findings inside the seam.
+fn planted_with_duplication(root: &Path) -> Planter {
+    let mut planter = planted_and_still_open(root);
+    planter
+        .commit(&PlannedCommit {
+            subject: "feat: write the rule in both languages",
+            writes: &[
+                ("left/rule.rs", DUPLICATED_RS),
+                ("right/rule.rs", DUPLICATED_RS),
+            ],
+            removes: &[],
+        })
+        .expect("planting the duplicated rule");
+    planter
+}
+
+/// Run a command under `root` and parse its JSON standard output.
+fn json_of(root: &Path, args: &[&str]) -> serde_json::Value {
+    let output = cmd()
+        .args(args)
+        .arg("--path")
+        .arg(root)
+        .args(["--format", "json"])
+        .output()
+        .expect("run the command");
+    assert!(output.status.success(), "{args:?}: {output:?}");
+    serde_json::from_slice(&output.stdout).expect("valid JSON")
+}
+
+/// Run `scan` of `root` with extra arguments, as JSON.
+fn scan_of(root: &Path, extra: &[&str]) -> serde_json::Value {
+    let output = cmd()
+        .arg("scan")
+        .arg(root)
+        .args(extra)
+        .args(["--format", "json"])
+        .output()
+        .expect("run scan");
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice(&output.stdout).expect("valid JSON")
+}
+
+fn open_audit_store(root: &Path) -> codehelion_store::Store {
+    codehelion_store::Store::open(&default_database(root)).expect("open the audit database")
+}
+
+/// The seam figures a report replays belong to the scan it replays: an earlier
+/// run is shown the seam run taken against it, not one recorded after a later
+/// scan superseded it.
+#[test]
+fn a_replayed_run_shows_the_seam_run_taken_against_it() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    let mut planter = planted_with_duplication(root);
+
+    let first = scan_of(root, &[]);
+    cmd().args(["seam", "--path"]).arg(root).assert().success();
+    planter
+        .commit(&PlannedCommit {
+            subject: "feat: teach the left side one more rule",
+            writes: &[("left/a.txt", "one\ntwo\nthree\n")],
+            removes: &[],
+        })
+        .expect("planting one more commit");
+    std::fs::write(root.join("left/extra.rs"), "pub fn extra() -> u8 { 1 }\n")
+        .expect("change the tree");
+    let second = scan_of(root, &[]);
+    assert_ne!(first["run"]["run_id"], second["run"]["run_id"]);
+    cmd().args(["seam", "--path"]).arg(root).assert().success();
+
+    let first_id = first["run"]["run_id"].to_string();
+    let replayed = json_of(root, &["report", "--run", &first_id]);
+    assert_eq!(replayed["seam"]["seam_run_id"], 1, "{replayed}");
+    let latest = json_of(root, &["report"]);
+    assert_eq!(latest["seam"]["seam_run_id"], 2, "{latest}");
+    assert_eq!(latest["seam"]["since_seam_run_id"], 1, "{latest}");
+}
+
+/// A findings delta is a statement about the code only when both generations
+/// counted findings from the same kind of scan; across a change of mode it is
+/// left out while the history deltas, which no scan decides, remain.
+#[test]
+fn a_findings_delta_across_a_change_of_scan_mode_is_left_out() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    planted_with_duplication(root);
+
+    scan_of(root, &["--mode", "fast"]);
+    cmd().args(["seam", "--path"]).arg(root).assert().success();
+    scan_of(root, &["--mode", "structural"]);
+    cmd().args(["seam", "--path"]).arg(root).assert().success();
+
+    let report = json_of(root, &["report"]);
+    let seam = &report["seam"]["seams"][0];
+    assert_eq!(report["seam"]["since_seam_run_id"], 1, "{report}");
+    assert_eq!(seam["asymmetric_changes_since"], 0, "{report}");
+    assert!(seam["findings_since"].is_null(), "{report}");
+}
+
+/// A seam run counts the findings of every partition of the scan it maps, not
+/// of whichever partition happens to be newest.
+#[test]
+fn seam_findings_cover_every_partition_of_the_mapped_scan() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    planted_with_duplication(root);
+    let fast = scan_of(root, &["--mode", "fast"]);
+    let structural = scan_of(root, &["--mode", "structural"]);
+    let fast_id = fast["run"]["run_id"].as_i64().expect("fast run");
+    let structural_id = structural["run"]["run_id"]
+        .as_i64()
+        .expect("structural run");
+    // Two partitions of one invocation are two runs sharing a start time.
+    rusqlite::Connection::open(default_database(root))
+        .expect("open the audit database")
+        .execute(
+            "UPDATE scan_run SET started_at = (SELECT started_at FROM scan_run WHERE id = ?1)
+             WHERE id = ?2",
+            [fast_id, structural_id],
+        )
+        .expect("join the runs into one invocation");
+    let store = open_audit_store(root);
+    let expected: usize = [fast_id, structural_id]
+        .iter()
+        .map(|&run_id| {
+            store
+                .run_finding_locations(run_id)
+                .expect("locations")
+                .len()
+        })
+        .sum();
+    let single = store
+        .run_finding_locations(fast_id)
+        .expect("locations")
+        .len()
+        .max(
+            store
+                .run_finding_locations(structural_id)
+                .expect("locations")
+                .len(),
+        );
+    assert!(expected > single, "both partitions hold findings");
+    drop(store);
+
+    cmd().args(["seam", "--path"]).arg(root).assert().success();
+
+    let store = open_audit_store(root);
+    let key = codehelion_store::path_key(&root.canonicalize().expect("canonical root"));
+    let recorded = store
+        .latest_seam_run(&key)
+        .expect("read the seam run")
+        .expect("a recorded seam run");
+    assert_eq!(
+        recorded.run.entries[0].findings,
+        i64::try_from(expected).expect("count")
+    );
+    assert!(
+        [fast_id, structural_id].contains(&recorded.run.scan_run_id.expect("a mapped scan")),
+        "the seam run names the invocation it counted"
+    );
+}
+
+/// Recording a seam run writes the audit database, so it waits its turn behind
+/// the lock every other writer takes; a held lock leaves the database as it was.
+#[test]
+fn seam_recording_takes_the_database_lock() {
+    use fs2::FileExt;
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    planted(root);
+    scan_of(root, &[]);
+    let database = default_database(root);
+    let before = recorded_state(&database);
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join(".codehelion/audit.db.lock"))
+        .expect("the scan created its database lock");
+    FileExt::try_lock_exclusive(&lock).expect("the test owns the lock");
+
+    cmd()
+        .args(["seam", "--path"])
+        .arg(root)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("this evaluation was not recorded"));
+
+    assert_eq!(recorded_state(&database), before);
+}
+
+/// Every spelling of one file under the root names the same seam, and a path
+/// that leaves the root is refused instead of reported as in no seam.
+#[test]
+fn the_path_lookup_reads_every_spelling_of_one_file_alike() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    std::fs::write(root.join("codehelion.toml"), LEDGER).expect("writing the ledger");
+    let absolute = root.join("left").join("a.txt");
+
+    for spelling in [
+        "left/a.txt".to_owned(),
+        "./left/a.txt".to_owned(),
+        "left/../left/./a.txt".to_owned(),
+        absolute.to_str().unwrap().to_owned(),
+    ] {
+        cmd()
+            .args([
+                "guard",
+                "--path",
+                root.to_str().unwrap(),
+                "--paths",
+                &spelling,
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("pair via left/**"))
+            .stdout(predicate::str::contains("in no seam").not());
+    }
+
+    let outside = directory.path().parent().unwrap().join("elsewhere.txt");
+    for spelling in ["../elsewhere.txt", outside.to_str().unwrap()] {
+        cmd()
+            .args([
+                "guard",
+                "--path",
+                root.to_str().unwrap(),
+                "--paths",
+                spelling,
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("is outside the repository"));
+    }
 }

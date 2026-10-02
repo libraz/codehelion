@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use super::{Config, ConfigSource, Helpers, ResolvedConfig};
 use crate::provenance::{Authority, FromScannedTree, OperatorSupplied};
@@ -40,18 +40,18 @@ pub fn helper_paths(resolved: &ResolvedConfig, overrides: &[String]) -> Result<H
     let mut seen = std::collections::BTreeSet::new();
     for override_ in overrides {
         let Some((name, path)) = override_.split_once('=') else {
-            bail!("--helper must be NAME=PATH (rust or clang)");
+            usage_bail!("--helper must be NAME=PATH (rust or clang)");
         };
         if path.is_empty() {
-            bail!("--helper {name} has an empty path");
+            usage_bail!("--helper {name} has an empty path");
         }
         let slot = match name {
             "rust" => &mut paths.rust,
             "clang" => &mut paths.clang,
-            _ => bail!("unknown helper {name:?}; expected rust or clang"),
+            _ => usage_bail!("unknown helper {name:?}; expected rust or clang"),
         };
         if !seen.insert(name) {
-            bail!("--helper {name} was specified more than once");
+            usage_bail!("--helper {name} was specified more than once");
         }
         *slot = Some(PathBuf::from(path));
     }

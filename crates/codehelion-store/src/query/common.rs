@@ -64,7 +64,7 @@ impl Store {
                 "SELECT lower(hex(m.finding_id)), fr.file_path, fr.start_line, fr.end_line,
                         fr.token_count, u.name, m.is_canonical,
                         lower(hex(gf.hash)), g.clone_type, g.score, g.scan_run_id,
-                        g.member_count, g.boilerplate, s.scope, s.pattern, s.reason, s.active,
+                        g.member_count, g.boilerplate, s.scope, s.pattern, s.reason, CASE WHEN s.id IS NULL THEN NULL ELSE 1 END,
                         g.id, g.member_scope, g.test_code, g.test_code_evidence, g.split_pair,
                         lower(hex(ff.hash)), ff.language, m.boilerplate, g.entropy_bits,
                         g.suppress_reason

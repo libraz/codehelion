@@ -128,6 +128,23 @@ fn structural_json_with_jobs(root: &Path, jobs: usize, database: &Path) -> serde
     serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
 }
 
+/// Require the helper that answers about Rust.
+///
+/// The helper is a workspace binary, so a suite run that cannot find it has an
+/// environment to fix; a semantic test that passed without a scan having run
+/// would say nothing about semantic mode.
+fn require_rust_helper() {
+    let output = cmd().arg("doctor").output().expect("doctor should run");
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        report
+            .lines()
+            .any(|line| line.contains("rust-compiler-helper") && line.contains("available")),
+        "the Rust semantic helper is unavailable, so these tests cannot answer about Rust.\n\
+         Run `cargo build -p codehelion-backend-rust` to build it.\n{report}"
+    );
+}
+
 fn open_store(root: &Path) -> Store {
     Store::open(&root.join(".codehelion/audit.db")).expect("open audit db")
 }

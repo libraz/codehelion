@@ -99,7 +99,7 @@ fn suppressed_findings_reference_a_deduplicated_rule_row() {
 }
 
 #[test]
-fn suppression_rules_refresh_their_reason_and_current_active_state() {
+fn a_runs_suppression_evidence_keeps_the_state_that_run_applied() {
     let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
     let detectors = detector_versions();
     let mut store = Store::open_in_memory().unwrap();
@@ -113,9 +113,9 @@ fn suppression_rules_refresh_their_reason_and_current_active_state() {
     first.groups[0].suppressed_by = Some(0);
     let first_run = store.record_snapshot_part(&first).unwrap();
 
-    // Two partitions are one invocation. The second has no such rule, so the
-    // first partition's still-readable evidence must say that the rule is no
-    // longer active rather than preserving its initial active state.
+    // A later invocation without the rule changes the current policy, not
+    // what the first run applied: its evidence still reads the rule as in
+    // force.
     let mut without_rule = sample_snapshot(&variant, &detectors);
     without_rule.root_path = "/other-repository";
     let second_run = store.record_snapshot_part(&without_rule).unwrap();
@@ -128,7 +128,7 @@ fn suppression_rules_refresh_their_reason_and_current_active_state() {
         .as_ref()
         .expect("the finding retains its suppression provenance");
     assert_eq!(rule.reason.as_deref(), Some("initial reason"));
-    assert_eq!(rule.active, Some(false));
+    assert_eq!(rule.active, Some(true));
 
     let mut revised = sample_snapshot(&variant, &detectors);
     revised.suppressions = vec![SuppressionRuleRow {
@@ -545,4 +545,83 @@ fn a_group_reaching_outside_the_suite_records_that_it_does() {
         .record_snapshot(&sample_snapshot(&variant, &detectors))
         .unwrap();
     assert!(!store.run_groups(run_id).unwrap()[0].test_code);
+}
+
+/// The groups a run's churn summary calls its top are the ones its report
+/// lists first: suppressed groups are not listed, and ranked-down groups come
+/// after every other.
+#[test]
+fn the_top_groups_are_the_visible_ones_in_report_order() {
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.suppressions = vec![SuppressionRuleRow {
+        scope: "path_glob".to_string(),
+        pattern: "src/**".to_string(),
+        reason: None,
+    }];
+    let template = snapshot.groups[0].clone();
+    let group = |seed: u8, priority: f64, ranked_down: bool| {
+        let mut group = template.clone();
+        group.fingerprint = group_fp(seed);
+        group.history = GroupOrigin::unconnected(&group_fp(seed));
+        group.ranked_down = ranked_down;
+        group.priority.final_priority = priority;
+        group.members = vec![
+            member_with_finding(seed, seed, "src/a.rs", Some(0)),
+            member_with_finding(seed, seed.wrapping_add(100), "src/b.rs", Some(1)),
+        ];
+        group
+    };
+    let mut suppressed = group(20, 0.9, false);
+    suppressed.suppressed_by = Some(0);
+    let mut noise = group(21, 0.8, false);
+    noise.suppress_reason = Some("low-entropy".to_string());
+    snapshot.groups = vec![
+        suppressed,
+        noise,
+        group(22, 0.7, true),
+        group(23, 0.5, false),
+        group(24, 0.3, false),
+    ];
+    let mut store = Store::open_in_memory().unwrap();
+    let run_id = store.record_snapshot(&snapshot).unwrap();
+
+    let hex = |seed: u8| format!("{seed:02x}").repeat(16);
+    assert_eq!(
+        store.run_top_group_fingerprints(run_id, 10).unwrap(),
+        vec![hex(23), hex(24), hex(22)]
+    );
+    assert_eq!(
+        store.run_top_group_fingerprints(run_id, 2).unwrap(),
+        vec![hex(23), hex(24)]
+    );
+}
+
+/// A group is found by its id however the hex is cased, and a malformed id is
+/// refused rather than read as one that matches nothing.
+#[test]
+fn a_group_is_looked_up_by_its_identity_bytes() {
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let run_id = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    let lower = "09".repeat(16);
+
+    let found = store.group(&lower).unwrap().expect("the recorded group");
+    assert_eq!(found.run_id, run_id);
+    assert_eq!(found.group.fingerprint_hex, lower);
+    let upper = store
+        .group(&lower.to_ascii_uppercase())
+        .unwrap()
+        .expect("the same group");
+    assert_eq!(upper.group.fingerprint_hex, lower);
+    assert!(store.run_holds_group(run_id, &lower).unwrap());
+    assert!(store.group(&"0a".repeat(16)).unwrap().is_none());
+    assert!(matches!(
+        store.group("not-hex"),
+        Err(StoreError::MalformedId { .. })
+    ));
 }

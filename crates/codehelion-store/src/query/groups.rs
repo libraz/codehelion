@@ -30,7 +30,7 @@ impl Store {
                         u.name, s.boilerplate, s.clone_type, s.confidence_band,
                         s.weight_version, s.lexical, s.structural, s.control_flow,
                         s.type_similarity, s.api, s.composite,
-                        sup.scope, sup.pattern, sup.reason, sup.active,
+                        sup.scope, sup.pattern, sup.reason, CASE WHEN sup.id IS NULL THEN NULL ELSE 1 END,
                         s.basis, s.signature, s.signature_units
                  FROM clone_group_sibling s
                  JOIN clone_group g ON g.id = s.clone_group_id
@@ -116,7 +116,7 @@ impl Store {
                         left_unit.name,
                         lower(hex(right_fp.hash)), right_unit.language, right_unit.file_path,
                         right_unit.start_line, right_unit.end_line, right_unit.token_count,
-                        right_unit.name, sup.scope, sup.pattern, sup.reason, sup.active
+                        right_unit.name, sup.scope, sup.pattern, sup.reason, CASE WHEN sup.id IS NULL THEN NULL ELSE 1 END
                  FROM near_match_near_miss n
                  JOIN source_unit left_unit ON left_unit.id = n.left_source_unit_id
                  JOIN fingerprint left_fp ON left_fp.id = left_unit.fingerprint_id
@@ -180,7 +180,7 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT g.id, lower(hex(f.hash)), g.clone_type, g.score, g.entropy_bits,
                     g.suppress_reason, g.boilerplate, g.member_scope, g.test_code,
-                    g.test_code_evidence, g.split_pair, s.scope, s.pattern, s.reason, s.active,
+                    g.test_code_evidence, g.split_pair, s.scope, s.pattern, s.reason, CASE WHEN s.id IS NULL THEN NULL ELSE 1 END,
                     g.width_family, g.statements, g.identifier_jaccard, g.has_loop,
                     g.has_dynamic_allocation, g.call_count
              FROM clone_group g
@@ -255,7 +255,7 @@ impl Store {
                         u.name, s.boilerplate, s.clone_type, s.confidence_band,
                         s.weight_version, s.lexical, s.structural, s.control_flow,
                         s.type_similarity, s.api, s.composite,
-                        sup.scope, sup.pattern, sup.reason, sup.active,
+                        sup.scope, sup.pattern, sup.reason, CASE WHEN sup.id IS NULL THEN NULL ELSE 1 END,
                         s.basis, s.signature, s.signature_units
                  FROM clone_group_sibling s
                  JOIN source_unit u ON u.id = s.source_unit_id
@@ -301,8 +301,9 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns any underlying database error.
+    /// Returns malformed ids and any underlying database error.
     pub fn group(&self, fingerprint_hex: &str) -> Result<Option<StoredGroupDetail>, StoreError> {
+        let fingerprint = super::common::parse_hex_id(fingerprint_hex)?;
         let run_id: Option<i64> = self
             .conn
             .query_row(
@@ -311,17 +312,18 @@ impl Store {
                  FROM clone_group g
                  JOIN fingerprint f ON f.id = g.group_fingerprint_id
                  {COMPLETED_CLONE_GROUP_RUN_JOIN}
-                 WHERE lower(hex(f.hash)) = ?1
+                 WHERE f.kind = 'clone_group' AND f.hash = ?1
                  ORDER BY g.scan_run_id DESC
                  LIMIT 1",
                 ),
-                params![fingerprint_hex],
+                params![fingerprint.as_slice()],
                 |row| row.get(0),
             )
             .optional()?;
         let Some(run_id) = run_id else {
             return Ok(None);
         };
+        let fingerprint_hex = crate::fingerprint_hex(fingerprint);
         // Read through the run's groups rather than assembling one here: a
         // group's members, similarity and evidence are gathered in one place,
         // and a second gatherer is a second answer waiting to disagree.
@@ -337,8 +339,9 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns any underlying database error.
+    /// Returns malformed ids and any underlying database error.
     pub fn run_holds_group(&self, run_id: i64, fingerprint_hex: &str) -> Result<bool, StoreError> {
+        let fingerprint = super::common::parse_hex_id(fingerprint_hex)?;
         let found: Option<i64> = self
             .conn
             .query_row(
@@ -348,10 +351,11 @@ impl Store {
                  JOIN fingerprint f ON f.id = g.group_fingerprint_id
                  {COMPLETED_CLONE_GROUP_RUN_JOIN}
                  WHERE g.scan_run_id = ?1
-                   AND lower(hex(f.hash)) = ?2
+                   AND f.kind = 'clone_group'
+                   AND f.hash = ?2
                  LIMIT 1",
                 ),
-                params![run_id, fingerprint_hex],
+                params![run_id, fingerprint.as_slice()],
                 |row| row.get(0),
             )
             .optional()?;
@@ -919,8 +923,9 @@ impl Store {
 }
 
 impl Store {
-    /// The `limit` highest-ranked group fingerprints of a completed run, in
-    /// the order that run ranked them.
+    /// The first `limit` group fingerprints a completed run's report lists, in
+    /// that order: visible groups only — neither suppressed by a rule nor by
+    /// the engine — with ranked-down groups after the rest, then by priority.
     ///
     /// # Errors
     ///
@@ -938,7 +943,9 @@ impl Store {
              JOIN fingerprint f ON f.id = g.group_fingerprint_id
              JOIN scan_run r ON r.id = g.scan_run_id AND r.status = 'completed'
              WHERE n.scan_run_id = ?1
-             ORDER BY n.final_priority DESC, lower(hex(f.hash)) ASC
+               AND n.suppression_id IS NULL
+               AND g.suppress_reason IS NULL
+             ORDER BY g.ranked_down ASC, n.final_priority DESC, lower(hex(f.hash)) ASC
              LIMIT ?2",
         )?;
         let fingerprints = statement

@@ -108,6 +108,44 @@ fn reuse_restores_the_recorded_suppression_policy_for_replay() {
     }
 }
 
+/// A replay shows the suppression a run applied, not the policy a later scan
+/// put in force: a rule since dropped still reads as active in the run that
+/// used it.
+#[test]
+fn a_replay_keeps_the_suppression_its_run_applied_after_the_policy_moved_on() {
+    let dir = fixture();
+    let root = dir.path();
+    let config = root.join("codehelion.toml");
+    std::fs::write(&config, "[suppression]\npaths = [\"src/*.c\"]\n").unwrap();
+    let first = scan_json(root);
+    let first_run = first["run"]["run_id"].to_string();
+    let suppressed: Vec<&serde_json::Value> = first["groups"]
+        .as_array()
+        .expect("groups")
+        .iter()
+        .filter(|group| group["suppressed"]["pattern"] == "src/*.c")
+        .collect();
+    assert!(!suppressed.is_empty(), "{first}");
+    assert!(
+        suppressed
+            .iter()
+            .all(|group| group["suppressed"]["active"] == true)
+    );
+
+    std::fs::write(&config, "[suppression]\npaths = [\"src/*.rs\"]\n").unwrap();
+    let later = scan_json(root);
+    assert_ne!(later["run"]["run_id"].to_string(), first_run);
+
+    let replay = cmd()
+        .current_dir(root)
+        .args(["report", "--run", &first_run, "--format", "json"])
+        .output()
+        .expect("replay the first run");
+    assert!(replay.status.success(), "{replay:?}");
+    let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).expect("JSON");
+    assert_eq!(replay["groups"], first["groups"]);
+}
+
 #[test]
 fn a_path_selector_matching_part_of_a_group_is_not_stale() {
     let dir = fixture();

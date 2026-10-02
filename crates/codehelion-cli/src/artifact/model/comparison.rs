@@ -156,8 +156,9 @@ type SymbolsOfOneIdentity<'a> = (
 /// they are held beside the key rather than folded into it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct SymbolContent {
-    /// Identity of the instruction bytes including their immediates, absent
-    /// for a backend that does not decode operands.
+    /// Identity of the instruction bytes including their immediates. A backend
+    /// that does not decode operands supplies none, and the retained code
+    /// bytes stand in for it, so equal content always means equal bytes.
     body: Option<codehelion_artifact::ArtifactFingerprint>,
     /// Observed byte size, which is evidence of a change on its own.
     size: u64,
@@ -165,9 +166,16 @@ struct SymbolContent {
 
 impl SymbolContent {
     /// The content of one parser-established symbol.
-    const fn of(symbol: &codehelion_artifact::ArtifactSymbol) -> Self {
+    fn of(symbol: &codehelion_artifact::ArtifactSymbol) -> Self {
         Self {
-            body: symbol.body_fingerprint,
+            body: symbol.body_fingerprint.or_else(|| {
+                (!symbol.code.is_empty()).then(|| {
+                    codehelion_artifact::ArtifactFingerprint::from_content(
+                        "symbol-code",
+                        &symbol.code,
+                    )
+                })
+            }),
             size: symbol.size,
         }
     }

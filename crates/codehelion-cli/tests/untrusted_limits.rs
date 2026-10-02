@@ -81,3 +81,34 @@ fn a_distrusting_run_works_under_its_memory_ceiling_or_says_it_is_not_in_force()
         "a run that was not told to distrust the tree states no ceiling: {trusting_stderr}"
     );
 }
+
+/// A distrusted tree cannot steer the files opened beside its database: a
+/// planted link among the lease and journal names is refused before anything
+/// is created where it points.
+#[cfg(unix)]
+#[test]
+fn a_distrusting_run_refuses_a_database_sidecar_planted_as_a_link() {
+    let tree = tempfile::tempdir().expect("scanned tree");
+    let outside = tempfile::tempdir().expect("outside the tree");
+    std::fs::write(tree.path().join("lib.rs"), SOURCE).expect("write source");
+    std::fs::create_dir_all(tree.path().join(".codehelion")).expect("database directory");
+    for sidecar in ["audit.db.lock", "audit.db-wal"] {
+        let target = outside.path().join(sidecar);
+        let link = tree.path().join(".codehelion").join(sidecar);
+        std::os::unix::fs::symlink(&target, &link).expect("plant a link");
+
+        let output = cmd()
+            .arg("scan")
+            .arg(tree.path())
+            .arg("--untrusted")
+            .output()
+            .expect("run scan");
+        assert!(!output.status.success(), "{sidecar}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("is a link"),
+            "{sidecar}: {output:?}"
+        );
+        assert!(!target.exists(), "{sidecar}: the link target was created");
+        std::fs::remove_file(&link).expect("remove the link");
+    }
+}

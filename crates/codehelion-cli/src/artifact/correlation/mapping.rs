@@ -10,8 +10,9 @@ use super::matching::{
 use super::ratio::{source_kind_order, unmapped_reason_label};
 use crate::artifact::MAX_LINKER_MAP_BYTES;
 use crate::artifact::SourceMapLocation;
+use crate::artifact::input::read_artifact_input;
 use crate::artifact::model::BuildVariantEvidence;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use codehelion_artifact::ArtifactIr;
 use codehelion_store::Store;
 use codehelion_store::artifact::{
@@ -25,7 +26,6 @@ use codehelion_store::query::{
     SourceUnitIdentity,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path as FilePath;
 
 /// Reference to the build configuration a correlated identity was minted under.
@@ -430,18 +430,9 @@ pub(in crate::artifact) fn read_linker_map(path: Option<&FilePath>) -> Result<Ve
     let Some(path) = path else {
         return Ok(Vec::new());
     };
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("reading metadata for linker map {}", path.display()))?;
-    if metadata.len() > MAX_LINKER_MAP_BYTES {
-        bail!(
-            "linker map {} is {} bytes, exceeding the {} byte input limit",
-            path.display(),
-            metadata.len(),
-            MAX_LINKER_MAP_BYTES
-        );
-    }
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("reading linker map {}", path.display()))?;
+    let bytes = read_artifact_input(path, MAX_LINKER_MAP_BYTES, "linker map")?;
+    // A map names the paths of whatever built it, which need not be UTF-8.
+    let text = String::from_utf8_lossy(&bytes);
     Ok(parse_linker_map(&text))
 }
 

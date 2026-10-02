@@ -302,7 +302,7 @@ pub(super) fn build_report(
         common_run_info(RunInfoInputs {
             root: inputs.root,
             db_path: inputs.db_path,
-            replay_database: inputs.replay_database,
+            replay_flags: inputs.replay_flags,
             configuration: inputs.configuration,
             run_id,
             started_at: inputs.started_at,
