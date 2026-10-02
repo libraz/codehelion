@@ -14,9 +14,9 @@ claim an ability no backend declares or omit one that is declared.
 | Format | Module and feature | Detection | Potential capabilities | Status |
 | --- | --- | --- | --- | --- |
 | wasm | `wasm` | `\0asm` | symbols, direct calls, data segments, normalized duplicates, independent data segments; source mappings from a recorded sourceMappingURL | implemented; the component encoding is recognised but not parsed |
-| elf | `elf` | `\x7fELF` | symbols, direct calls, relocations, data segments, normalized duplicates; source mappings from embedded DWARF or a build-ID-matched debug companion | implemented; normalized duplicates need an x86 instruction architecture |
-| macho | `macho` | Mach-O magic values | symbols, relocations, data segments, normalized duplicates; source mappings from a matching dSYM DWARF image | implemented; the call graph is unavailable; normalized duplicates need an x86 instruction architecture |
-| pe-coff | `pe` | DOS `MZ` header or recognised COFF machine | symbols, relocations, data segments, normalized duplicates; source mappings from a matching PDB | implemented; the call graph is unavailable; normalized duplicates need an x86 instruction architecture |
+| elf | `elf` | `\x7fELF` | symbols, direct calls, relocations, data segments, normalized duplicates; source mappings from embedded DWARF or a build-ID-matched debug companion | implemented; source lines attach to linked images, not relocatable objects; normalized duplicates need an x86 instruction architecture |
+| macho | `macho` | Mach-O magic values | symbols, relocations, data segments, normalized duplicates; source mappings from a matching dSYM DWARF image | implemented; the call graph is unavailable; source lines attach to linked images, not relocatable objects; normalized duplicates need an x86 instruction architecture |
+| pe-coff | `pe` | DOS `MZ` header or recognised COFF machine | symbols, relocations, data segments, normalized duplicates; source mappings from a matching PDB | implemented; the call graph is unavailable; source lines attach to linked images, not relocatable objects; normalized duplicates need an x86 instruction architecture |
 | archive | `archive` | `!<arch>\n` or `!<thin>\n` | symbols, direct calls, relocations, data segments, normalized duplicates; source mappings from the debug metadata each delegated member carries | implemented; members are enumerated and delegated, so the capabilities are the delegated members'; thin members are not followed outside the archive |
 
 ## Attribution granularity
@@ -42,6 +42,10 @@ backend; it does not treat the archive byte stream as one executable. Member
 provenance and any individual parse failure are retained in the archive IR.
 Thin archive paths are never followed. Plain ELF relocatable objects already
 use the ELF backend.
+
+Members are relocatable objects, and a relocatable object has no load address
+for a line table to join, so an archive attributes whole symbols and no source
+line range. Linking the members into an image is what reaches a line range.
 
 Because a normalizer belongs to an instruction architecture rather than to the
 archive container, an archive's normalized-duplicate capability is the union of

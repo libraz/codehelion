@@ -8,6 +8,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io::Cursor;
 
+use crate::dwarf::{DwarfBudget, DwarfPathInterner, source_path_prefix_within};
 use crate::native::{
     collect_sections, collect_text_symbols, collect_undefined_imports, symbol_fingerprint,
 };
@@ -67,6 +68,24 @@ impl PeCoffBackend {
         bytes: &[u8],
         pdb_bytes: Option<&[u8]>,
     ) -> Result<ArtifactIr, ArtifactError> {
+        self.parse_within(bytes, pdb_bytes, DwarfBudget::default())
+    }
+
+    /// The same parse, under bounds an operator narrowed.
+    ///
+    /// A PDB describes line rows far more compactly than the structures built
+    /// from them, so `budget` bounds the rows read and the source locations
+    /// attached, as it does for DWARF.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::parse_with_pdb`].
+    pub fn parse_within(
+        &self,
+        bytes: &[u8],
+        pdb_bytes: Option<&[u8]>,
+        budget: DwarfBudget,
+    ) -> Result<ArtifactIr, ArtifactError> {
         if !self.detects(bytes) {
             return Err(ArtifactError::WrongFormat {
                 expected: ArtifactFormat::PeCoff,
@@ -94,14 +113,17 @@ impl PeCoffBackend {
         } else {
             named
         };
-        if let Some(pdb_bytes) = pdb_bytes {
-            collect_pdb_frames(&file, pdb_bytes, &symbol_ranges, &mut ir)?;
-        }
+        let debug_info_unreadable = match pdb_bytes {
+            Some(pdb_bytes) => {
+                collect_pdb_frames(&file, pdb_bytes, &symbol_ranges, &mut ir, budget)?
+            }
+            None => false,
+        };
         ir.capabilities = ArtifactCapabilities {
             symbols: !ir.symbols.is_empty(),
             call_graph: false,
             source_mapping: !ir.source_mappings.is_empty(),
-            debug_info_unreadable: false,
+            debug_info_unreadable,
             normalized_duplicates: crate::x86::supports_normalized_duplicates(file.architecture()),
             independent_data_segments: false,
             relocations: !ir.relocations.is_empty(),
@@ -174,11 +196,23 @@ fn infer_text_regions(
         .collect())
 }
 
+/// One PDB line row, held compactly until it is attached to a symbol.
+#[derive(Debug, Clone, Copy)]
+struct PdbRow {
+    address: u64,
+    source: u32,
+    line: u32,
+    column: Option<u32>,
+}
+
 /// Attach PDB line records to symbol identities after checking `CodeView` identity.
 ///
 /// PDB RVAs and image symbol addresses are used only during this join. The
 /// stored graph keeps stable symbol fingerprints and source locations, never a
 /// PE address, section number, or PDB stream index as identity.
+///
+/// Returns whether the PDB could not be read in full: a row, module or file
+/// entry failed to read, or `budget` stopped the collection or the attachment.
 #[allow(
     clippy::too_many_lines,
     reason = "the identity check, fallible PDB iteration, and stable-ID attachment form one safety boundary"
@@ -188,7 +222,8 @@ fn collect_pdb_frames(
     pdb_bytes: &[u8],
     symbol_ranges: &[SymbolRange],
     ir: &mut ArtifactIr,
-) -> Result<(), ArtifactError> {
+    budget: DwarfBudget,
+) -> Result<bool, ArtifactError> {
     if file.format() != object::BinaryFormat::Pe {
         return Err(malformed(
             "a PDB can only describe a PE image, not a COFF object".to_owned(),
@@ -225,8 +260,10 @@ fn collect_pdb_frames(
     let mut modules = debug_information
         .modules()
         .map_err(|error| malformed(error.to_string()))?;
-    let mut frames = Vec::new();
-    while let Some(module) = modules
+    let mut rows = Vec::new();
+    let mut paths = DwarfPathInterner::default();
+    let mut unreadable = false;
+    'modules: while let Some(module) = modules
         .next()
         .map_err(|error| malformed(error.to_string()))?
     {
@@ -237,6 +274,7 @@ fn collect_pdb_frames(
             continue;
         };
         let Ok(program) = module_info.line_program() else {
+            unreadable = true;
             continue;
         };
         let mut lines = program.lines();
@@ -245,56 +283,123 @@ fn collect_pdb_frames(
                 continue;
             };
             let Ok(file_info) = program.get_file_info(line.file_index) else {
+                unreadable = true;
                 continue;
             };
             let Ok(source) = file_info.name.to_string_lossy(&string_table) else {
+                unreadable = true;
                 continue;
             };
-            frames.push((
-                symbol_address_of(file, rva.0),
-                crate::ArtifactInlineFrame {
-                    evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Pdb,
-                    source: source.into_owned(),
-                    line: Some(line.line_start),
-                    column: line.column_start.filter(|column| *column != 0),
-                },
-            ));
+            let Some(source) = paths.intern(source.into_owned()) else {
+                unreadable = true;
+                continue;
+            };
+            if rows.len() >= budget.line_records {
+                unreadable = true;
+                break 'modules;
+            }
+            rows.push(PdbRow {
+                address: symbol_address_of(file, rva.0),
+                source,
+                line: line.line_start,
+                column: line.column_start.filter(|column| *column != 0),
+            });
         }
     }
-    frames.sort_by_key(|(address, _)| *address);
+    Ok(attach_pdb_rows(rows, &paths, symbol_ranges, budget, ir) || unreadable)
+}
+
+/// Give each symbol the source locations of the rows inside its address range.
+///
+/// What a symbol keeps is bounded per symbol, in total, and in source-path
+/// bytes, ordered by location so the cut is a function of the input. Returns
+/// whether a bound dropped any location.
+fn attach_pdb_rows(
+    mut rows: Vec<PdbRow>,
+    paths: &DwarfPathInterner,
+    symbol_ranges: &[SymbolRange],
+    budget: DwarfBudget,
+    ir: &mut ArtifactIr,
+) -> bool {
+    rows.sort_by_key(|row| row.address);
     let symbol_rows: HashMap<_, _> = ir
         .symbols
         .iter()
         .enumerate()
         .map(|(index, symbol)| (symbol.fingerprint, index))
         .collect();
+    let mut truncated = false;
+    let mut remaining_frames = budget.inline_frames;
+    let mut remaining_source_bytes = budget.inline_source_bytes;
+    let mut source_paths = BTreeSet::new();
     for range in symbol_ranges {
-        let frame_start = frames.partition_point(|(address, _)| *address < range.start);
-        let mut symbol_frames: Vec<_> = frames[frame_start..]
+        if remaining_frames == 0 {
+            truncated = true;
+            break;
+        }
+        let start = rows.partition_point(|row| row.address < range.start);
+        let mut candidates: Vec<_> = rows[start..]
             .iter()
-            .take_while(|(address, _)| *address < range.end)
-            .map(|(_, frame)| frame.clone())
+            .take_while(|row| row.address < range.end)
+            .take(budget.symbol_candidates.saturating_add(1))
             .collect();
-        symbol_frames.sort_by(|left, right| {
-            (&left.source, left.line, left.column).cmp(&(&right.source, right.line, right.column))
+        if candidates.len() > budget.symbol_candidates {
+            candidates.truncate(budget.symbol_candidates);
+            truncated = true;
+        }
+        candidates.sort_by(|left, right| {
+            (paths.get(left.source), left.line, left.column).cmp(&(
+                paths.get(right.source),
+                right.line,
+                right.column,
+            ))
         });
-        symbol_frames.dedup();
-        if symbol_frames.is_empty() {
+        candidates.dedup_by(|left, right| {
+            (left.source, left.line, left.column) == (right.source, right.line, right.column)
+        });
+        let retained = candidates
+            .len()
+            .min(budget.symbol_inline_frames)
+            .min(remaining_frames)
+            .min(source_path_prefix_within(
+                candidates.iter().map(|row| paths.get(row.source).len()),
+                remaining_source_bytes,
+            ));
+        if retained < candidates.len() {
+            candidates.truncate(retained);
+            truncated = true;
+        }
+        remaining_frames -= candidates.len();
+        remaining_source_bytes = remaining_source_bytes.saturating_sub(
+            candidates
+                .iter()
+                .map(|row| paths.get(row.source).len())
+                .sum(),
+        );
+        let Some(index) = symbol_rows.get(&range.fingerprint) else {
+            continue;
+        };
+        if candidates.is_empty() {
             continue;
         }
-        if let Some(index) = symbol_rows.get(&range.fingerprint) {
-            ir.symbols[*index].inline_stack = symbol_frames;
-        }
+        source_paths.extend(candidates.iter().map(|row| paths.get(row.source)));
+        ir.symbols[*index].inline_stack = candidates
+            .iter()
+            .map(|row| crate::ArtifactInlineFrame {
+                evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Pdb,
+                source: paths.get(row.source).to_owned(),
+                line: Some(row.line),
+                column: row.column,
+            })
+            .collect();
     }
-    ir.source_mappings = ir
-        .symbols
-        .iter()
-        .flat_map(|symbol| symbol.inline_stack.iter().map(|frame| frame.source.clone()))
-        .collect::<BTreeSet<_>>()
+    ir.source_mappings = source_paths
         .into_iter()
-        .map(|uri| crate::ArtifactSourceMapping { uri })
+        .map(|uri| crate::ArtifactSourceMapping {
+            uri: uri.to_owned(),
+        })
         .collect();
-    Ok(())
+    truncated
 }
 
 /// Determine whether a PDB identity can describe the PE image identity.
@@ -410,6 +515,84 @@ mod tests {
             .collect();
 
         assert_eq!(matched, ["start", "inside"]);
+    }
+
+    /// An image symbol covering `[0, 100)` and 40 rows of one source file, each
+    /// on its own line and at its own address.
+    fn rows_over_one_symbol(
+        rows: usize,
+    ) -> (ArtifactIr, Vec<SymbolRange>, Vec<PdbRow>, DwarfPathInterner) {
+        let ir = PeCoffBackend
+            .parse(&coff_fixture())
+            .expect("parse COFF fixture");
+        let ranges = vec![SymbolRange {
+            fingerprint: ir.symbols[0].fingerprint,
+            start: 0,
+            end: 100,
+        }];
+        let mut paths = DwarfPathInterner::default();
+        let source = paths.intern("C:\\src\\unit.c".to_owned()).unwrap();
+        let rows = (0..rows)
+            .map(|index| PdbRow {
+                address: index as u64,
+                source,
+                line: u32::try_from(index).unwrap() + 1,
+                column: None,
+            })
+            .collect();
+        (ir, ranges, rows, paths)
+    }
+
+    #[test]
+    fn pdb_rows_within_every_bound_are_attached_without_marking_the_debug_information_unreadable() {
+        let (mut ir, ranges, rows, paths) = rows_over_one_symbol(40);
+
+        let truncated = attach_pdb_rows(rows, &paths, &ranges, DwarfBudget::default(), &mut ir);
+
+        assert!(!truncated);
+        assert_eq!(ir.symbols[0].inline_stack.len(), 40);
+        assert_eq!(ir.source_mappings.len(), 1);
+    }
+
+    #[test]
+    fn pdb_attachment_stops_at_each_bound_and_reports_it() {
+        let bounds: [fn(&mut DwarfBudget); 4] = [
+            |budget| budget.symbol_candidates = 5,
+            |budget| budget.symbol_inline_frames = 5,
+            |budget| budget.inline_frames = 5,
+            |budget| budget.inline_source_bytes = "C:\\src\\unit.c".len() * 5,
+        ];
+        for narrow in bounds {
+            let (mut ir, ranges, rows, paths) = rows_over_one_symbol(40);
+            let mut budget = DwarfBudget::default();
+            narrow(&mut budget);
+
+            let truncated = attach_pdb_rows(rows, &paths, &ranges, budget, &mut ir);
+
+            assert!(truncated, "{budget:?}");
+            assert!(
+                (1..=5).contains(&ir.symbols[0].inline_stack.len()),
+                "{budget:?} kept {}",
+                ir.symbols[0].inline_stack.len()
+            );
+            assert_eq!(ir.source_mappings.len(), 1, "{budget:?}");
+        }
+    }
+
+    #[test]
+    fn a_pdb_is_bounded_by_the_budget_of_an_untrusted_read() {
+        let (mut ir, ranges, rows, paths) = rows_over_one_symbol(40);
+
+        let truncated = attach_pdb_rows(
+            rows,
+            &paths,
+            &ranges,
+            DwarfBudget::default().bounded_by(8),
+            &mut ir,
+        );
+
+        assert!(truncated);
+        assert!(ir.symbols[0].inline_stack.len() <= 8);
     }
 
     #[test]

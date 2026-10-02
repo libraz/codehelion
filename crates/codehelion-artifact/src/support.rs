@@ -216,7 +216,10 @@ pub const FORMAT_SUPPORT: [FormatSupport; 5] = [
             symbol_carrier: "the symbol table",
             line_limit: None,
         },
-        limitations: &["normalized duplicates need an x86 instruction architecture"],
+        limitations: &[
+            "source lines attach to linked images, not relocatable objects",
+            "normalized duplicates need an x86 instruction architecture",
+        ],
     },
     FormatSupport {
         format: ArtifactFormat::MachO,
@@ -240,6 +243,7 @@ pub const FORMAT_SUPPORT: [FormatSupport; 5] = [
         },
         limitations: &[
             "the call graph is unavailable",
+            "source lines attach to linked images, not relocatable objects",
             "normalized duplicates need an x86 instruction architecture",
         ],
     },
@@ -265,6 +269,7 @@ pub const FORMAT_SUPPORT: [FormatSupport; 5] = [
         },
         limitations: &[
             "the call graph is unavailable",
+            "source lines attach to linked images, not relocatable objects",
             "normalized duplicates need an x86 instruction architecture",
         ],
     },
@@ -285,13 +290,14 @@ pub const FORMAT_SUPPORT: [FormatSupport; 5] = [
             data_segments: true,
         },
         source_evidence: SourceEvidence {
-            line_frames: &[
-                ArtifactSourceLocationEvidenceKind::Dwarf,
-                ArtifactSourceLocationEvidenceKind::Pdb,
-            ],
+            // Members are relocatable objects, which have no load address for a
+            // line table to join, and no PDB reaches a COFF member.
+            line_frames: &[],
             carrier: "the debug metadata each delegated member carries",
             symbol_carrier: "each member's symbol table",
-            line_limit: None,
+            line_limit: Some(
+                "archive members are relocatable objects, whose source lines are not joined to symbols; link them into an image to attribute line ranges",
+            ),
         },
         limitations: &[
             "members are enumerated and delegated, so the capabilities are the delegated members'",
@@ -330,6 +336,20 @@ mod tests {
         }
     }
 
+    /// A format with no line family says why, so the guidance never promises
+    /// line ranges it cannot deliver without naming the limit.
+    #[test]
+    fn a_format_without_line_frames_states_its_limit() {
+        for row in &FORMAT_SUPPORT {
+            assert_eq!(
+                row.source_evidence.line_frames.is_empty(),
+                row.source_evidence.line_limit.is_some(),
+                "{}",
+                row.format
+            );
+        }
+    }
+
     #[test]
     fn attribution_follows_the_evidence_a_format_can_establish() {
         assert_eq!(
@@ -340,7 +360,6 @@ mod tests {
             ArtifactFormat::Elf,
             ArtifactFormat::MachO,
             ArtifactFormat::PeCoff,
-            ArtifactFormat::Archive,
         ] {
             assert_eq!(
                 format_support(format).attribution(),
@@ -348,6 +367,10 @@ mod tests {
                 "{format}"
             );
         }
+        assert_eq!(
+            format_support(ArtifactFormat::Archive).attribution(),
+            SourceAttribution::Symbol
+        );
         let nothing = SourceEvidence {
             line_frames: &[],
             carrier: "nothing",
@@ -416,7 +439,7 @@ mod tests {
         assert!(!wasm.contains("relocations"), "{wasm}");
         assert_eq!(
             format_support(ArtifactFormat::MachO).status_summary(),
-            "implemented; the call graph is unavailable; normalized duplicates need an x86 instruction architecture"
+            "implemented; the call graph is unavailable; source lines attach to linked images, not relocatable objects; normalized duplicates need an x86 instruction architecture"
         );
     }
 }

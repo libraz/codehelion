@@ -1,6 +1,6 @@
 //! Shared native-object collection helpers.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use object::{Object, ObjectSection, ObjectSymbol, SymbolKind};
 
@@ -138,24 +138,22 @@ pub fn data_fingerprint(section: Option<&str>, data: &[u8]) -> ArtifactFingerpri
 /// Determine a native symbol's byte extent without attributing bytes to a
 /// zero-size alias.
 ///
-/// A declared size always wins. For a boundary inferred from neighbouring
-/// symbols, only the next strictly greater address delimits the range. If an
-/// explicit definition shares the address, or an earlier zero-size symbol has
-/// already claimed that inferred range, this symbol is an alias and remains
-/// explicitly zero-sized.
+/// An alias owns no bytes: the symbol that claims the same range already does.
+/// Otherwise a declared size wins. For a boundary inferred from neighbouring
+/// symbols, only the next strictly greater address delimits the range.
 #[must_use]
 pub fn symbol_size(
     address: u64,
     declared_size: u64,
-    is_zero_size_alias: bool,
+    is_alias: bool,
     following_addresses: impl IntoIterator<Item = u64>,
     section_end: u64,
 ) -> u64 {
+    if is_alias {
+        return 0;
+    }
     if declared_size != 0 {
         return declared_size;
-    }
-    if is_zero_size_alias {
-        return 0;
     }
     following_addresses
         .into_iter()
@@ -175,7 +173,7 @@ pub fn trim_inferred_symbol_padding(code: &[u8], architecture: object::Architect
 /// Alias and boundary facts for one entry of an address-sorted symbol list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SymbolBoundary {
-    /// Whether an equal-address definition makes this symbol an alias.
+    /// Whether this symbol repeats a range another symbol already claims.
     alias: bool,
     /// First address in the list that is strictly greater, when one exists.
     next_greater_address: Option<u64>,
@@ -186,10 +184,11 @@ struct SymbolBoundary {
 ///
 /// Sorting puts symbols sharing an address in one contiguous run, so both facts
 /// are run-local: a zero-size symbol is an alias when its run holds an earlier
-/// member or any sized member, and the only address that can delimit an
-/// inferred range is the next run's. Answering either question per symbol would
-/// rescan the whole section instead, which a format reporting every symbol as
-/// zero-sized turns into a scan of the section per symbol.
+/// member or any sized member, a sized symbol is an alias when an earlier
+/// member of its run declares the same size, and the only address that can
+/// delimit an inferred range is the next run's. Answering either question per
+/// symbol would rescan the whole section instead, which a format reporting
+/// every symbol as zero-sized turns into a scan of the section per symbol.
 fn symbol_boundaries(sorted: &[(u64, u64)]) -> Vec<SymbolBoundary> {
     boundaries_and_reads(sorted).0
 }
@@ -211,11 +210,16 @@ fn boundaries_and_reads(sorted: &[(u64, u64)]) -> (Vec<SymbolBoundary>, usize) {
         let run = sorted.get(start..end).unwrap_or_default();
         let has_sized_member = run.iter().any(|(_, size)| *size != 0);
         let next_greater_address = sorted.get(end).map(|(address, _)| *address);
+        let mut claimed_sizes = HashSet::new();
         boundaries.extend(
             run.iter()
                 .enumerate()
                 .map(|(offset, (_, size))| SymbolBoundary {
-                    alias: *size == 0 && (offset > 0 || has_sized_member),
+                    alias: if *size == 0 {
+                        offset > 0 || has_sized_member
+                    } else {
+                        !claimed_sizes.insert(*size)
+                    },
                     next_greater_address,
                 }),
         );
@@ -254,6 +258,15 @@ pub fn collect_text_symbols(
     ir: &mut ArtifactIr,
 ) -> Result<Vec<NativeSymbolRange>, object::Error> {
     let mut ranges = Vec::new();
+    let mut by_section: HashMap<_, Vec<_>> = HashMap::new();
+    for symbol in file.symbols() {
+        if symbol.kind() != SymbolKind::Text || symbol.is_undefined() {
+            continue;
+        }
+        if let Some(section_index) = symbol.section_index() {
+            by_section.entry(section_index).or_default().push(symbol);
+        }
+    }
     for section in file
         .sections()
         .filter(|section| section.kind() == object::SectionKind::Text)
@@ -261,14 +274,7 @@ pub fn collect_text_symbols(
         let section_index = section.index();
         let data = section.data()?;
         let (section_offset, _) = section.file_range().unwrap_or((0, 0));
-        let mut symbols: Vec<_> = file
-            .symbols()
-            .filter(|symbol| {
-                symbol.section_index() == Some(section_index)
-                    && symbol.kind() == SymbolKind::Text
-                    && !symbol.is_undefined()
-            })
-            .collect();
+        let mut symbols = by_section.remove(&section_index).unwrap_or_default();
         symbols.sort_by_key(ObjectSymbol::address);
         let boundaries = symbol_boundaries(
             &symbols
@@ -300,7 +306,7 @@ pub fn collect_text_symbols(
             } else {
                 raw
             };
-            if code.is_empty() && symbol.size() != 0 {
+            if code.is_empty() && symbol.size() != 0 && !boundary.alias {
                 continue;
             }
             let raw_name = symbol.name().ok().filter(|name| !name.is_empty());
@@ -480,11 +486,16 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(position, (address, size))| SymbolBoundary {
-                alias: *size == 0
-                    && (sorted[..position].iter().any(|(prior, _)| prior == address)
+                alias: if *size == 0 {
+                    sorted[..position].iter().any(|(prior, _)| prior == address)
                         || sorted
                             .iter()
-                            .any(|(other, other_size)| other == address && *other_size != 0)),
+                            .any(|(other, other_size)| other == address && *other_size != 0)
+                } else {
+                    sorted[..position]
+                        .iter()
+                        .any(|(prior, prior_size)| prior == address && prior_size == size)
+                },
                 next_greater_address: sorted[position.saturating_add(1)..]
                     .iter()
                     .map(|(candidate, _)| *candidate)
@@ -556,6 +567,11 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_size_does_not_make_an_alias_own_bytes() {
+        assert_eq!(symbol_size(10, 4, true, [14], 20), 0);
+    }
+
+    #[test]
     fn zero_size_alias_remains_an_explicit_empty_region() {
         assert_eq!(symbol_size(10, 0, true, [14], 20), 0);
     }
@@ -619,10 +635,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_repeated_sized_range_is_an_alias_but_a_different_size_is_not() {
+        let boundaries = symbol_boundaries(&[(10, 4), (10, 4), (10, 6), (20, 4)]);
+        assert_eq!(
+            boundaries
+                .iter()
+                .map(|entry| entry.alias)
+                .collect::<Vec<_>>(),
+            vec![false, true, false, false]
+        );
+    }
+
     proptest! {
         #[test]
         fn run_local_boundaries_agree_with_a_scan_of_the_whole_symbol_list(
-            symbols in proptest::collection::vec((0_u64..16, 0_u64..3), 0..64)
+            symbols in proptest::collection::vec((0_u64..16, 0_u64..4), 0..64)
         ) {
             let mut sorted = symbols;
             sorted.sort_by_key(|(address, _)| *address);

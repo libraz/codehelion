@@ -290,6 +290,336 @@ fn zero_sized_alias_fixture() -> Vec<u8> {
     object.write().expect("write zero-sized ELF alias fixture")
 }
 
+/// Two sized names at one offset (a constructor pair) beside an equal-bytes
+/// function elsewhere in the section.
+fn sized_alias_fixture() -> Vec<u8> {
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let text = object.section_id(StandardSection::Text);
+    let first = object.append_section_data(text, &[0x90, 0xc3], 1);
+    let second = object.append_section_data(text, &[0x90, 0xc3], 1);
+    for (name, value) in [
+        (b"complete".as_slice(), first),
+        (b"base", first),
+        (b"twin", second),
+    ] {
+        object.add_symbol(Symbol {
+            name: name.to_vec(),
+            value,
+            size: 2,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+    }
+    object.write().expect("write sized ELF alias fixture")
+}
+
+/// A relocatable object with one function per text section.
+fn function_sections_fixture(count: usize) -> Vec<u8> {
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    for index in 0..count {
+        let section = object.add_section(
+            Vec::new(),
+            format!(".text.f{index}").into_bytes(),
+            SectionKind::Text,
+        );
+        let offset = object.append_section_data(section, &[0x90, 0xc3], 1);
+        object.add_symbol(Symbol {
+            name: format!("f{index}").into_bytes(),
+            value: offset,
+            size: 2,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(section),
+            flags: SymbolFlags::None,
+        });
+    }
+    object.write().expect("write function-sections fixture")
+}
+
+/// One text section holding the named functions, each with an optional
+/// relocation `(offset in function, target name, kind, size, addend)`.
+type FunctionSpec<'a> = (
+    &'a str,
+    &'a [u8],
+    SymbolScope,
+    Option<(u64, &'a str, RelocationKind, u8, i64)>,
+);
+
+fn functions_fixture(functions: &[FunctionSpec<'_>], pointer_to: Option<&str>) -> Vec<u8> {
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let text = object.section_id(StandardSection::Text);
+    let mut symbols = HashMap::new();
+    let mut offsets = Vec::new();
+    for (name, code, scope, _) in functions {
+        let offset = object.append_section_data(text, code, 1);
+        let symbol = object.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: offset,
+            size: code.len() as u64,
+            kind: SymbolKind::Text,
+            scope: *scope,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        symbols.insert(*name, symbol);
+        offsets.push(offset);
+    }
+    for ((_, _, _, relocation), base) in functions.iter().zip(offsets) {
+        let Some((at, target, kind, size, addend)) = relocation else {
+            continue;
+        };
+        object
+            .add_relocation(
+                text,
+                Relocation {
+                    offset: base + at,
+                    symbol: symbols[target],
+                    addend: *addend,
+                    flags: RelocationFlags::Generic {
+                        kind: *kind,
+                        encoding: RelocationEncoding::Generic,
+                        size: *size,
+                    },
+                },
+            )
+            .expect("add relocation");
+    }
+    if let Some(target) = pointer_to {
+        let data = object.section_id(StandardSection::Data);
+        let at = object.append_section_data(data, &[0; 8], 8);
+        object
+            .add_relocation(
+                data,
+                Relocation {
+                    offset: at,
+                    symbol: symbols[target],
+                    addend: 0,
+                    flags: RelocationFlags::Generic {
+                        kind: RelocationKind::Absolute,
+                        encoding: RelocationEncoding::Generic,
+                        size: 64,
+                    },
+                },
+            )
+            .expect("add data pointer relocation");
+    }
+    object.write().expect("write function fixture")
+}
+
+fn dead_symbol_names(artifact: &ArtifactIr) -> (Vec<String>, bool) {
+    let dead = crate::metrics::dead_code_candidates(artifact).expect("an export establishes roots");
+    let names = dead
+        .symbols
+        .iter()
+        .filter_map(|fingerprint| {
+            artifact
+                .symbols
+                .iter()
+                .find(|symbol| symbol.fingerprint == *fingerprint)
+                .and_then(|symbol| symbol.name.clone())
+        })
+        .collect();
+    (names, dead.definitive)
+}
+
+#[test]
+fn a_tail_jump_to_another_function_is_a_call_edge() {
+    let artifact = ElfBackend
+        .parse(&functions_fixture(
+            &[
+                (
+                    "entry",
+                    &[0xe9, 0, 0, 0, 0],
+                    SymbolScope::Linkage,
+                    Some((1, "tail", RelocationKind::Relative, 32, -4)),
+                ),
+                ("tail", &[0xc3], SymbolScope::Compilation, None),
+                ("unused", &[0x90, 0xc3], SymbolScope::Compilation, None),
+            ],
+            None,
+        ))
+        .expect("tail jump fixture parses");
+    let tail = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name.as_deref() == Some("tail"))
+        .expect("tail record");
+
+    assert!(
+        artifact
+            .calls
+            .iter()
+            .any(|call| call.target == Some(tail.fingerprint)),
+        "{:#?}",
+        artifact.calls
+    );
+    let (dead, definitive) = dead_symbol_names(&artifact);
+    assert_eq!(dead, vec!["unused".to_owned()]);
+    assert!(definitive);
+}
+
+#[test]
+fn a_jump_through_a_register_keeps_dead_code_a_candidate_list() {
+    let artifact = ElfBackend
+        .parse(&functions_fixture(
+            &[
+                ("entry", &[0xff, 0xe0], SymbolScope::Linkage, None),
+                ("unused", &[0x90, 0xc3], SymbolScope::Compilation, None),
+            ],
+            None,
+        ))
+        .expect("indirect jump fixture parses");
+
+    assert_eq!(artifact.calls.len(), 1, "{artifact:#?}");
+    assert_eq!(
+        artifact.calls[0].unresolved,
+        Some(UnresolvedCall::NativeIndirect)
+    );
+    assert!(!dead_symbol_names(&artifact).1);
+    assert_eq!(
+        crate::metrics::classify_sizes(&artifact).retained_bytes,
+        None
+    );
+}
+
+#[test]
+fn jumps_inside_a_function_and_through_a_table_are_not_transfers() {
+    let artifact = ElfBackend
+        .parse(&functions_fixture(
+            &[
+                // jmp +0; jne +0; jmp [rax*8 + 0x1000]; ret
+                (
+                    "entry",
+                    &[
+                        0xeb, 0x00, 0x75, 0x00, 0xff, 0x24, 0xc5, 0x00, 0x10, 0x00, 0x00, 0xc3,
+                    ],
+                    SymbolScope::Linkage,
+                    None,
+                ),
+                ("unused", &[0x90, 0xc3], SymbolScope::Compilation, None),
+            ],
+            None,
+        ))
+        .expect("internal jump fixture parses");
+
+    assert!(artifact.calls.is_empty(), "{:#?}", artifact.calls);
+}
+
+#[test]
+fn a_function_whose_address_is_loaded_is_not_dead() {
+    let artifact = ElfBackend
+        .parse(&functions_fixture(
+            &[
+                // lea rax, [rip + callback]; ret
+                (
+                    "entry",
+                    &[0x48, 0x8d, 0x05, 0, 0, 0, 0, 0xc3],
+                    SymbolScope::Linkage,
+                    Some((3, "callback", RelocationKind::Relative, 32, -4)),
+                ),
+                ("callback", &[0xc3], SymbolScope::Compilation, None),
+                (
+                    "caller",
+                    &[0xe8, 0, 0, 0, 0, 0xc3],
+                    SymbolScope::Linkage,
+                    Some((1, "helper", RelocationKind::Relative, 32, -4)),
+                ),
+                (
+                    "helper",
+                    &[0x90, 0x90, 0x90, 0xc3],
+                    SymbolScope::Compilation,
+                    None,
+                ),
+                ("unused", &[0x90, 0xc3], SymbolScope::Compilation, None),
+            ],
+            None,
+        ))
+        .expect("address-taken fixture parses");
+    let callback = artifact
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name.as_deref() == Some("callback"))
+        .expect("callback record");
+
+    assert!(artifact.indirect_references.contains(&callback.fingerprint));
+    assert_eq!(dead_symbol_names(&artifact).0, vec!["unused".to_owned()]);
+}
+
+#[test]
+fn a_function_address_computed_in_a_linked_image_is_not_dead() {
+    let mut bytes = functions_fixture(
+        &[
+            // lea rax, [rip + 1] reaches the byte after the next instruction.
+            (
+                "entry",
+                &[0x48, 0x8d, 0x05, 1, 0, 0, 0, 0xc3],
+                SymbolScope::Linkage,
+                None,
+            ),
+            ("callback", &[0xc3], SymbolScope::Compilation, None),
+            (
+                "caller",
+                &[0xe8, 1, 0, 0, 0, 0xc3],
+                SymbolScope::Linkage,
+                None,
+            ),
+            (
+                "helper",
+                &[0x90, 0x90, 0x90, 0xc3],
+                SymbolScope::Compilation,
+                None,
+            ),
+            ("unused", &[0x90, 0xc3], SymbolScope::Compilation, None),
+        ],
+        None,
+    );
+    // Mark the object executable so addresses join across sections.
+    bytes[16] = 2;
+    let artifact = ElfBackend.parse(&bytes).expect("linked fixture parses");
+
+    assert_eq!(artifact.indirect_references.len(), 1, "{artifact:#?}");
+    assert_eq!(dead_symbol_names(&artifact).0, vec!["unused".to_owned()]);
+}
+
+#[test]
+fn a_function_pointer_stored_in_data_is_not_dead() {
+    let artifact = ElfBackend
+        .parse(&functions_fixture(
+            &[
+                ("entry", &[0xc3], SymbolScope::Linkage, None),
+                ("handler", &[0x90, 0xc3], SymbolScope::Compilation, None),
+                (
+                    "caller",
+                    &[0xe8, 0, 0, 0, 0, 0xc3],
+                    SymbolScope::Linkage,
+                    Some((1, "helper", RelocationKind::Relative, 32, -4)),
+                ),
+                (
+                    "helper",
+                    &[0x90, 0x90, 0x90, 0xc3],
+                    SymbolScope::Compilation,
+                    None,
+                ),
+                (
+                    "unused",
+                    &[0x90, 0x90, 0xc3],
+                    SymbolScope::Compilation,
+                    None,
+                ),
+            ],
+            Some("handler"),
+        ))
+        .expect("data pointer fixture parses");
+
+    assert_eq!(artifact.indirect_references.len(), 1);
+    assert_eq!(dead_symbol_names(&artifact).0, vec!["unused".to_owned()]);
+}
+
 fn immediate_that_contains_call_opcode_fixture() -> Vec<u8> {
     let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
     let text = object.section_id(StandardSection::Text);
@@ -402,6 +732,45 @@ fn zero_sized_elf_alias_is_retained_without_claiming_implementation_bytes() {
     assert_eq!(alias.size, 0);
     assert!(alias.code.is_empty());
     assert_eq!(implementation.code, vec![0x90, 0xc3]);
+}
+
+#[test]
+fn sized_elf_alias_does_not_claim_the_bytes_of_the_symbol_it_shares() {
+    let artifact = ElfBackend
+        .parse(&sized_alias_fixture())
+        .expect("sized alias fixture parses");
+    let by_name = |name: &str| {
+        artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name.as_deref() == Some(name))
+            .expect("symbol record")
+    };
+    assert_eq!(artifact.symbols.len(), 3);
+    assert_eq!(by_name("complete").size, 2);
+    assert!(by_name("base").code.is_empty());
+    assert_eq!(by_name("base").size, 0);
+    assert_eq!(by_name("base").offset, by_name("complete").offset);
+    assert_eq!(by_name("twin").size, 2);
+
+    let report = crate::metrics::find_duplicates(&artifact);
+    assert_eq!(report.exact.len(), 1, "{report:#?}");
+    let group = &report.exact[0];
+    assert_eq!(group.duplicated_bytes, 2);
+    let mut offsets: Vec<_> = group.members.iter().map(|member| member.offset).collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    assert_eq!(offsets.len(), group.members.len(), "no two members overlap");
+}
+
+#[test]
+fn an_object_with_a_text_section_per_function_keeps_every_function() {
+    let count = 20_000;
+    let artifact = ElfBackend
+        .parse(&function_sections_fixture(count))
+        .expect("function-sections fixture parses");
+    assert_eq!(artifact.symbols.len(), count);
+    assert!(artifact.symbols.iter().all(|symbol| symbol.size == 2));
 }
 
 #[test]

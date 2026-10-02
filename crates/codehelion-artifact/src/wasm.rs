@@ -13,8 +13,9 @@ use crate::{
     ArtifactSection, ArtifactSourceMapping, ArtifactSymbol, NormalizedInstructions, UnresolvedCall,
 };
 use wasmparser::{
-    ConstExpr, CustomSectionReader, ElementItems, Encoding, ExternalKind, KnownCustom, Name,
-    Operator, Parser, Payload, TableInit, TypeRef, Validator, WasmFeatures,
+    CompositeInnerType, ConstExpr, CustomSectionReader, ElementItems, Encoding, ExternalKind,
+    KnownCustom, Name, Operator, Parser, Payload, SubType, TableInit, TypeRef, ValType, Validator,
+    WasmFeatures,
 };
 
 /// Version of the immediate-free WebAssembly opcode representation.
@@ -131,6 +132,14 @@ impl ArtifactBackend for WasmBackend {
                                 .insert(state.imported_functions, type_index);
                             state.imported_functions += 1;
                         }
+                    }
+                }
+                Payload::TypeSection(reader) => {
+                    for group in reader {
+                        let group = group.map_err(|error| malformed(error.to_string()))?;
+                        state
+                            .type_shapes
+                            .extend(group.types().map(plain_function_shape));
                     }
                 }
                 Payload::FunctionSection(reader) => {
@@ -381,6 +390,9 @@ struct ParseState {
     element_functions: BTreeSet<u32>,
     function_types: BTreeMap<u32, u32>,
     defined_function_types: Vec<u32>,
+    /// Structural identity of each type index, `None` for a type whose
+    /// equivalence with another cannot be read off its signature.
+    type_shapes: Vec<Option<String>>,
     /// Names the `name` custom section gives function indices.
     names: BTreeMap<u32, String>,
     /// Names the export section gives function indices.
@@ -410,6 +422,12 @@ fn resolved_name<'a>(
 }
 
 impl ParseState {
+    fn shape_of(&self, type_index: u32) -> Option<&str> {
+        self.type_shapes
+            .get(usize::try_from(type_index).ok()?)?
+            .as_deref()
+    }
+
     /// Return table references narrowed by observed indirect-call types.
     ///
     /// If no indirect call was seen, or an index has no type evidence, every
@@ -435,22 +453,60 @@ impl ParseState {
         if types.is_empty() {
             return self.element_functions.clone();
         }
-        let narrowed: BTreeSet<_> = self
-            .element_functions
+        // A call type or an element type with no comparable shape could accept
+        // or be accepted by a type declared elsewhere, so it keeps every
+        // element rooted.
+        let Some(call_shapes) = types
             .iter()
-            .filter(|index| {
-                self.function_types
-                    .get(index)
-                    .is_some_and(|ty| types.contains(ty))
-            })
-            .copied()
-            .collect();
+            .map(|ty| self.shape_of(*ty))
+            .collect::<Option<BTreeSet<_>>>()
+        else {
+            return self.element_functions.clone();
+        };
+        let mut narrowed = BTreeSet::new();
+        for index in &self.element_functions {
+            let Some(ty) = self.function_types.get(index) else {
+                continue;
+            };
+            match self.shape_of(*ty) {
+                Some(shape) if call_shapes.contains(shape) => {
+                    narrowed.insert(*index);
+                }
+                Some(_) => {}
+                None => return self.element_functions.clone(),
+            }
+        }
         if narrowed.is_empty() {
             self.element_functions.clone()
         } else {
             narrowed
         }
     }
+}
+
+/// The signature of a function type that only an identical signature can match.
+///
+/// `call_indirect` accepts any subtype of its type, and types are equal by
+/// structure, so two separately declared types with one signature are
+/// interchangeable. That holds only for a final type with no supertype and no
+/// reference to another module type; anything else has no signature-only
+/// identity.
+fn plain_function_shape(sub_type: &SubType) -> Option<String> {
+    let CompositeInnerType::Func(signature) = &sub_type.composite_type.inner else {
+        return None;
+    };
+    let composite = &sub_type.composite_type;
+    let names_module_type = signature
+        .params()
+        .iter()
+        .chain(signature.results())
+        .any(|value| matches!(value, ValType::Ref(reference) if reference.type_index().is_some() || reference.is_exact_type_ref()));
+    (sub_type.is_final
+        && sub_type.supertype_idxs.is_empty()
+        && composite.descriptor_idx.is_none()
+        && composite.describes_idx.is_none()
+        && !names_module_type)
+        .then(|| format!("{}{signature:?}", u8::from(composite.shared)))
 }
 
 /// One body before its source-level function name has necessarily been seen.
@@ -900,6 +956,33 @@ mod tests {
         let dead = metrics::dead_code_candidates(&artifact).expect("table establishes roots");
         assert_eq!(dead.symbols, vec![artifact.symbols[0].fingerprint]);
         assert!(dead.definitive);
+    }
+
+    /// `main` calls through type 1, which is declared separately from the
+    /// type 0 of the one element that matches it by structure.
+    #[test]
+    fn an_indirect_call_reaches_a_structurally_equal_type_declared_elsewhere() {
+        let module = [
+            0, 97, 115, 109, 1, 0, 0, 0, // magic and version
+            1, 11, 3, 96, 0, 0, 96, 0, 0, 96, 1, 127, 0, // types: () () (i32)
+            3, 5, 4, 0, 1, 2, 1, // functions: types 0, 1, 2, 1
+            4, 4, 1, 112, 0, 3, // table of three funcrefs
+            7, 8, 1, 4, 109, 97, 105, 110, 0, 3, // export "main" as function 3
+            9, 8, 1, 0, 65, 0, 11, 2, 0, 2, // elements: functions 0 and 2
+            10, 21, 4, 2, 0, 11, 3, 0, 1, 11, 4, 0, 1, 1, 11, // bodies 0..2
+            7, 0, 65, 0, 17, 1, 0, 11, // body 3: call_indirect type 1
+        ];
+        let artifact = WasmBackend.parse(&module).expect("module parses");
+
+        let dead = metrics::dead_code_candidates(&artifact).expect("an export establishes roots");
+        assert!(
+            !dead.symbols.contains(&artifact.symbols[0].fingerprint),
+            "function 0 has the called signature"
+        );
+        assert!(
+            dead.symbols.contains(&artifact.symbols[2].fingerprint),
+            "function 2 takes an i32 and cannot be the target"
+        );
     }
 
     /// One empty function type, two defined functions, and an exported first
@@ -1404,6 +1487,7 @@ mod tests {
         let state = ParseState {
             element_functions: BTreeSet::from([0, 1, 2]),
             function_types: BTreeMap::from([(0, 7), (1, 8), (2, 7)]),
+            type_shapes: shapes_for(&[(7, Some("a")), (8, Some("b"))]),
             functions: vec![PendingFunction {
                 index: 3,
                 offset: 0,
@@ -1420,5 +1504,102 @@ mod tests {
         };
 
         assert_eq!(state.indirect_root_indices(), BTreeSet::from([0, 2]));
+    }
+
+    /// Type shapes for a module whose declared types are `declared`, with every
+    /// undeclared index below the highest one left without a shape.
+    fn shapes_for(declared: &[(usize, Option<&str>)]) -> Vec<Option<String>> {
+        let len = declared
+            .iter()
+            .map(|(index, _)| index + 1)
+            .max()
+            .unwrap_or(0);
+        let mut shapes = vec![None; len];
+        for (index, shape) in declared {
+            shapes[*index] = shape.map(str::to_owned);
+        }
+        shapes
+    }
+
+    fn state_calling_type(
+        call_type: u32,
+        function_types: [(u32, u32); 3],
+        type_shapes: Vec<Option<String>>,
+    ) -> ParseState {
+        ParseState {
+            element_functions: BTreeSet::from([0, 1, 2]),
+            function_types: BTreeMap::from(function_types),
+            type_shapes,
+            functions: vec![PendingFunction {
+                index: 3,
+                offset: 0,
+                code: Vec::new(),
+                normalized: NormalizedInstructions {
+                    version: WASM_NORMALIZATION_VERSION.to_owned(),
+                    bytes: Vec::new(),
+                },
+                body: Vec::new(),
+                calls: vec![PendingCall::Indirect {
+                    type_index: call_type,
+                }],
+                references: BTreeSet::new(),
+            }],
+            ..ParseState::default()
+        }
+    }
+
+    #[test]
+    fn separately_declared_identical_signatures_are_one_dispatch_type() {
+        let state = state_calling_type(
+            7,
+            [(0, 7), (1, 8), (2, 9)],
+            shapes_for(&[(7, Some("a")), (8, Some("b")), (9, Some("a"))]),
+        );
+
+        assert_eq!(state.indirect_root_indices(), BTreeSet::from([0, 2]));
+    }
+
+    #[test]
+    fn a_type_without_a_signature_only_identity_keeps_every_element_rooted() {
+        let state = state_calling_type(
+            7,
+            [(0, 7), (1, 8), (2, 9)],
+            shapes_for(&[(7, Some("a")), (8, Some("b")), (9, None)]),
+        );
+        assert_eq!(state.indirect_root_indices(), BTreeSet::from([0, 1, 2]));
+
+        let state = state_calling_type(
+            9,
+            [(0, 7), (1, 8), (2, 9)],
+            shapes_for(&[(7, Some("a")), (8, Some("b")), (9, None)]),
+        );
+        assert_eq!(state.indirect_root_indices(), BTreeSet::from([0, 1, 2]));
+    }
+
+    #[test]
+    fn only_a_final_unrelated_function_type_has_a_signature_only_identity() {
+        use wasmparser::{FuncType, RefType};
+
+        let plain = SubType::func(FuncType::new([ValType::I32], []), false);
+        let same = SubType::func(FuncType::new([ValType::I32], []), false);
+        let other = SubType::func(FuncType::new([ValType::I64], []), false);
+        assert!(plain_function_shape(&plain).is_some());
+        assert_eq!(plain_function_shape(&plain), plain_function_shape(&same));
+        assert_ne!(plain_function_shape(&plain), plain_function_shape(&other));
+
+        let mut open = SubType::func(FuncType::new([ValType::I32], []), false);
+        open.is_final = false;
+        assert!(plain_function_shape(&open).is_none());
+
+        let mut derived = SubType::func(FuncType::new([ValType::I32], []), false);
+        derived.supertype_idxs = vec![wasmparser::PackedIndex::from_module_index(0).unwrap()];
+        assert!(plain_function_shape(&derived).is_none());
+
+        let reference = ValType::Ref(RefType::concrete(
+            true,
+            wasmparser::PackedIndex::from_module_index(0).unwrap(),
+        ));
+        let referencing = SubType::func(FuncType::new([reference], []), false);
+        assert!(plain_function_shape(&referencing).is_none());
     }
 }

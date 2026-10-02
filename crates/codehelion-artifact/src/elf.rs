@@ -11,7 +11,7 @@ use crate::{
     ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactError, ArtifactFingerprint,
     ArtifactFormat, ArtifactIr, ArtifactSymbol, UnresolvedCall,
 };
-use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind};
+use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 use object::{
     Architecture, Endianness, Object, ObjectKind, ObjectSection, RelocationKind, RelocationTarget,
     SectionKind,
@@ -127,12 +127,15 @@ impl ElfBackend {
         }
         record_entry_point(file.entry(), &symbol_addresses, &mut ir);
         record_init_fini_roots(&file, &symbol_fingerprints, &symbol_addresses, &mut ir);
-        ir.calls = x86_direct_calls(
+        let transfers = x86_transfers(
             &file,
             &ir.symbols,
             &symbol_fingerprints,
             &symbol_addresses_by_section,
+            &symbol_addresses,
         );
+        ir.calls = transfers.calls;
+        ir.indirect_references.extend(transfers.address_taken);
         attach_dwarf_frames(
             debug_file.as_ref().unwrap_or(&file),
             &text.addresses,
@@ -259,110 +262,418 @@ fn pointer_value(bytes: &[u8], endianness: Endianness) -> Option<u64> {
     }
 }
 
-fn x86_direct_calls(
+/// Control transfers and address-taken functions an x86 ELF's code establishes.
+#[derive(Debug, Default)]
+struct X86Transfers {
+    /// A call or a jump that leaves the function holding it, with its target
+    /// when the object names one.
+    calls: Vec<ArtifactCall>,
+    /// Functions whose address is stored, loaded, or otherwise handed out, and
+    /// which therefore run without any call edge reaching them.
+    address_taken: BTreeSet<ArtifactFingerprint>,
+}
+
+/// Where one function lies in its section's address space.
+#[derive(Debug, Clone, Copy)]
+struct FunctionRange {
+    start: u64,
+    end: u64,
+    fingerprint: ArtifactFingerprint,
+}
+
+/// Whether a section's pointers can name a function's address.
+fn holds_function_pointers<'data>(section: &impl ObjectSection<'data>) -> bool {
+    matches!(
+        section.kind(),
+        SectionKind::Data | SectionKind::ReadOnlyData | SectionKind::ReadOnlyDataWithRel
+    ) && !matches!(section.name(), Ok(name) if name.starts_with(".eh_frame") || name.starts_with(".debug"))
+}
+
+/// What resolving a branch inside one text section needs to know about it.
+struct SectionBranches<'a> {
+    section: object::SectionIndex,
+    address: u64,
+    /// Rel32 branch operands the object relocates, by section offset.
+    relocation_targets: HashMap<u64, RelocationTarget>,
+    /// Functions of the section sorted by start address.
+    ranges: Vec<FunctionRange>,
+    fingerprints: &'a HashMap<object::SymbolIndex, Option<ArtifactFingerprint>>,
+    addresses: &'a HashMap<(object::SectionIndex, u64), ArtifactFingerprint>,
+}
+
+impl SectionBranches<'_> {
+    /// Resolve a near branch to the function it enters.
+    ///
+    /// `inside` is the address span of the function holding the branch. A
+    /// jump that stays inside it is control flow rather than a transfer, and
+    /// yields neither a target nor a reason. A relocated operand the branch
+    /// consumed is added to `consumed`.
+    fn resolve(
+        &self,
+        instruction: &Instruction,
+        is_jump: bool,
+        inside: &std::ops::Range<u64>,
+        consumed: &mut BTreeSet<u64>,
+    ) -> (Option<ArtifactFingerprint>, Option<UnresolvedCall>) {
+        let relocation = rel32_displacement(instruction, self.address)
+            .and_then(|offset| self.relocation_targets.get(&offset).map(|t| (offset, t)));
+        if let Some((offset, target)) = relocation {
+            consumed.insert(offset);
+            return match target {
+                RelocationTarget::Symbol(index) => self
+                    .fingerprints
+                    .get(index)
+                    .and_then(|value| *value)
+                    .map_or((None, Some(UnresolvedCall::ExternalImport)), |target| {
+                        (Some(target), None)
+                    }),
+                _ => (None, Some(UnresolvedCall::MissingRelocation)),
+            };
+        }
+        let destination = instruction.near_branch_target();
+        if is_jump && inside.contains(&destination) {
+            return (None, None);
+        }
+        let target = self
+            .addresses
+            .get(&(self.section, destination))
+            .copied()
+            .or_else(|| {
+                is_jump
+                    .then(|| containing_function(&self.ranges, destination))
+                    .flatten()
+            });
+        (
+            target,
+            target
+                .is_none()
+                .then_some(UnresolvedCall::MissingRelocation),
+        )
+    }
+}
+
+const fn is_jump(mnemonic: Mnemonic) -> bool {
+    matches!(
+        mnemonic,
+        Mnemonic::Jmp
+            | Mnemonic::Ja
+            | Mnemonic::Jae
+            | Mnemonic::Jb
+            | Mnemonic::Jbe
+            | Mnemonic::Je
+            | Mnemonic::Jne
+            | Mnemonic::Jg
+            | Mnemonic::Jge
+            | Mnemonic::Jl
+            | Mnemonic::Jle
+            | Mnemonic::Jno
+            | Mnemonic::Jnp
+            | Mnemonic::Jns
+            | Mnemonic::Jo
+            | Mnemonic::Jp
+            | Mnemonic::Js
+    )
+}
+
+/// Address ranges of the non-empty functions of one section, sorted by start.
+fn function_ranges(
+    functions: &[&ArtifactSymbol],
+    section_address: u64,
+    section_offset: u64,
+) -> Vec<FunctionRange> {
+    let mut ranges: Vec<_> = functions
+        .iter()
+        .filter(|function| !function.code.is_empty())
+        .filter_map(|function| {
+            let start =
+                section_address.checked_add(function.offset.checked_sub(section_offset)?)?;
+            let length = u64::try_from(function.code.len()).ok()?;
+            Some(FunctionRange {
+                start,
+                end: start.saturating_add(length),
+                fingerprint: function.fingerprint,
+            })
+        })
+        .collect();
+    ranges.sort_by_key(|range| range.start);
+    ranges
+}
+
+/// Decode one function and record the transfers and address-taking in it.
+#[allow(clippy::too_many_arguments)]
+fn scan_function(
+    caller: &ArtifactSymbol,
+    ip: u64,
+    inside: &std::ops::Range<u64>,
+    bitness: u32,
+    branches: &SectionBranches<'_>,
+    global_addresses: &HashMap<u64, ArtifactFingerprint>,
+    consumed: &mut BTreeSet<u64>,
+    transfers: &mut X86Transfers,
+) {
+    let mut decoder = Decoder::with_ip(bitness, &caller.code, ip, DecoderOptions::NONE);
+    while decoder.can_decode() {
+        let instruction = decoder.decode();
+        if instruction.is_invalid() {
+            continue;
+        }
+        let is_call = instruction.mnemonic() == Mnemonic::Call;
+        let is_jump = is_jump(instruction.mnemonic());
+        if !is_call && !is_jump {
+            if !global_addresses.is_empty() {
+                note_address_taken(&instruction, global_addresses, transfers);
+            }
+            continue;
+        }
+        let near = matches!(
+            instruction.op0_kind(),
+            OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+        );
+        // A jump through a scaled table is a switch inside the function. A jump
+        // through a register or a plain memory slot may be a tail call, which
+        // this backend cannot name.
+        if is_jump
+            && !near
+            && instruction.op0_kind() == OpKind::Memory
+            && instruction.memory_index() != Register::None
+        {
+            continue;
+        }
+        // A call through a register, a memory operand, or a far pointer reaches
+        // a callee this backend cannot name, and virtual dispatch is compiled to
+        // exactly those forms. Dropping it would leave a graph that looks
+        // complete while missing every edge a vtable supplies.
+        let (target, unresolved) = if near {
+            branches.resolve(&instruction, is_jump, inside, consumed)
+        } else {
+            (None, Some(UnresolvedCall::NativeIndirect))
+        };
+        if target.is_some() || unresolved.is_some() {
+            transfers.calls.push(ArtifactCall {
+                caller: caller.fingerprint,
+                target,
+                unresolved,
+            });
+        }
+    }
+}
+
+fn x86_transfers(
     file: &object::File<'_>,
     symbols: &[ArtifactSymbol],
     fingerprints: &HashMap<object::SymbolIndex, Option<ArtifactFingerprint>>,
     addresses: &HashMap<(object::SectionIndex, u64), ArtifactFingerprint>,
-) -> Vec<ArtifactCall> {
+    global_addresses: &HashMap<u64, ArtifactFingerprint>,
+) -> X86Transfers {
     let bitness = match file.architecture() {
         Architecture::I386 => 32,
         Architecture::X86_64 => 64,
-        _ => return Vec::new(),
+        _ => return X86Transfers::default(),
     };
     if symbols.is_empty() {
-        return Vec::new();
+        return X86Transfers::default();
     }
-    let mut calls = Vec::new();
+    let mut transfers = X86Transfers::default();
+    let mut callers_by_section: HashMap<Option<u32>, Vec<&ArtifactSymbol>> = HashMap::new();
+    for symbol in symbols {
+        callers_by_section
+            .entry(symbol.section)
+            .or_default()
+            .push(symbol);
+    }
     for section in file
         .sections()
         .filter(|section| section.kind() == SectionKind::Text)
     {
         let (section_offset, _) = section.file_range().unwrap_or((0, 0));
         let section_index = u32::try_from(section.index().0).ok();
+        let mut section_relocations = Vec::new();
         let mut relocation_targets = HashMap::new();
         for (offset, relocation) in section.relocations() {
-            if !matches!(
+            section_relocations.push((offset, relocation.target()));
+            if matches!(
                 relocation.kind(),
                 RelocationKind::Relative | RelocationKind::PltRelative
             ) {
-                continue;
+                relocation_targets.insert(offset, relocation.target());
             }
-            relocation_targets.insert(offset, relocation.target());
         }
-        for caller in symbols
+        let callers = callers_by_section
+            .get(&section_index)
+            .map_or(&[][..], Vec::as_slice);
+        let ranges = function_ranges(callers, section.address(), section_offset);
+        let branches = SectionBranches {
+            section: section.index(),
+            address: section.address(),
+            relocation_targets,
+            ranges,
+            fingerprints,
+            addresses,
+        };
+        let mut consumed = BTreeSet::new();
+        for caller in callers {
+            let Some(ip) = caller
+                .offset
+                .checked_sub(section_offset)
+                .and_then(|relative| section.address().checked_add(relative))
+            else {
+                continue;
+            };
+            let inside = ip..ip.saturating_add(u64::try_from(caller.code.len()).unwrap_or(0));
+            scan_function(
+                caller,
+                ip,
+                &inside,
+                bitness,
+                &branches,
+                global_addresses,
+                &mut consumed,
+                &mut transfers,
+            );
+        }
+        // A relocation no branch consumed hands a function's address to
+        // whatever the instruction does with it.
+        for (_, target) in section_relocations
             .iter()
-            .filter(|symbol| symbol.section == section_index)
+            .filter(|(offset, _)| !consumed.contains(offset))
         {
-            let Some(relative) = caller.offset.checked_sub(section_offset) else {
-                continue;
-            };
-            let Some(ip) = section.address().checked_add(relative) else {
-                continue;
-            };
-            let mut decoder = Decoder::with_ip(bitness, &caller.code, ip, DecoderOptions::NONE);
-            while decoder.can_decode() {
-                let instruction = decoder.decode();
-                if instruction.is_invalid() || instruction.mnemonic() != Mnemonic::Call {
-                    continue;
-                }
-                // A call through a register, a memory operand, or a far pointer
-                // reaches a callee this backend cannot name, and virtual
-                // dispatch is compiled to exactly those forms. Dropping it
-                // would leave a graph that looks complete while missing every
-                // edge a vtable supplies.
-                let operand_offset = matches!(
-                    instruction.op0_kind(),
-                    OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
-                )
-                .then(|| {
-                    instruction
-                        .ip()
-                        .checked_sub(section.address())
-                        .and_then(|offset| offset.checked_add(1))
-                });
-                let (target, unresolved) = match operand_offset {
-                    None => (None, Some(UnresolvedCall::NativeIndirect)),
-                    // A near branch whose operand lies outside this section is
-                    // a target the parser could not read, not an external one.
-                    Some(None) => (None, Some(UnresolvedCall::MissingRelocation)),
-                    Some(Some(operand_offset)) => {
-                        relocation_targets.get(&operand_offset).map_or_else(
-                            || {
-                                let target = addresses
-                                    .get(&(section.index(), instruction.near_branch_target()))
-                                    .copied();
-                                (
-                                    target,
-                                    target
-                                        .is_none()
-                                        .then_some(UnresolvedCall::MissingRelocation),
-                                )
-                            },
-                            |relocation_target| match relocation_target {
-                                RelocationTarget::Symbol(index) => {
-                                    fingerprints.get(index).and_then(|value| *value).map_or(
-                                        (None, Some(UnresolvedCall::ExternalImport)),
-                                        |target| (Some(target), None),
-                                    )
-                                }
-                                RelocationTarget::Section(_) | RelocationTarget::Absolute => {
-                                    (None, Some(UnresolvedCall::MissingRelocation))
-                                }
-                                _ => (None, Some(UnresolvedCall::MissingRelocation)),
-                            },
-                        )
-                    }
-                };
-                calls.push(ArtifactCall {
-                    caller: caller.fingerprint,
-                    target,
-                    unresolved,
-                });
-            }
+            note_relocation_target(
+                file,
+                target,
+                fingerprints,
+                &callers_by_section,
+                &mut transfers.address_taken,
+            );
         }
     }
-    calls
+    note_data_references(
+        file,
+        fingerprints,
+        &callers_by_section,
+        global_addresses,
+        &mut transfers.address_taken,
+    );
+    transfers
+}
+
+/// Record the functions that data sections and dynamic relocations point at.
+fn note_data_references(
+    file: &object::File<'_>,
+    fingerprints: &HashMap<object::SymbolIndex, Option<ArtifactFingerprint>>,
+    callers_by_section: &HashMap<Option<u32>, Vec<&ArtifactSymbol>>,
+    global_addresses: &HashMap<u64, ArtifactFingerprint>,
+    address_taken: &mut BTreeSet<ArtifactFingerprint>,
+) {
+    for section in file.sections().filter(holds_function_pointers) {
+        for (_, relocation) in section.relocations() {
+            note_relocation_target(
+                file,
+                &relocation.target(),
+                fingerprints,
+                callers_by_section,
+                address_taken,
+            );
+        }
+        if !global_addresses.is_empty()
+            && let Ok(data) = section.data()
+        {
+            address_taken.extend(pointer_roots(
+                data,
+                file.is_64(),
+                file.endianness(),
+                global_addresses,
+            ));
+        }
+    }
+    if global_addresses.is_empty() {
+        return;
+    }
+    for (_, relocation) in file.dynamic_relocations().into_iter().flatten() {
+        if relocation.target() == RelocationTarget::Absolute
+            && let Ok(address) = u64::try_from(relocation.addend())
+            && let Some(fingerprint) = global_addresses.get(&address)
+        {
+            address_taken.insert(*fingerprint);
+        }
+    }
+}
+
+/// The function whose bytes contain `address`, among ranges sorted by start.
+fn containing_function(ranges: &[FunctionRange], address: u64) -> Option<ArtifactFingerprint> {
+    let after = ranges.partition_point(|range| range.start <= address);
+    ranges
+        .get(after.checked_sub(1)?)
+        .filter(|range| address < range.end)
+        .map(|range| range.fingerprint)
+}
+
+/// Record the function a relocation points at as address-taken.
+///
+/// A section target names no single function, so every function in a text
+/// section it points into counts.
+fn note_relocation_target(
+    file: &object::File<'_>,
+    target: &RelocationTarget,
+    fingerprints: &HashMap<object::SymbolIndex, Option<ArtifactFingerprint>>,
+    callers_by_section: &HashMap<Option<u32>, Vec<&ArtifactSymbol>>,
+    address_taken: &mut BTreeSet<ArtifactFingerprint>,
+) {
+    match target {
+        RelocationTarget::Symbol(index) => {
+            if let Some(Some(fingerprint)) = fingerprints.get(index) {
+                address_taken.insert(*fingerprint);
+            }
+        }
+        RelocationTarget::Section(index)
+            if file
+                .section_by_index(*index)
+                .is_ok_and(|section| section.kind() == SectionKind::Text) =>
+        {
+            address_taken.extend(
+                callers_by_section
+                    .get(&u32::try_from(index.0).ok())
+                    .into_iter()
+                    .flatten()
+                    .map(|symbol| symbol.fingerprint),
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Record a function whose address an instruction of a linked image computes.
+fn note_address_taken(
+    instruction: &Instruction,
+    addresses: &HashMap<u64, ArtifactFingerprint>,
+    transfers: &mut X86Transfers,
+) {
+    if instruction.is_ip_rel_memory_operand()
+        && let Some(fingerprint) = addresses.get(&instruction.ip_rel_memory_address())
+    {
+        transfers.address_taken.insert(*fingerprint);
+    }
+    for operand in 0..instruction.op_count() {
+        if matches!(
+            instruction.op_kind(operand),
+            OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate32to64
+        ) && let Some(fingerprint) = addresses.get(&instruction.immediate(operand))
+        {
+            transfers.address_taken.insert(*fingerprint);
+        }
+    }
+}
+
+/// Section offset of the displacement a relocation can land on in a near
+/// branch, which is its last four bytes. A rel8 branch has none.
+fn rel32_displacement(instruction: &Instruction, section_address: u64) -> Option<u64> {
+    if instruction.len() < 5 {
+        return None;
+    }
+    instruction
+        .ip()
+        .checked_sub(section_address)?
+        .checked_add(u64::try_from(instruction.len()).ok()?)?
+        .checked_sub(4)
 }
 
 const fn malformed(message: String) -> ArtifactError {

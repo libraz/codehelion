@@ -22,19 +22,19 @@ const MAX_DWARF_DEBUG_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, Copy)]
 pub struct DwarfBudget {
     /// Retained subprogram address ranges.
-    frames: usize,
+    pub(crate) frames: usize,
     /// Retained line-table rows.
-    line_records: usize,
+    pub(crate) line_records: usize,
     /// Frame indexes the address join returns across all symbols.
-    frame_matches: usize,
+    pub(crate) frame_matches: usize,
     /// Source-position candidates gathered for one symbol.
-    symbol_candidates: usize,
+    pub(crate) symbol_candidates: usize,
     /// Inline frames retained for one symbol.
-    symbol_inline_frames: usize,
+    pub(crate) symbol_inline_frames: usize,
     /// Inline frames retained across all symbols.
-    inline_frames: usize,
+    pub(crate) inline_frames: usize,
     /// Source-path bytes copied into retained inline frames.
-    inline_source_bytes: usize,
+    pub(crate) inline_source_bytes: usize,
 }
 
 impl DwarfBudget {
@@ -169,8 +169,11 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
             ) {
                 continue;
             }
-            let Some(frame) = source_frame(&dwarf, &unit, entry)
-                .and_then(|frame| InternedFrame::intern(frame, &mut line_paths))
+            let frame = source_frame(&dwarf, &unit, entry).unwrap_or_else(|_| {
+                ir.capabilities.debug_info_unreadable = true;
+                None
+            });
+            let Some(frame) = frame.and_then(|frame| InternedFrame::intern(frame, &mut line_paths))
             else {
                 continue;
             };
@@ -201,15 +204,17 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
                 }
             }
         }
-        let (records, truncated) = line_frames(
+        let lines = line_frames(
             &dwarf,
             &unit,
             &mut line_paths,
             budget.line_records.saturating_sub(line_records.len()),
         );
-        line_records.extend(records);
-        if truncated {
+        line_records.extend(lines.frames);
+        if lines.unreadable || lines.truncated {
             ir.capabilities.debug_info_unreadable = true;
+        }
+        if lines.truncated {
             break 'collect;
         }
     }
@@ -222,7 +227,7 @@ fn attach_dwarf_frames_within<S: BuildHasher>(
         .iter()
         .map(|(fingerprint, (address, size))| (*fingerprint, *address, *size))
         .collect();
-    symbols.sort_by_key(|(_, address, _)| *address);
+    symbols.sort_by_key(|(fingerprint, address, _)| (*address, *fingerprint));
     let frame_matches = frames_at_symbol_addresses(&frames, &symbols, budget.frame_matches);
     if frame_matches.truncated {
         ir.capabilities.debug_info_unreadable = true;
@@ -332,7 +337,10 @@ fn candidate_source_bytes<'a>(
 }
 
 /// Longest prefix of source paths whose bytes fit in a byte budget.
-fn source_path_prefix_within(lengths: impl IntoIterator<Item = usize>, budget: usize) -> usize {
+pub(crate) fn source_path_prefix_within(
+    lengths: impl IntoIterator<Item = usize>,
+    budget: usize,
+) -> usize {
     let mut used = 0usize;
     let mut retained = 0usize;
     for length in lengths {
@@ -484,13 +492,13 @@ impl DwarfLineFrame {
 
 /// Deduplicate resolved source paths while retaining compact line records.
 #[derive(Debug, Default)]
-struct DwarfPathInterner {
+pub(crate) struct DwarfPathInterner {
     indexes: HashMap<String, usize>,
     values: Vec<String>,
 }
 
 impl DwarfPathInterner {
-    fn intern(&mut self, path: String) -> Option<u32> {
+    pub(crate) fn intern(&mut self, path: String) -> Option<u32> {
         if let Some(index) = self.indexes.get(&path) {
             return u32::try_from(*index).ok();
         }
@@ -501,31 +509,52 @@ impl DwarfPathInterner {
         Some(index)
     }
 
-    fn get(&self, index: u32) -> &str {
+    pub(crate) fn get(&self, index: u32) -> &str {
         self.values
             .get(index as usize)
             .map_or("<invalid-dwarf-path>", String::as_str)
     }
 }
 
+/// The rows of one unit's line table and what kept the read from being whole.
+struct LineFrames {
+    frames: Vec<DwarfLineFrame>,
+    /// Rows were left uncollected because the budget ran out.
+    truncated: bool,
+    /// The line program or a string it names could not be read, so the rows
+    /// are a prefix of the table or lack a path.
+    unreadable: bool,
+}
+
 /// Collect a unit's line-table rows, up to `budget` of them.
 ///
 /// One row costs a byte of debug information and a record here, so the row
-/// count is bounded explicitly; the second return value reports whether rows
-/// were left uncollected.
+/// count is bounded explicitly.
 fn line_frames<R: Reader>(
     dwarf: &gimli::Dwarf<R>,
     unit: &gimli::Unit<R>,
     paths: &mut DwarfPathInterner,
     budget: usize,
-) -> (Vec<DwarfLineFrame>, bool) {
+) -> LineFrames {
+    let mut collected = LineFrames {
+        frames: Vec::new(),
+        truncated: false,
+        unreadable: false,
+    };
     let Some(program) = unit.line_program.clone() else {
-        return (Vec::new(), false);
+        return collected;
     };
     let compilation_directory = unit.comp_dir.as_ref().and_then(reader_string);
     let mut rows = program.rows();
-    let mut frames = Vec::new();
-    while let Ok(Some((header, row))) = rows.next_row() {
+    loop {
+        let (header, row) = match rows.next_row() {
+            Ok(Some(next)) => next,
+            Ok(None) => break,
+            Err(_) => {
+                collected.unreadable = true;
+                break;
+            }
+        };
         if row.end_sequence() {
             continue;
         }
@@ -535,17 +564,25 @@ fn line_frames<R: Reader>(
         let Some(file) = row.file(header) else {
             continue;
         };
-        let Some(source) = dwarf
-            .attr_string(unit, file.path_name())
-            .ok()
-            .and_then(|value| reader_string(&value))
-        else {
+        let Ok(source) = dwarf.attr_string(unit, file.path_name()) else {
+            collected.unreadable = true;
             continue;
         };
-        let directory = file
+        let Some(source) = reader_string(&source) else {
+            continue;
+        };
+        let directory = match file
             .directory(header)
-            .and_then(|value| dwarf.attr_string(unit, value).ok())
-            .and_then(|value| reader_string(&value));
+            .map(|value| dwarf.attr_string(unit, value))
+        {
+            Some(Err(_)) => {
+                collected.unreadable = true;
+                None
+            }
+            other => other
+                .and_then(Result::ok)
+                .and_then(|value| reader_string(&value)),
+        };
         let column = match row.column() {
             gimli::ColumnType::LeftEdge => None,
             gimli::ColumnType::Column(value) => u32::try_from(value.get()).ok(),
@@ -557,17 +594,18 @@ fn line_frames<R: Reader>(
         )) else {
             continue;
         };
-        if frames.len() >= budget {
-            return (frames, true);
+        if collected.frames.len() >= budget {
+            collected.truncated = true;
+            break;
         }
-        frames.push(DwarfLineFrame {
+        collected.frames.push(DwarfLineFrame {
             address: row.address(),
             source,
             line,
             column: column.unwrap_or(0),
         });
     }
-    (frames, false)
+    collected
 }
 
 /// File-table index of an attribute that names a declared source file.
@@ -588,7 +626,7 @@ fn source_frame<R: Reader>(
     dwarf: &gimli::Dwarf<R>,
     unit: &gimli::Unit<R>,
     entry: &gimli::DebuggingInformationEntry<R>,
-) -> Option<ArtifactInlineFrame> {
+) -> Result<Option<ArtifactInlineFrame>, gimli::Error> {
     let attributes = if entry.tag() == gimli::DW_TAG_inlined_subroutine {
         (
             gimli::DW_AT_call_file,
@@ -602,18 +640,25 @@ fn source_frame<R: Reader>(
             gimli::DW_AT_decl_column,
         )
     };
-    let file_index = entry
+    let Some(file_index) = entry
         .attr_value(attributes.0)
-        .and_then(|value| file_index_value(&value))?;
-    let line_program = unit.line_program.as_ref()?;
-    let file = line_program.header().file(file_index)?;
-    let source = dwarf
-        .attr_string(unit, file.path_name())
-        .ok()
-        .and_then(|value| reader_string(&value))?;
+        .and_then(|value| file_index_value(&value))
+    else {
+        return Ok(None);
+    };
+    let Some(line_program) = unit.line_program.as_ref() else {
+        return Ok(None);
+    };
+    let Some(file) = line_program.header().file(file_index) else {
+        return Ok(None);
+    };
+    let Some(source) = reader_string(&dwarf.attr_string(unit, file.path_name())?) else {
+        return Ok(None);
+    };
     let directory = file
         .directory(line_program.header())
-        .and_then(|value| dwarf.attr_string(unit, value).ok())
+        .map(|value| dwarf.attr_string(unit, value))
+        .transpose()?
         .and_then(|value| reader_string(&value));
     let compilation_directory = unit.comp_dir.as_ref().and_then(reader_string);
     let line = entry
@@ -624,7 +669,7 @@ fn source_frame<R: Reader>(
         .attr_value(attributes.2)
         .and_then(|value| value.udata_value())
         .and_then(|value| u32::try_from(value).ok());
-    Some(ArtifactInlineFrame {
+    Ok(Some(ArtifactInlineFrame {
         evidence_kind: crate::ArtifactSourceLocationEvidenceKind::Dwarf,
         source: resolve_source_path(
             &source,
@@ -633,7 +678,7 @@ fn source_frame<R: Reader>(
         ),
         line,
         column,
-    })
+    }))
 }
 
 fn reader_string<R: Reader>(value: &R) -> Option<String> {
@@ -1078,6 +1123,99 @@ mod tests {
             .map(|range| (range.fingerprint, (range.address, range.size)))
             .collect();
         attach_dwarf_frames_within(&file, &addresses, &mut ir, budget);
+        ir
+    }
+
+    /// Two symbols at one address spend a shared frame budget in a fixed
+    /// order, whatever order the join table yields them in.
+    #[test]
+    fn aliases_at_one_address_spend_a_shared_budget_in_fingerprint_order() {
+        let fixture = DwarfFixture {
+            functions: 2,
+            subprograms: 0,
+            overlapping_ranges: false,
+            line_rows: 12,
+            distinct_row_lines: true,
+            second_source: None,
+        };
+        let bytes = fixture.build();
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        for _ in 0..16 {
+            let mut ir = ArtifactIr::empty(ArtifactFormat::Elf, &bytes);
+            let mut addresses: HashMap<_, _> = crate::native::collect_text_symbols(&file, &mut ir)
+                .unwrap()
+                .into_iter()
+                .map(|range| (range.fingerprint, (range.address, range.size)))
+                .collect();
+            let shared = *addresses.values().min().unwrap();
+            for value in addresses.values_mut() {
+                *value = shared;
+            }
+            attach_dwarf_frames_within(
+                &file,
+                &addresses,
+                &mut ir,
+                DwarfBudget {
+                    inline_frames: 3,
+                    ..DwarfBudget::default()
+                },
+            );
+
+            let first = addresses.keys().min().unwrap();
+            for symbol in &ir.symbols {
+                assert_eq!(
+                    symbol.inline_stack.is_empty(),
+                    symbol.fingerprint != *first,
+                    "{:?} should{} keep the frames",
+                    symbol.name,
+                    if symbol.fingerprint == *first {
+                        ""
+                    } else {
+                        " not"
+                    }
+                );
+            }
+        }
+    }
+
+    /// A line program that fails partway leaves a prefix of its rows, which
+    /// must not be reported as the whole table.
+    #[test]
+    fn a_line_program_that_cannot_be_read_to_its_end_marks_the_debug_information_unreadable() {
+        let fixture = DwarfFixture {
+            functions: 1,
+            subprograms: 0,
+            overlapping_ranges: false,
+            line_rows: 4,
+            distinct_row_lines: true,
+            second_source: None,
+        };
+        let mut bytes = fixture.build();
+        let intact = attach_bytes(&bytes);
+        assert!(!intact.capabilities.debug_info_unreadable);
+
+        let table = debug_line(4, true, None);
+        let at = bytes
+            .windows(table.len())
+            .position(|window| window == table)
+            .expect("line table in the image");
+        // The end-of-sequence marker now declares more bytes than remain.
+        let end = at + table.len();
+        bytes[end - 2] = 0x7f;
+        let damaged = attach_bytes(&bytes);
+
+        assert!(damaged.capabilities.debug_info_unreadable);
+    }
+
+    fn attach_bytes(bytes: &[u8]) -> ArtifactIr {
+        let file = object::File::parse(bytes).unwrap();
+        let mut ir = ArtifactIr::empty(ArtifactFormat::Elf, bytes);
+        let addresses: HashMap<_, _> = crate::native::collect_text_symbols(&file, &mut ir)
+            .unwrap()
+            .into_iter()
+            .map(|range| (range.fingerprint, (range.address, range.size)))
+            .collect();
+        attach_dwarf_frames_within(&file, &addresses, &mut ir, DwarfBudget::default());
         ir
     }
 
@@ -1545,7 +1683,8 @@ mod tests {
             let mut entries = unit.entries();
             while let Some(entry) = entries.next_dfs().expect("read entry") {
                 if entry.tag() == gimli::DW_TAG_subprogram
-                    && let Some(frame) = source_frame(&dwarf, &unit, entry)
+                    && let Some(frame) =
+                        source_frame(&dwarf, &unit, entry).expect("read source frame")
                 {
                     frames.push(frame);
                 }
