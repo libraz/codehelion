@@ -110,7 +110,7 @@ fn a_path_belongs_to_every_member_whose_glob_matches_it_and_to_no_other() {
     assert_eq!(found[1].seams[0].member, "docs/**");
 
     // A path in no seam is still answered, with nothing.
-    assert!(found[2].seams.is_empty());
+    assert!(found[2].seams.is_empty(), "{:?}", found[2].seams);
 }
 
 #[test]
@@ -126,7 +126,11 @@ fn a_commit_touching_all_or_none_of_the_members_is_not_an_asymmetric_change() {
     let report = evaluate(&two_member_ledger(), &history, &settings(20));
     assert_eq!(report.seams.len(), 1);
     assert_eq!(report.seams[0].asymmetric_changes, 0);
-    assert!(report.seams[0].changes.is_empty());
+    assert!(
+        report.seams[0].changes.is_empty(),
+        "{:?}",
+        report.seams[0].changes
+    );
     assert_eq!(report.seams[0].breaches, 0);
     assert_eq!(report.seams[0].last_breach, None);
     // The seam is reported even with nothing to say about it.
@@ -296,7 +300,11 @@ fn a_sweeping_commit_still_breaks_a_seam_and_still_says_nothing_about_coupling()
     assert_eq!(report.seams[0].changes[0].touched, vec![0, 1]);
     assert_eq!(report.seams[0].changes[0].untouched, vec![2]);
 
-    assert!(suggest(&ledger, &history, &sweeping).candidates.is_empty());
+    assert!(
+        suggest(&ledger, &history, &sweeping).candidates.is_empty(),
+        "{:?}",
+        suggest(&ledger, &history, &sweeping).candidates
+    );
 
     // The same commit under a ceiling it fits inside contributes as usual,
     // which is what shows the emptiness above came from the ceiling.
@@ -347,7 +355,11 @@ fn coupling_is_the_lower_confidence_and_both_floors_are_applied() {
         min_support: 4,
         ..permissive
     };
-    assert!(suggest(&ledger, &history, &demanding).candidates.is_empty());
+    assert!(
+        suggest(&ledger, &history, &demanding).candidates.is_empty(),
+        "{:?}",
+        suggest(&ledger, &history, &demanding).candidates
+    );
 
     // Dropping the coupling floor lets the one-sided pair through, which is
     // what shows the floor was what removed it.
@@ -459,7 +471,7 @@ fn a_lookup_names_the_members_that_have_not_moved() {
         found[0].seams[0].other_members,
         vec!["crates/b/**".to_string()]
     );
-    assert!(found[1].seams.is_empty());
+    assert!(found[1].seams.is_empty(), "{:?}", found[1].seams);
 }
 
 #[test]
@@ -560,7 +572,10 @@ fn two_equal_inputs_serialise_to_the_same_bytes() {
     let report = evaluate(&first.0, &first.1, &settings);
     assert_eq!(report.seams[0].asymmetric_changes, 3);
     assert_eq!(report.seams[0].breaches, 1);
-    assert!(!suggest(&first.0, &first.1, &settings).candidates.is_empty());
+    assert!(
+        !suggest(&first.0, &first.1, &settings).candidates.is_empty(),
+        "expected a non-empty value"
+    );
     assert_eq!(report.settings_digest, settings.digest());
     assert_eq!(report.range.commits, 5);
     assert_eq!(report.range.first, Some(id("c01")));
@@ -809,6 +824,10 @@ fn a_candidate_naming_a_unit_that_no_longer_exists_is_dropped() {
         suggest(&ledger, &history, &Settings::default())
             .retaining(|_| false)
             .candidates
-            .is_empty()
+            .is_empty(),
+        "{:?}",
+        suggest(&ledger, &history, &Settings::default())
+            .retaining(|_| false)
+            .candidates
     );
 }

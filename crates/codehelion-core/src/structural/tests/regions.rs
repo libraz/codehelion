@@ -337,7 +337,7 @@ fn joining_does_not_depend_on_the_order_the_runs_arrive_in() {
     let forward = merge_adjacent(&build());
     let reversed: Vec<Confirmed> = build().into_iter().rev().collect();
     assert_eq!(forward, merge_adjacent(&reversed));
-    assert!(!forward.is_empty());
+    assert!(!forward.is_empty(), "forward is empty");
 }
 
 #[test]

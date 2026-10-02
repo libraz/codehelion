@@ -152,7 +152,6 @@ pub(crate) fn config_command(action: &ConfigAction, out: &mut impl Write) -> Res
                 ConfigSource::Defaults => writeln!(out, "# source: built-in defaults")?,
             }
             write!(out, "{}", resolved.config.to_display_toml()?)?;
-            Ok(Outcome::Success)
         }
         ConfigAction::Init { output, force } => {
             let path = output
@@ -160,7 +159,7 @@ pub(crate) fn config_command(action: &ConfigAction, out: &mut impl Write) -> Res
                 .unwrap_or_else(|| PathBuf::from(config::CONFIG_FILE_NAME));
             scan::write_output(&path, config::TEMPLATE.as_bytes(), *force)?;
             writeln!(out, "wrote {}", path.display())?;
-            Ok(Outcome::Success)
         }
     }
+    Ok(Outcome::Success)
 }

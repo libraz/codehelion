@@ -163,8 +163,16 @@ fn identical_units_are_a_type1_clone() {
     assert_eq!(verdict.class, Some(CloneClass::Type1));
     assert_eq!(verdict.confidence, Some(Confidence::High));
     assert!((verdict.breakdown.composite - 1.0).abs() < 1e-9);
-    assert!(verdict.alignment.only_a.is_empty());
-    assert!(verdict.alignment.only_b.is_empty());
+    assert!(
+        verdict.alignment.only_a.is_empty(),
+        "only a: {:?}",
+        verdict.alignment.only_a
+    );
+    assert!(
+        verdict.alignment.only_b.is_empty(),
+        "only b: {:?}",
+        verdict.alignment.only_b
+    );
 }
 
 #[test]
@@ -509,7 +517,11 @@ fn the_band_recovers_the_exact_alignment_of_a_gapped_copy() {
     let (lcs, alignment) = align(&a, &b, &VerifyConfig::default());
     assert_eq!(lcs, a.len());
     assert_eq!(alignment.matched.len(), a.len());
-    assert!(alignment.only_a.is_empty());
+    assert!(
+        alignment.only_a.is_empty(),
+        "only a: {:?}",
+        alignment.only_a
+    );
     assert_eq!(alignment.only_b.len(), 16);
 }
 

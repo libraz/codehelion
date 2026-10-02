@@ -256,14 +256,18 @@ mod tests {
 
         let mut reply = ir.clone();
         reply.keep_only(&[Capability::CallTargets]);
-        assert!(reply.types.is_empty());
+        assert!(reply.types.is_empty(), "types: {:?}", reply.types);
         assert_eq!(reply.calls.len(), 1);
-        assert!(reply.unexpanded_macros.is_empty());
+        assert!(
+            reply.unexpanded_macros.is_empty(),
+            "unexpanded macros: {:?}",
+            reply.unexpanded_macros
+        );
         assert!(reply.cfg.is_none());
 
         let mut reply = ir;
         reply.keep_only(&[Capability::Types, Capability::MacroExpansion]);
-        assert!(reply.calls.is_empty());
+        assert!(reply.calls.is_empty(), "calls: {:?}", reply.calls);
         assert!(reply.cfg.is_none());
     }
 }

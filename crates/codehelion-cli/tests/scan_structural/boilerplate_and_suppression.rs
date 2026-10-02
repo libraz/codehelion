@@ -11,7 +11,7 @@ fn structural_entropy_floor_marks_and_persists_low_entropy_noise() {
 
     let report = scan_json(dir.path());
     let groups = report["groups"].as_array().expect("groups");
-    assert!(!groups.is_empty());
+    assert!(!groups.is_empty(), "groups is empty");
     assert!(groups.iter().all(|group| {
         group["suppressed"]["kind"] == "noise" && group["suppressed"]["reason"] == "low-entropy"
     }));
@@ -29,7 +29,7 @@ fn structural_entropy_floor_marks_and_persists_low_entropy_noise() {
     let store = open_store(dir.path());
     let run = store.latest_run().unwrap().expect("recorded run");
     let stored = store.run_groups(run.id).unwrap();
-    assert!(!stored.is_empty());
+    assert!(!stored.is_empty(), "stored is empty");
     assert!(
         stored
             .iter()

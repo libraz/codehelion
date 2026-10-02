@@ -39,7 +39,11 @@ fn assert_bounded_depth_truncation(file: &SyntaxIrFile, source_len: usize) {
 #[test]
 fn deeply_nested_c_is_truncated_without_unbounded_ir() {
     let control = parse("int control(void) { return 0; }");
-    assert!(control.error_ranges.is_empty());
+    assert!(
+        control.error_ranges.is_empty(),
+        "error ranges: {:?}",
+        control.error_ranges
+    );
     assert!(
         control.roots.iter().all(|node| node.shape != Shape::Error),
         "normal input remains unchanged"
@@ -330,7 +334,7 @@ fn broken_function_between_intact_functions_keeps_both_neighbours() {
     });
     assert!(function_names.contains(&Some("first".to_owned())));
     assert!(function_names.contains(&Some("second".to_owned())));
-    assert!(!file.error_ranges.is_empty());
+    assert!(!file.error_ranges.is_empty(), "error ranges is empty");
 }
 
 // Observed worst-case truncation behaviour: tree-sitter recovers the
@@ -350,7 +354,7 @@ fn truncation_at_eof_keeps_the_function_with_error_ranges() {
         shapes_of(&function.children[0].children),
         vec![Shape::VarDecl]
     );
-    assert!(!file.error_ranges.is_empty());
+    assert!(!file.error_ranges.is_empty(), "error ranges is empty");
 }
 
 #[test]
@@ -523,9 +527,13 @@ int classify(int n) {\n\
 #[test]
 fn empty_source_yields_an_empty_file() {
     let file = parse("");
-    assert!(file.tokens.is_empty());
-    assert!(file.roots.is_empty());
-    assert!(file.error_ranges.is_empty());
+    assert!(file.tokens.is_empty(), "tokens: {:?}", file.tokens);
+    assert!(file.roots.is_empty(), "roots: {:?}", file.roots);
+    assert!(
+        file.error_ranges.is_empty(),
+        "error ranges: {:?}",
+        file.error_ranges
+    );
 }
 
 #[test]
@@ -547,7 +555,11 @@ fn file_carries_language_and_versions() {
     assert_eq!(file.language, Language::C);
     assert_eq!(file.frontend_version, STRUCTURAL_FRONTEND_VERSION);
     assert_eq!(file.ir_schema_version, IR_SCHEMA_VERSION);
-    assert!(file.diagnostics.is_empty());
+    assert!(
+        file.diagnostics.is_empty(),
+        "diagnostics: {:?}",
+        file.diagnostics
+    );
 }
 
 #[test]

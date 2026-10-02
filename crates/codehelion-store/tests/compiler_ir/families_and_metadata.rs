@@ -133,7 +133,11 @@ fn a_run_holding_compiler_ir_declares_the_schema_it_used() {
     let conn = peek(&path);
     // A scan that asked no compiler claims no IR schema: declaring one would
     // say the scan used something it never did.
-    assert!(declared(&conn, without).is_empty());
+    assert!(
+        declared(&conn, without).is_empty(),
+        "{:?}",
+        declared(&conn, without)
+    );
 }
 
 /// A unit that was answered for out of a schema this build cannot read comes

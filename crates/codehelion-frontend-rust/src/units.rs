@@ -714,7 +714,7 @@ mod tests {
         );
 
         let (units, diagnostics) = detect(&tokens);
-        assert!(units.is_empty());
+        assert!(units.is_empty(), "units: {units:?}");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].kind, DiagnosticKind::UnmatchedDelimiter);
         assert_eq!(diagnostics[0].span.start_byte, 0);
@@ -1068,7 +1068,7 @@ fn after() { 2 }
     #[test]
     fn an_unclosed_function_body_is_reported_and_yields_no_unit() {
         let source = "fn broken() { let x = 1;";
-        assert!(units_of(source).is_empty());
+        assert!(units_of(source).is_empty(), "{:?}", units_of(source));
         let diagnostics = diagnostics_of(source);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].kind, DiagnosticKind::UnmatchedDelimiter);
@@ -1089,6 +1089,10 @@ fn after() { 2 }
 
     #[test]
     fn well_formed_boundaries_report_nothing() {
-        assert!(diagnostics_of("impl Foo { fn a(&self) -> impl Debug { 1 } }").is_empty());
+        assert!(
+            diagnostics_of("impl Foo { fn a(&self) -> impl Debug { 1 } }").is_empty(),
+            "{:?}",
+            diagnostics_of("impl Foo { fn a(&self) -> impl Debug { 1 } }")
+        );
     }
 }

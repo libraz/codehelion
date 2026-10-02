@@ -222,7 +222,11 @@ fn the_allowance_scales_from_the_two_named_sizes() {
 fn a_fast_run_that_stopped_early_still_misses_the_target() {
     let slo = Slo::for_lines(1_000_000);
     let quick = measurement(5, Some(1_000_000_000), 1_000_000, 0, false);
-    assert!(slo.shortfalls(&quick).is_empty());
+    assert!(
+        slo.shortfalls(&quick).is_empty(),
+        "{:?}",
+        slo.shortfalls(&quick)
+    );
 
     let truncated = measurement(5, Some(1_000_000_000), 1_000_000, 3_000, true);
     let missed = slo.shortfalls(&truncated);

@@ -1005,7 +1005,11 @@ mod tests {
     /// down as an empty one — the same distinction the encoding makes.
     #[test]
     fn an_unresolved_setting_records_nothing_and_an_empty_one_records_a_value() {
-        assert!(Shape::Resolved(None).values().is_empty());
+        assert!(
+            Shape::Resolved(None).values().is_empty(),
+            "{:?}",
+            Shape::Resolved(None).values()
+        );
         assert_eq!(Shape::Resolved(Some(String::new())).values(), vec![""]);
         assert_eq!(Shape::Given("cc".into()).values(), vec!["cc"]);
         assert_eq!(

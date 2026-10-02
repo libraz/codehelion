@@ -843,7 +843,11 @@ mod tests {
         let tokens = vec![token("x", 0)];
         let stray = node(Shape::ExprStmt, 5, 9);
         let summary = StatementSummary::of(&stray, &tokens);
-        assert!(summary.tokens(&tokens).is_empty());
+        assert!(
+            summary.tokens(&tokens).is_empty(),
+            "{:?}",
+            summary.tokens(&tokens)
+        );
     }
 
     #[test]

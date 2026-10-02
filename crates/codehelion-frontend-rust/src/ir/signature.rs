@@ -449,7 +449,10 @@ mod tests {
         let macro_body = parse("fn value(input: i32) -> i32 { todo!() }");
         let malformed_body = parse("fn value(input: i32) -> i32 { let = ; }");
         assert_eq!(plain.signatures[0].1, macro_body.signatures[0].1);
-        assert!(!malformed_body.error_ranges.is_empty());
+        assert!(
+            !malformed_body.error_ranges.is_empty(),
+            "error ranges is empty"
+        );
         assert_eq!(plain.signatures[0].1, malformed_body.signatures[0].1);
     }
 
@@ -457,7 +460,7 @@ mod tests {
     fn signatures_keep_healthy_units_when_another_header_is_broken() {
         let source = "fn healthy(value: i32) { todo!(); }\nfn broken(value: ) { return; }";
         let file = parse(source);
-        assert!(!file.error_ranges.is_empty());
+        assert!(!file.error_ranges.is_empty(), "error ranges is empty");
         assert_eq!(file.signatures.len(), 1);
         let (range, signature) = &file.signatures[0];
         assert!(source[range.start..range.end].contains("healthy"));
@@ -538,12 +541,24 @@ mod tests {
         let foreign = parse(
             "extern \"C\" { fn first(value: i32); }\nextern \"system\" { fn second(value: i32); }",
         );
-        assert!(foreign.signatures.is_empty());
+        assert!(
+            foreign.signatures.is_empty(),
+            "signatures: {:?}",
+            foreign.signatures
+        );
 
         let recovered_invalid =
             parse("fn first(value: i32);\nimpl Item { fn second(value: i32); }");
-        assert!(recovered_invalid.error_ranges.is_empty());
-        assert!(recovered_invalid.signatures.is_empty());
+        assert!(
+            recovered_invalid.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            recovered_invalid.error_ranges
+        );
+        assert!(
+            recovered_invalid.signatures.is_empty(),
+            "signatures: {:?}",
+            recovered_invalid.signatures
+        );
 
         let bodyless = parse("trait Item { fn first(value: i32); fn second(other: i32) {} }");
         assert!(
@@ -584,7 +599,11 @@ mod tests {
             "fn first<T>(value: T) -> impl for<'a> Fn(&'a T) { todo!() }\nfn second<T>(value: T) where T: for<'a> Trait<&'a T> { todo!() }",
         );
         assert!(file.error_ranges.is_empty(), "{:?}", file.error_ranges);
-        assert!(file.signatures.is_empty());
+        assert!(
+            file.signatures.is_empty(),
+            "signatures: {:?}",
+            file.signatures
+        );
     }
 
     #[test]

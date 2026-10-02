@@ -80,7 +80,7 @@ fn a_direct_filter_map_receiver_chain_is_recorded_without_following_bindings() {
 #[test]
 fn every_symbol_is_anchored_where_it_was_written() {
     let ir = analyzed(&unit("plain", "ledger", "ledger"));
-    assert!(!ir.symbols.is_empty());
+    assert!(!ir.symbols.is_empty(), "symbols is empty");
     for symbol in &ir.symbols {
         let anchor = &symbol.anchor.expansion;
         assert_eq!(anchor.file, "ledger/src/lib.rs", "{}", symbol.name);
@@ -344,7 +344,7 @@ fn a_tree_with_no_project_in_it_is_described_as_having_no_build() {
 fn a_project_that_enables_nothing_is_still_described_by_its_target() {
     let described = describe(&codehelion_fixtures::rust("plain").unwrap());
     assert!(described.features.is_empty(), "{:?}", described.features);
-    assert!(!described.cfgs.is_empty());
+    assert!(!described.cfgs.is_empty(), "cfgs is empty");
 }
 
 fn describe(root: &Path) -> codehelion_helper::BuildDescription {

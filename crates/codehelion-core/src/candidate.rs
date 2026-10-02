@@ -424,7 +424,7 @@ mod tests {
     fn a_singleton_hash_yields_no_pair() {
         let files = vec![file_with(vec![unit_with(&[7], &[8])])];
         let set = generate(&files, &CandidateConfig::default());
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert_eq!(set.stats.distinct_fingerprints, 2);
         assert_eq!(set.stats.stop_fingerprints, 0);
     }
@@ -435,7 +435,7 @@ mod tests {
         // key on different families and never pair.
         let files = vec![file_with(vec![unit_with(&[9], &[9])])];
         let set = generate(&files, &CandidateConfig::default());
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert_eq!(set.stats.distinct_fingerprints, 2);
     }
 
@@ -453,7 +453,7 @@ mod tests {
             ..CandidateConfig::default()
         };
         let set = generate(&files, &config);
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert_eq!(set.stats.stop_fingerprints, 1);
         assert_eq!(set.stats.stop_postings, 4);
         assert_eq!(set.stats.candidate_pairs, 0);
@@ -478,7 +478,7 @@ mod tests {
             pair_budget: 2,
         };
         let set = generate(&files, &config);
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert!(set.stats.budget_exhausted);
         assert_eq!(set.stats.candidate_pairs, 0);
         // And says how much it did not do: the ceiling is what stopped this,

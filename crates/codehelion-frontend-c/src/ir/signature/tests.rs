@@ -49,7 +49,11 @@ fn signatures_alpha_normalize_vla_parameter_references() {
     let non_parameter_type = parse(
         "int first(int count, int values[limit]) { return count; }\nint second(int renamed, int items[other_limit]) { return renamed; }",
     );
-    assert!(non_parameter_type.error_ranges.is_empty());
+    assert!(
+        non_parameter_type.error_ranges.is_empty(),
+        "error ranges: {:?}",
+        non_parameter_type.error_ranges
+    );
     assert_eq!(non_parameter_type.signatures.len(), 2);
     assert_ne!(
         non_parameter_type.signatures[0].1.key,
@@ -117,17 +121,29 @@ fn signatures_reject_c_attributes_and_calling_convention_extensions() {
     let attributes = parse(
         "int first(int value) __attribute__((nonnull)) { return value; }\nint second(int value) __attribute__((nothrow)) { return value; }",
     );
-    assert!(attributes.signatures.is_empty());
+    assert!(
+        attributes.signatures.is_empty(),
+        "signatures: {:?}",
+        attributes.signatures
+    );
 
     let declspec = parse(
         "__declspec(noinline) int first(int value) { return value; }\n__declspec(nothrow) int second(int value) { return value; }",
     );
-    assert!(declspec.signatures.is_empty());
+    assert!(
+        declspec.signatures.is_empty(),
+        "signatures: {:?}",
+        declspec.signatures
+    );
 
     let calling_convention = parse(
         "int __cdecl first(int value) { return value; }\nint __stdcall second(int value) { return value; }",
     );
-    assert!(calling_convention.signatures.is_empty());
+    assert!(
+        calling_convention.signatures.is_empty(),
+        "signatures: {:?}",
+        calling_convention.signatures
+    );
 }
 
 #[test]
@@ -149,7 +165,7 @@ fn signatures_reject_variadic_and_function_pointer_parameters() {
 fn signatures_keep_healthy_units_when_another_header_is_broken() {
     let source = "int healthy(int value) { MACRO_BODY(value); return value; }\nint broken(int value { return value; }";
     let file = parse(source);
-    assert!(!file.error_ranges.is_empty());
+    assert!(!file.error_ranges.is_empty(), "error ranges is empty");
     assert_eq!(file.signatures.len(), 1);
     let (range, signature) = &file.signatures[0];
     assert!(source[range.start..range.end].contains("healthy"));
@@ -161,7 +177,7 @@ fn signatures_keep_a_healthy_header_when_its_body_has_an_error() {
     let source =
         "int healthy(int value) { @@@ return value; }\nint broken(int value { return value; }";
     let file = parse(source);
-    assert!(!file.error_ranges.is_empty());
+    assert!(!file.error_ranges.is_empty(), "error ranges is empty");
     assert_eq!(file.signatures.len(), 1);
     let (range, _) = &file.signatures[0];
     assert!(source[range.start..range.end].contains("healthy"));

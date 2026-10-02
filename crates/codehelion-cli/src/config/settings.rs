@@ -536,7 +536,11 @@ mod tests {
         );
 
         let config = Config::from_toml("[suppression]\ntest-paths = []").unwrap();
-        assert!(config.suppression.test_paths.is_empty());
+        assert!(
+            config.suppression.test_paths.is_empty(),
+            "test paths: {:?}",
+            config.suppression.test_paths
+        );
         assert_eq!(config.suppression.test_code, CategoryAction::RankDown);
     }
 

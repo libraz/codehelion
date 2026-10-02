@@ -670,7 +670,7 @@ mod tests {
             .expect("implementation record");
         assert!(alias.size_inferred);
         assert_eq!(alias.size, 0);
-        assert!(alias.code.is_empty());
+        assert!(alias.code.is_empty(), "code: {:?}", alias.code);
         assert_eq!(implementation.code, vec![0x90, 0xc3]);
     }
 

@@ -61,7 +61,8 @@ fn a_disabled_cross_language_rule_cannot_reach_the_comparison_report() {
     let config =
         Config::from_toml("[semantic]\ndisabled = [\"cross-language-optional-validation-v1\"]\n")
             .expect("registered cross-language rule is configurable");
-    assert!(enabled_cross_language_matches(verified, &config).is_empty());
+    let enabled = enabled_cross_language_matches(verified, &config);
+    assert!(enabled.is_empty(), "enabled: {enabled:?}");
 }
 
 #[test]

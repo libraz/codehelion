@@ -416,7 +416,11 @@ mod tests {
         );
         assert_eq!(variant.items[1].clone_type, Some(CloneType::Type1));
         assert_eq!(spec.non_clones.len(), 1);
-        assert!(spec.known_siblings.is_empty());
+        assert!(
+            spec.known_siblings.is_empty(),
+            "known siblings: {:?}",
+            spec.known_siblings
+        );
     }
 
     #[test]

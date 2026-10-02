@@ -81,7 +81,7 @@ fn same_variant_rules_never_join_different_languages() {
     assert!(match_registered_pipeline(&rust, &cpp).is_none());
     let candidates =
         extract_registered_candidates(&[rust, cpp], SemanticCandidateConfig::default());
-    assert!(candidates.pairs.is_empty());
+    assert!(candidates.pairs.is_empty(), "pairs: {:?}", candidates.pairs);
     assert_eq!(candidates.stats.buckets, 2);
 }
 

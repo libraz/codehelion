@@ -938,7 +938,11 @@ mod tests {
             metrics::dead_code_candidates(&artifact)
                 .expect("entry point establishes roots")
                 .symbols
-                .is_empty()
+                .is_empty(),
+            "{:?}",
+            metrics::dead_code_candidates(&artifact)
+                .expect("entry point establishes roots")
+                .symbols
         );
     }
 
@@ -1111,7 +1115,11 @@ mod tests {
 
         let artifact = WasmBackend.parse(&module).expect("fixture parses");
 
-        assert!(artifact.indirect_references.is_empty());
+        assert!(
+            artifact.indirect_references.is_empty(),
+            "indirect references: {:?}",
+            artifact.indirect_references
+        );
         let dead = metrics::dead_code_candidates(&artifact).expect("an export establishes roots");
         assert_eq!(dead.symbols, vec![artifact.symbols[1].fingerprint]);
         assert!(dead.definitive);
@@ -1153,7 +1161,7 @@ mod tests {
         assert!(metrics::retained_sizes(&artifact).is_some());
         let dead = metrics::dead_code_candidates(&artifact).expect("an export establishes roots");
         assert!(dead.definitive, "{dead:#?}");
-        assert!(dead.symbols.is_empty());
+        assert!(dead.symbols.is_empty(), "symbols: {:?}", dead.symbols);
     }
 
     /// A transfer of control this parser does not name individually still has

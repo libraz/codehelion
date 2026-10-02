@@ -886,7 +886,11 @@ mod tests {
     fn marker_lines_are_one_based() {
         let text = "fn a() {}\n// codehelion:ignore\nfn b() {}\n";
         assert_eq!(markers(text, Language::Rust), vec![2]);
-        assert!(markers("fn clean() {}\n", Language::Rust).is_empty());
+        assert!(
+            markers("fn clean() {}\n", Language::Rust).is_empty(),
+            "{:?}",
+            markers("fn clean() {}\n", Language::Rust)
+        );
     }
 
     /// The marker is an instruction only where the language says a comment
@@ -947,7 +951,11 @@ mod tests {
         }
 
         let cpp_raw = "auto embedded = R\"sql(a \"b\" // codehelion:ignore)sql\";\n";
-        assert!(markers(cpp_raw, Language::Cpp).is_empty());
+        assert!(
+            markers(cpp_raw, Language::Cpp).is_empty(),
+            "{:?}",
+            markers(cpp_raw, Language::Cpp)
+        );
     }
 
     /// Every comment spelling each language has, including a marker trailing
@@ -1013,7 +1021,11 @@ mod tests {
         for language in [Language::C, Language::Cpp] {
             assert_eq!(markers(text, language), vec![2], "{language:?}");
         }
-        assert!(markers(text, Language::Rust).is_empty());
+        assert!(
+            markers(text, Language::Rust).is_empty(),
+            "{:?}",
+            markers(text, Language::Rust)
+        );
     }
 
     /// A file that ends mid-literal is malformed, and reading the rest of it
@@ -1022,7 +1034,11 @@ mod tests {
     #[test]
     fn an_unterminated_literal_does_not_open_a_comment() {
         let text = "let broken = \"unterminated\n// codehelion:ignore\n";
-        assert!(markers(text, Language::Rust).is_empty());
+        assert!(
+            markers(text, Language::Rust).is_empty(),
+            "{:?}",
+            markers(text, Language::Rust)
+        );
     }
 
     #[test]
@@ -1234,8 +1250,16 @@ mod tests {
 
         // An id that resolves to a single group says exactly what it said when
         // it was written, and there is nothing to report about it.
-        assert!(multi_match_clone_ids(["0123abcd", "9999beef"]).is_empty());
-        assert!(multi_match_clone_ids([]).is_empty());
+        assert!(
+            multi_match_clone_ids(["0123abcd", "9999beef"]).is_empty(),
+            "{:?}",
+            multi_match_clone_ids(["0123abcd", "9999beef"])
+        );
+        assert!(
+            multi_match_clone_ids([]).is_empty(),
+            "{:?}",
+            multi_match_clone_ids([])
+        );
     }
 
     #[test]

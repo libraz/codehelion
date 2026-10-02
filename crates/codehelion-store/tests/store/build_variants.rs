@@ -66,8 +66,16 @@ fn what_a_compiler_was_told_is_recorded_beside_the_variant_it_identifies() {
     );
     // Nobody ran the compiler to ask its version, and a setting nobody
     // resolved is absent rather than empty.
-    assert!(values_of(&stored, "compiler_version").is_empty());
-    assert!(values_of(&stored, "linker").is_empty());
+    assert!(
+        values_of(&stored, "compiler_version").is_empty(),
+        "{:?}",
+        values_of(&stored, "compiler_version")
+    );
+    assert!(
+        values_of(&stored, "linker").is_empty(),
+        "{:?}",
+        values_of(&stored, "linker")
+    );
 }
 
 /// A tree holding both languages is answered by a compiler for each, and both
@@ -132,7 +140,11 @@ fn two_builds_of_one_tree_are_told_apart_by_what_they_were_told() {
     let stored_narrow = store.build_variant(&narrow.fingerprint()).unwrap().unwrap();
     let stored_wide = store.build_variant(&wide.fingerprint()).unwrap().unwrap();
     assert_ne!(stored_narrow.id, stored_wide.id);
-    assert!(values_of(&stored_narrow, "macros").is_empty());
+    assert!(
+        values_of(&stored_narrow, "macros").is_empty(),
+        "{:?}",
+        values_of(&stored_narrow, "macros")
+    );
     assert_eq!(values_of(&stored_wide, "macros"), vec!["-DACCUM_WIDTH=64"]);
 }
 
@@ -214,8 +226,12 @@ fn a_history_carries_across_a_change_that_moved_every_identifier() {
         .unwrap();
 
     assert_eq!(adopted.taken, vec![group_fp(77).to_hex()]);
-    assert!(adopted.already_connected.is_empty());
-    assert!(adopted.unknown.is_empty());
+    assert!(
+        adopted.already_connected.is_empty(),
+        "already connected: {:?}",
+        adopted.already_connected
+    );
+    assert!(adopted.unknown.is_empty(), "unknown: {:?}", adopted.unknown);
     assert_eq!(
         store.run_group_snapshots(after).unwrap()[0].lineage,
         Some(history),
@@ -260,7 +276,7 @@ fn an_unchanged_group_needs_no_lineage_adoption() {
     let after = store.record_snapshot(&after_snapshot).unwrap();
 
     let adopted = store.adopt_matching_lineages(after, before).unwrap();
-    assert!(adopted.taken.is_empty());
+    assert!(adopted.taken.is_empty(), "taken: {:?}", adopted.taken);
     assert_eq!(
         store.run_group_snapshots(after).unwrap()[0].lineage,
         Some(group_lineage_id(&group_fp(9)))
@@ -311,7 +327,7 @@ fn a_group_the_comparison_already_connected_is_left_as_it_was() {
         )
         .unwrap();
 
-    assert!(adopted.taken.is_empty());
+    assert!(adopted.taken.is_empty(), "taken: {:?}", adopted.taken);
     assert_eq!(adopted.already_connected, vec![group_fp(77).to_hex()]);
     assert_eq!(
         store.run_group_snapshots(after).unwrap()[0].lineage,
@@ -346,7 +362,7 @@ fn a_group_a_run_does_not_hold_is_named_rather_than_passed_over() {
         )
         .unwrap();
 
-    assert!(adopted.taken.is_empty());
+    assert!(adopted.taken.is_empty(), "taken: {:?}", adopted.taken);
     assert_eq!(adopted.unknown, vec![group_fp(200).to_hex()]);
 }
 
@@ -521,7 +537,11 @@ fn lineage_is_refused_between_runs_of_different_build_variants() {
         Some(group_lineage_id(&group_fp(77))),
         "no edge crossed the two build variants"
     );
-    assert!(store.run_group_origins(after).unwrap().is_empty());
+    assert!(
+        store.run_group_origins(after).unwrap().is_empty(),
+        "{:?}",
+        store.run_group_origins(after).unwrap()
+    );
 }
 
 /// The evidence a caller supplies has to be internally consistent: a share

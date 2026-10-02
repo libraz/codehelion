@@ -730,7 +730,7 @@ fn zero_sized_elf_alias_is_retained_without_claiming_implementation_bytes() {
         .expect("implementation record");
     assert!(alias.size_inferred);
     assert_eq!(alias.size, 0);
-    assert!(alias.code.is_empty());
+    assert!(alias.code.is_empty(), "code: {:?}", alias.code);
     assert_eq!(implementation.code, vec![0x90, 0xc3]);
 }
 
@@ -748,7 +748,11 @@ fn sized_elf_alias_does_not_claim_the_bytes_of_the_symbol_it_shares() {
     };
     assert_eq!(artifact.symbols.len(), 3);
     assert_eq!(by_name("complete").size, 2);
-    assert!(by_name("base").code.is_empty());
+    assert!(
+        by_name("base").code.is_empty(),
+        "{:?}",
+        by_name("base").code
+    );
     assert_eq!(by_name("base").size, 0);
     assert_eq!(by_name("base").offset, by_name("complete").offset);
     assert_eq!(by_name("twin").size, 2);

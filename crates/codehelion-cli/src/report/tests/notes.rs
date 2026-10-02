@@ -102,8 +102,16 @@ fn unmeasured_measurements_are_scoped_to_fast_mode() {
         .map(str::to_string)
         .collect::<Vec<_>>()
     );
-    assert!(unmeasured_in_this_mode("structural").is_empty());
-    assert!(unmeasured_in_this_mode("semantic").is_empty());
+    assert!(
+        unmeasured_in_this_mode("structural").is_empty(),
+        "{:?}",
+        unmeasured_in_this_mode("structural")
+    );
+    assert!(
+        unmeasured_in_this_mode("semantic").is_empty(),
+        "{:?}",
+        unmeasured_in_this_mode("semantic")
+    );
 }
 
 #[test]

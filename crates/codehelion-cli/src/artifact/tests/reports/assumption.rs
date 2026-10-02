@@ -77,7 +77,7 @@ fn text_json_and_csv_state_the_same_assumptions() {
     let report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None);
 
     let stated = report_assumptions(&report);
-    assert!(!stated.is_empty());
+    assert!(!stated.is_empty(), "stated is empty");
     let text = rendered_text(&report, false);
     let json = serde_json::to_value(&report).unwrap();
     let csv = artifact_csv_assumptions(&report);

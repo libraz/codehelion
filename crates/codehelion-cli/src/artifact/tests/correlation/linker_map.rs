@@ -14,7 +14,7 @@ fn a_map_naming_non_utf8_bytes_is_read_with_the_replacement_character() {
 
     let entries = read_linker_map(Some(FilePath::new(&path))).unwrap();
 
-    assert!(!entries.is_empty());
+    assert!(!entries.is_empty(), "entries is empty");
 }
 
 #[test]

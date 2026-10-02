@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn a_run_that_resolved_no_build_configuration_is_identified_as_it_always_was() {
         let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
-        assert!(variant.builds.is_empty());
+        assert!(variant.builds.is_empty(), "builds: {:?}", variant.builds);
         assert!(
             !variant.canonical().contains("build="),
             "{}",

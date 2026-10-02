@@ -241,7 +241,11 @@ mod tests {
         assert_eq!(labels.clone_pairs[0].clone_type, CloneType::Type2);
         assert_eq!(labels.non_clones.len(), 1);
         assert_eq!(labels.non_clones[0].reason, "getter-boilerplate");
-        assert!(labels.known_siblings.is_empty());
+        assert!(
+            labels.known_siblings.is_empty(),
+            "known siblings: {:?}",
+            labels.known_siblings
+        );
     }
 
     #[test]
@@ -253,8 +257,16 @@ mod tests {
           "clone_pairs": []
         }"#;
         let labels = LabelSet::from_json(json).expect("parses without non_clones");
-        assert!(labels.non_clones.is_empty());
-        assert!(labels.known_siblings.is_empty());
+        assert!(
+            labels.non_clones.is_empty(),
+            "non clones: {:?}",
+            labels.non_clones
+        );
+        assert!(
+            labels.known_siblings.is_empty(),
+            "known siblings: {:?}",
+            labels.known_siblings
+        );
     }
 
     #[test]

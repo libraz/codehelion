@@ -208,7 +208,11 @@ fn signature_context_is_cross_file_scoped_and_cardinality_safe() {
         legacy.stats.signature_siblings,
         SignatureSiblingSweepStats::default()
     );
-    assert!(legacy.siblings.is_empty());
+    assert!(
+        legacy.siblings.is_empty(),
+        "siblings: {:?}",
+        legacy.siblings
+    );
     assert_eq!(report.units, legacy.units);
     assert_eq!(report.groups, legacy.groups);
     assert_eq!(report.regions, legacy.regions);

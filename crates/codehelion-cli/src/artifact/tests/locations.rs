@@ -111,7 +111,11 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
     );
 
     assert_eq!(rows.mappings.len(), 2);
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(
         rows.mappings[0].artifact_symbol_fingerprint,
         symbol.fingerprint.as_bytes()
@@ -478,7 +482,11 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
     );
 
     assert_eq!(rows.mappings.len(), 4);
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(
         rows.mappings
             .iter()
@@ -539,7 +547,7 @@ fn source_findings_without_artifact_evidence_are_explicitly_unmapped() {
         BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
-    assert!(rows.mappings.is_empty());
+    assert!(rows.mappings.is_empty(), "mappings: {:?}", rows.mappings);
     assert_eq!(
         rows.unmapped_sources,
         vec![
@@ -685,7 +693,11 @@ fn demangled_name_maps_one_named_unit_as_weak_evidence() {
         BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(rows.mappings.len(), 1);
     assert_eq!(rows.mappings[0].source_fingerprint, [3; 16]);
     assert_eq!(
@@ -702,6 +714,10 @@ fn demangled_name_maps_one_named_unit_as_weak_evidence() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fixture and the check of every correlation row read as one case"
+)]
 fn macro_definition_anchor_beats_an_unrelated_unit_label() {
     let symbol = codehelion_artifact::ArtifactSymbol {
         fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"one"),
@@ -760,7 +776,11 @@ fn macro_definition_anchor_beats_an_unrelated_unit_label() {
         BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(rows.mappings.len(), 2);
     assert_eq!(rows.mappings[0].source_fingerprint, [3; 16]);
     assert_eq!(

@@ -117,8 +117,16 @@ fn a_verbatim_copy_is_a_type1_clone() {
     let alpha = prepare(ALPHA);
     let verdict = verify::verify(&view(&alpha), &view(&alpha), &VerifyConfig::default());
     assert_eq!(verdict.class, Some(CloneClass::Type1));
-    assert!(verdict.alignment.only_a.is_empty());
-    assert!(verdict.alignment.only_b.is_empty());
+    assert!(
+        verdict.alignment.only_a.is_empty(),
+        "only a: {:?}",
+        verdict.alignment.only_a
+    );
+    assert!(
+        verdict.alignment.only_b.is_empty(),
+        "only b: {:?}",
+        verdict.alignment.only_b
+    );
 }
 
 #[test]

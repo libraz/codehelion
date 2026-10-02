@@ -299,7 +299,7 @@ fn every_entry_carries_the_measures_its_place_was_argued_from() {
     assert_eq!(value["run"]["ranking"]["refactoring_ease"], 1);
 
     let groups = value["groups"].as_array().unwrap();
-    assert!(!groups.is_empty());
+    assert!(!groups.is_empty(), "groups is empty");
     for group in groups {
         let priority = &group["priority"];
         for measure in [

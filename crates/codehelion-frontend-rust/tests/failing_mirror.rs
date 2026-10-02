@@ -312,7 +312,11 @@ fn shorter_band_type_funnel_is_measured_on_only_that_pair() {
     assert_eq!(funnel.control_flow.stats.candidate_pairs, 0);
     assert_eq!(funnel.report.stats.unit_pairs, 0);
     assert_eq!(funnel.report.stats.verified_pairs, 0);
-    assert!(funnel.report.groups.groups.is_empty());
+    assert!(
+        funnel.report.groups.groups.is_empty(),
+        "groups: {:?}",
+        funnel.report.groups.groups
+    );
 
     // The verifier would accept the pair as a Type-3 clone.  Its absence is
     // therefore pre-gate candidate loss, not a verification rejection.

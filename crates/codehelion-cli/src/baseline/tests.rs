@@ -184,7 +184,7 @@ fn a_baseline_keeps_each_invocation_variant_in_its_own_partition() {
 
     let present = BTreeSet::from(["aa11".to_string()]);
     let (pruned, dropped) = baseline.pruned_partition("abcdef0123456789", &present);
-    assert!(dropped.is_empty());
+    assert!(dropped.is_empty(), "dropped: {dropped:?}");
     assert_eq!(
         pruned
             .partition(&second.variant_fingerprint)
@@ -285,7 +285,7 @@ fn a_repeated_member_added_to_a_frozen_group_is_not_covered() {
     )]);
 
     assert_eq!(delta.continuing, 1);
-    assert!(delta.appeared.is_empty());
+    assert!(delta.appeared.is_empty(), "appeared: {:?}", delta.appeared);
     assert_eq!(delta.expanded.len(), 1);
     assert_eq!(delta.expanded[0].group, "aa11");
     assert_eq!(delta.expanded[0].added_instances, 1);

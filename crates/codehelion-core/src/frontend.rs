@@ -583,9 +583,21 @@ mod tests {
                 "range {start}..{end}"
             );
         }
-        assert!(tokens_in_range(&tokens, 5, 9).is_empty());
-        assert!(tokens_in_range(&tokens, 2, 1).is_empty());
-        assert!(tokens_in_range(&[], 0, 4).is_empty());
+        assert!(
+            tokens_in_range(&tokens, 5, 9).is_empty(),
+            "{:?}",
+            tokens_in_range(&tokens, 5, 9)
+        );
+        assert!(
+            tokens_in_range(&tokens, 2, 1).is_empty(),
+            "{:?}",
+            tokens_in_range(&tokens, 2, 1)
+        );
+        assert!(
+            tokens_in_range(&[], 0, 4).is_empty(),
+            "{:?}",
+            tokens_in_range(&[], 0, 4)
+        );
         assert_eq!(tokens_in_range(&tokens, 1, 9).len(), 2);
     }
 
@@ -676,7 +688,7 @@ mod tests {
         assert_eq!(leaf.name, None);
         assert_eq!((leaf.token_start, leaf.token_end), (1, 3));
         assert_eq!(leaf.range, omitted);
-        assert!(leaf.children.is_empty());
+        assert!(leaf.children.is_empty(), "children: {:?}", leaf.children);
         assert!(assembly.depth_truncated());
         let assembled = assembly.finish();
         assert!(assembled.depth_truncated);

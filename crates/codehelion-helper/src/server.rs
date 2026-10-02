@@ -753,6 +753,6 @@ mod tests {
         let mut output = Vec::new();
         let error = serve(&mut backend, &mut input.as_slice(), &mut output).unwrap_err();
         assert!(matches!(error, FrameError::Malformed(_)), "{error:?}");
-        assert!(output.is_empty());
+        assert!(output.is_empty(), "output: {output:?}");
     }
 }

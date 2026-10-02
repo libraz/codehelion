@@ -297,7 +297,7 @@ fn a_lone_unit_is_not_a_group() {
     let units = units(2);
     // No edges: two singletons, no group.
     let set = group(&units, &[], &GroupingConfig::default());
-    assert!(set.groups.is_empty());
+    assert!(set.groups.is_empty(), "groups: {:?}", set.groups);
 }
 
 #[test]
@@ -715,7 +715,7 @@ fn grouping_does_not_depend_on_the_order_units_were_discovered_in() {
             }
         }
         let expected = keyed(&group(&base_units, &base_edges, &config), &base_units);
-        assert!(!expected.is_empty());
+        assert!(!expected.is_empty(), "expected is empty");
 
         for shift in 1..count {
             // New index `i` holds the unit that was `(i * 4 + shift) % count`.

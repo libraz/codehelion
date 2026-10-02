@@ -324,7 +324,11 @@ fn transplant_non_clone_is_labelled_at_fragment_granularity() {
         variant: "partial.rs".to_string(),
     });
     let corpus = generate(&spec, PARTIAL_SEED).expect("generates");
-    assert!(corpus.labels.clone_pairs.is_empty());
+    assert!(
+        corpus.labels.clone_pairs.is_empty(),
+        "clone pairs: {:?}",
+        corpus.labels.clone_pairs
+    );
     assert_eq!(corpus.labels.non_clones.len(), 2);
     // Spec-level non-clones come first; the transplant-derived one
     // continues the id numbering at fragment granularity.

@@ -155,7 +155,7 @@ fn a_gapped_clone_is_detected_and_recorded_with_its_evidence() {
     );
 
     let findings = store.run_findings(run.id).unwrap();
-    assert!(!findings.is_empty());
+    assert!(!findings.is_empty(), "findings is empty");
 
     let rendered = scan_json(dir.path());
     assert!(

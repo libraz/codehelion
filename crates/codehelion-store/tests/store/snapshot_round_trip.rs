@@ -238,7 +238,7 @@ fn a_near_miss_round_trips_without_becoming_a_primary_finding() {
     let groups = store.run_groups(run_id).unwrap();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].members.len(), 2);
-    assert!(groups[0].siblings.is_empty());
+    assert!(groups[0].siblings.is_empty(), "{:?}", groups[0].siblings);
 }
 /// What a run reported about itself has to come back the way it went in,
 /// stage order and drop order included: a report rebuilt from these rows is
@@ -504,7 +504,11 @@ fn a_group_can_be_read_by_its_fingerprint_and_found_by_an_abbreviation() {
     assert_eq!(finding_matches[0].kind, IdKind::Occurrence);
     assert_eq!(finding_matches[0].id, finding);
 
-    assert!(store.ids_starting_with("ffffffffffff").unwrap().is_empty());
+    assert!(
+        store.ids_starting_with("ffffffffffff").unwrap().is_empty(),
+        "{:?}",
+        store.ids_starting_with("ffffffffffff").unwrap()
+    );
     assert!(
         store.ids_starting_with("%").unwrap().is_empty(),
         "a percent is a literal prefix character, not a wildcard"

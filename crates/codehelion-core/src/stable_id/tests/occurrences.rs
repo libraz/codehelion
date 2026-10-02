@@ -81,7 +81,11 @@ fn occurrence_ranks_restart_inside_every_discriminator() {
         occurrence_ranks(&[first, second, first, second, first]),
         vec![0, 0, 1, 1, 2]
     );
-    assert!(occurrence_ranks(&[]).is_empty());
+    assert!(
+        occurrence_ranks(&[]).is_empty(),
+        "{:?}",
+        occurrence_ranks(&[])
+    );
 }
 
 /// Adding a copy of known content elsewhere leaves the identifiers of the

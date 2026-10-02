@@ -467,8 +467,16 @@ mod tests {
 
     #[test]
     fn prototypes_are_not_units() {
-        assert!(units_of("int add(int a, int b);").is_empty());
-        assert!(units_of("extern void log_msg(const char *fmt, ...);").is_empty());
+        assert!(
+            units_of("int add(int a, int b);").is_empty(),
+            "{:?}",
+            units_of("int add(int a, int b);")
+        );
+        assert!(
+            units_of("extern void log_msg(const char *fmt, ...);").is_empty(),
+            "{:?}",
+            units_of("extern void log_msg(const char *fmt, ...);")
+        );
     }
 
     #[test]
@@ -530,7 +538,7 @@ mod tests {
     fn function_like_macro_bodies_do_not_produce_units() {
         // The whole definition is a directive, dropped before unit detection.
         let units = units_of("#define ADD(a, b) ((a) + (b))\n");
-        assert!(units.is_empty());
+        assert!(units.is_empty(), "units: {units:?}");
     }
 
     #[test]
@@ -546,7 +554,11 @@ mod tests {
 
     #[test]
     fn initializer_braces_are_not_functions() {
-        assert!(units_of("int a[] = {1, 2, 3};").is_empty());
+        assert!(
+            units_of("int a[] = {1, 2, 3};").is_empty(),
+            "{:?}",
+            units_of("int a[] = {1, 2, 3};")
+        );
         assert!(
             units_of("struct p q = {1, 2};")
                 .iter()
@@ -559,7 +571,7 @@ mod tests {
         let src = "int f(void) { return 1; }";
         let tokens = lex(src, &dialect::C).0;
         let (units, diagnostics) = detect(&tokens, &dialect::C);
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
         let f = &units[0];
         assert_eq!(tokens[f.token_end - 1].text, "}");
         assert_eq!(tokens[f.token_start].text, "f");
@@ -581,7 +593,7 @@ mod tests {
         let tokens = lex("int tail(void) { int value = 1;", &dialect::C).0;
         let (units, diagnostics) = detect(&tokens, &dialect::C);
 
-        assert!(units.is_empty());
+        assert!(units.is_empty(), "units: {units:?}");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].kind, DiagnosticKind::UnmatchedDelimiter);
     }

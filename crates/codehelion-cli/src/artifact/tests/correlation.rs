@@ -68,7 +68,11 @@ fn linker_map_recovers_an_unmapped_unit_without_basename_guessing() {
         &mut rows,
     );
 
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(rows.mappings.len(), 1);
     let mapping = &rows.mappings[0];
     assert_eq!(mapping.source_fingerprint, [3; 16]);
@@ -250,7 +254,11 @@ fn resolved_wasm_source_map_token_is_persisted_as_direct_mapping_evidence() {
         &mut rows,
     );
 
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(rows.mappings.len(), 1);
     assert_eq!(
         rows.mappings[0].evidence.facts,

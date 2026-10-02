@@ -674,7 +674,7 @@ mod tests {
         let first = generate(&files, &capped);
         let second = generate(&files, &capped);
 
-        assert!(full.pairs.is_empty());
+        assert!(full.pairs.is_empty(), "pairs: {:?}", full.pairs);
         assert_eq!(first.pairs, full.pairs);
         assert_eq!(first.stats.candidate_pairs, full.stats.candidate_pairs);
         assert_eq!(full.near_misses.len(), 3);
@@ -693,7 +693,7 @@ mod tests {
             unit(&[1, 2, 3, 4], &[5, 6], 40),
         ])];
         let set = generate(&files, &NearMatchConfig::default());
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert_eq!(set.stats.filtered_by_size, 1);
         assert_eq!(set.stats.filtered_by_jaccard, 0);
     }
@@ -704,7 +704,7 @@ mod tests {
         let set = generate(&files, &NearMatchConfig::default());
         assert_eq!(set.stats.signed_units, 0);
         assert_eq!(set.stats.skipped_small, 2);
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
     }
 
     #[test]
@@ -722,7 +722,7 @@ mod tests {
             ..NearMatchConfig::default()
         };
         let set = generate(&files, &config);
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert!(set.stats.stop_buckets > 0);
         assert_eq!(set.stats.candidate_pairs, 0);
     }

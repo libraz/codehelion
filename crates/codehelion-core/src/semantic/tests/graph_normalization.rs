@@ -436,6 +436,8 @@ fn a_registered_operation_no_rule_claims_still_produces_a_graph() {
     assert!(
         registered_semantic_windows(&unregistered)
             .expect("windows rebase safely")
-            .is_empty()
+            .is_empty(),
+        "{:?}",
+        registered_semantic_windows(&unregistered).expect("windows rebase safely")
     );
 }

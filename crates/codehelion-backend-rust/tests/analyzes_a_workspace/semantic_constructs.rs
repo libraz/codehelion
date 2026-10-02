@@ -181,7 +181,11 @@ fn a_direct_standard_file_acquisition_is_paired_with_its_scope_drop() {
     let ir = analyzed(&unit("plain", "ledger", "ledger"));
     assert!(ir.effects.computed);
     assert_eq!(ir.effects.interactions, ["file_io"]);
-    assert!(ir.effects.writes.is_empty());
+    assert!(
+        ir.effects.writes.is_empty(),
+        "writes: {:?}",
+        ir.effects.writes
+    );
     let lifetimes = ir
         .semantic_constructs
         .iter()

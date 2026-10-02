@@ -680,7 +680,11 @@ fn cpp_common_signature_silences_siblings_while_primary_keeps_the_duplicate() {
     let labels = LabelSet::from_json(&labels_text).expect("common-signature labels parse");
     // The corpus expects no sibling at all, so it carries no mirror label: the
     // duplication it does hold is an ordinary labelled clone pair.
-    assert!(labels.known_siblings.is_empty());
+    assert!(
+        labels.known_siblings.is_empty(),
+        "known siblings: {:?}",
+        labels.known_siblings
+    );
     assert_eq!(labels.clone_pairs.len(), 1);
 
     let scratch = tempfile::tempdir().expect("temp dir");

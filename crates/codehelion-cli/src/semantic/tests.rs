@@ -520,7 +520,7 @@ fn a_file_nobody_was_asked_about_is_named_without_a_unit_being_invented() {
     };
     assert_eq!(*reason, Unavailability::NoBuildInformation);
     assert_eq!(unit.file, source_path("build.rs"));
-    assert!(unit.unit.is_empty());
+    assert!(unit.unit.is_empty(), "unit: {:?}", unit.unit);
 }
 
 /// Two helpers, and each file goes to the one that reads its language. A

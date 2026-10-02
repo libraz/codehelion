@@ -68,9 +68,13 @@ mod tests {
         let lexed = RustFrontend.lex("fn main() { let x = 1; }");
         assert_eq!(lexed.language, Language::Rust);
         assert_eq!(lexed.frontend_version, FRONTEND_VERSION);
-        assert!(!lexed.tokens.is_empty());
+        assert!(!lexed.tokens.is_empty(), "tokens is empty");
         assert_eq!(lexed.units.len(), 1);
-        assert!(lexed.diagnostics.is_empty());
+        assert!(
+            lexed.diagnostics.is_empty(),
+            "diagnostics: {:?}",
+            lexed.diagnostics
+        );
     }
 
     proptest! {

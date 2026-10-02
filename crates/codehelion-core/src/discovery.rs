@@ -644,7 +644,11 @@ mod tests {
 
         let report = discover(&root, &config).unwrap();
 
-        assert!(report.packages.is_empty());
+        assert!(
+            report.packages.is_empty(),
+            "packages: {:?}",
+            report.packages
+        );
         assert!(report.compile_commands.is_none());
         assert_eq!(
             report

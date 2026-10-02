@@ -375,7 +375,11 @@ fn verification_budget_is_a_visible_deterministic_ceiling() {
         complete.stats.unit_pairs
     );
     assert_eq!(limited.stats.verified_pairs, 0);
-    assert!(limited.groups.groups.is_empty());
+    assert!(
+        limited.groups.groups.is_empty(),
+        "groups: {:?}",
+        limited.groups.groups
+    );
 }
 
 /// `min-clone-tokens` is a detector floor in Structural mode, not only a
@@ -402,7 +406,19 @@ fn structural_minimum_clone_tokens_filters_candidates_before_verification() {
     assert_eq!(filtered.stats.unit_pairs, 0);
     assert!(filtered.stats.below_min_clone_token_pairs > 0);
     assert_eq!(filtered.stats.verified_pairs, 0);
-    assert!(filtered.groups.groups.is_empty());
-    assert!(filtered.unrepresented.is_empty());
-    assert!(filtered.regions.is_empty());
+    assert!(
+        filtered.groups.groups.is_empty(),
+        "groups: {:?}",
+        filtered.groups.groups
+    );
+    assert!(
+        filtered.unrepresented.is_empty(),
+        "unrepresented: {:?}",
+        filtered.unrepresented
+    );
+    assert!(
+        filtered.regions.is_empty(),
+        "regions: {:?}",
+        filtered.regions
+    );
 }

@@ -880,7 +880,7 @@ mod tests {
         assert_eq!(wasm.observed_bytes, 8);
         assert_eq!(wasm.fingerprint, same.fingerprint);
         assert_ne!(wasm.fingerprint, changed.fingerprint);
-        assert!(wasm.symbols.is_empty());
+        assert!(wasm.symbols.is_empty(), "symbols: {:?}", wasm.symbols);
     }
 
     #[test]

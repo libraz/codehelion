@@ -148,5 +148,9 @@ fn architecture_selection_is_rejected_for_non_macho_inputs() {
 fn empty_archive_input_is_parsed_without_treating_it_as_unknown() {
     let archive = parse_input_format(b"!<arch>\n", None, None, None).expect("parse archive");
     assert_eq!(archive.format, BinaryFormat::Archive);
-    assert!(archive.archive_members.is_empty());
+    assert!(
+        archive.archive_members.is_empty(),
+        "archive members: {:?}",
+        archive.archive_members
+    );
 }

@@ -99,7 +99,7 @@ fn what_was_substituted_is_recorded_as_a_shape() {
 #[test]
 fn a_body_the_project_did_not_write_is_not_counted_as_repetition() {
     let ir = stamped();
-    assert!(!ir.instantiations.is_empty());
+    assert!(!ir.instantiations.is_empty(), "instantiations is empty");
     for stamp in &ir.instantiations {
         assert!(
             stamp.definition.starts_with("stamped::"),

@@ -271,7 +271,11 @@ mod tests {
             strings,
             vec!["R\"(a \"quoted\" b)\"", "R\"xy(close )\" here)xy\"",]
         );
-        assert!(out.diagnostics.is_empty());
+        assert!(
+            out.diagnostics.is_empty(),
+            "diagnostics: {:?}",
+            out.diagnostics
+        );
     }
 
     #[test]

@@ -319,7 +319,7 @@ fn what_two_readings_of_one_header_disagree_about_is_left_unsaid() {
     assert!(ir.unit.unit.is_empty(), "{:?}", ir.unit);
     // And what did survive carries no type it never had: the table holds
     // what the kept names refer to and nothing else.
-    assert!(ir.types.is_empty());
+    assert!(ir.types.is_empty(), "types: {:?}", ir.types);
 }
 
 /// A macro selected differently in two translation units can stamp a name
@@ -397,7 +397,7 @@ fn agreed_header_instantiations_are_retained_with_remapped_types() {
     let Gathered::Analyzed { ir, .. } = &gathered[2] else {
         panic!("the agreed template use answers the header");
     };
-    assert!(ir.symbols.is_empty());
+    assert!(ir.symbols.is_empty(), "symbols: {:?}", ir.symbols);
     assert_eq!(ir.instantiations.len(), 1);
     assert_eq!(ir.instantiations[0].instantiation_key, key);
     assert_eq!(ir.instantiations[0].arguments, [0]);
@@ -499,8 +499,12 @@ fn header_calls_survive_only_exact_translation_unit_agreement() {
     let Gathered::Analyzed { ir, .. } = &gathered[2] else {
         panic!("the agreed call answers the header");
     };
-    assert!(ir.symbols.is_empty());
-    assert!(ir.instantiations.is_empty());
+    assert!(ir.symbols.is_empty(), "symbols: {:?}", ir.symbols);
+    assert!(
+        ir.instantiations.is_empty(),
+        "instantiations: {:?}",
+        ir.instantiations
+    );
     assert_eq!(ir.calls, [stable]);
 }
 
@@ -565,9 +569,13 @@ fn header_unexpanded_macros_survive_only_exact_agreement() {
     let Gathered::Analyzed { ir, .. } = &gathered[2] else {
         panic!("the agreed coverage fact answers the header");
     };
-    assert!(ir.symbols.is_empty());
-    assert!(ir.instantiations.is_empty());
-    assert!(ir.calls.is_empty());
+    assert!(ir.symbols.is_empty(), "symbols: {:?}", ir.symbols);
+    assert!(
+        ir.instantiations.is_empty(),
+        "instantiations: {:?}",
+        ir.instantiations
+    );
+    assert!(ir.calls.is_empty(), "calls: {:?}", ir.calls);
     assert_eq!(
         ir.unexpanded_macros.as_slice(),
         std::slice::from_ref(&stable)
@@ -600,8 +608,8 @@ fn a_header_known_only_through_confirmed_constructs_is_answered() {
     let Gathered::Analyzed { ir, .. } = &gathered[1] else {
         panic!("the constructs the reader confirmed answer the header");
     };
-    assert!(ir.symbols.is_empty());
-    assert!(ir.calls.is_empty());
+    assert!(ir.symbols.is_empty(), "symbols: {:?}", ir.symbols);
+    assert!(ir.calls.is_empty(), "calls: {:?}", ir.calls);
     assert_eq!(
         ir.semantic_constructs
             .iter()
@@ -667,7 +675,11 @@ fn header_constructs_survive_only_exact_agreement() {
     );
     // The contradicted acquire took its interaction with it.
     assert!(ir.effects.computed);
-    assert!(ir.effects.interactions.is_empty());
+    assert!(
+        ir.effects.interactions.is_empty(),
+        "interactions: {:?}",
+        ir.effects.interactions
+    );
 }
 
 /// A construct every reader contradicts leaves the header with nothing said
@@ -761,7 +773,11 @@ fn a_reading_that_computed_no_effects_leaves_the_header_summary_uncomputed() {
     };
     assert_eq!(ir.semantic_constructs.len(), 2);
     assert!(!ir.effects.computed);
-    assert!(ir.effects.interactions.is_empty());
+    assert!(
+        ir.effects.interactions.is_empty(),
+        "interactions: {:?}",
+        ir.effects.interactions
+    );
 }
 
 /// A file that is its own unit was answered about the program it actually

@@ -613,7 +613,9 @@ mod tests {
         assert!(
             fragments(&tokens, &units, &braces, 50, 8)
                 .fragments
-                .is_empty()
+                .is_empty(),
+            "{:?}",
+            fragments(&tokens, &units, &braces, 50, 8).fragments
         );
         // The whole body and the 1-statement window are the same range: once.
         let frags = fragments(&tokens, &units, &braces, 1, 8).fragments;
@@ -693,7 +695,11 @@ mod tests {
 
         let extraction = fragments(&tokens, &[], &brace_pairs(&tokens), 1, 1);
 
-        assert!(extraction.fragments.is_empty());
+        assert!(
+            extraction.fragments.is_empty(),
+            "fragments: {:?}",
+            extraction.fragments
+        );
         assert_eq!(extraction.control_headers_over_limit, 1);
     }
 }

@@ -1019,7 +1019,7 @@ mod tests {
     fn an_empty_summary_says_whether_anyone_looked() {
         let summary = EffectSummary::default();
         assert!(!summary.computed);
-        assert!(summary.writes.is_empty());
+        assert!(summary.writes.is_empty(), "writes: {:?}", summary.writes);
         // "Nothing was found" and "nothing was attempted" are the same empty
         // list and must not read the same.
         let looked = EffectSummary {
@@ -1262,9 +1262,13 @@ mod tests {
         // The symbol stays, and what it says about a type it was not asked
         // about does not: an index into a table that is gone reaches nothing.
         assert_eq!(narrowed.symbols[0].type_index, None);
-        assert!(narrowed.types.is_empty());
-        assert!(narrowed.calls.is_empty());
-        assert!(narrowed.instantiations.is_empty());
+        assert!(narrowed.types.is_empty(), "types: {:?}", narrowed.types);
+        assert!(narrowed.calls.is_empty(), "calls: {:?}", narrowed.calls);
+        assert!(
+            narrowed.instantiations.is_empty(),
+            "instantiations: {:?}",
+            narrowed.instantiations
+        );
         assert!(narrowed.cfg.is_none());
 
         let mut whole = ir.clone();

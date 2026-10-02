@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn splits_keywords_identifiers_and_operators() {
         let (tokens, diags) = lex_c("static int add(int a, struct pair *p) { return a + p->x; }");
-        assert!(diags.is_empty());
+        assert!(diags.is_empty(), "diags: {diags:?}");
         let pairs: Vec<_> = tokens.iter().map(|t| (t.kind, t.text.as_str())).collect();
         assert_eq!(pairs[0], (TokenKind::Keyword, "static"));
         assert_eq!(pairs[1], (TokenKind::Keyword, "int"));
@@ -922,7 +922,7 @@ mod tests {
     fn preprocessor_directives_are_dropped_whole() {
         let src = "#include <stdio.h>\n#define TWICE(x) \\\n    ((x) + (x))\nint y;\n";
         let (tokens, diags) = lex_c(src);
-        assert!(diags.is_empty());
+        assert!(diags.is_empty(), "diags: {diags:?}");
         let texts: Vec<_> = tokens.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, vec!["int", "y", ";"]);
     }
@@ -956,7 +956,7 @@ mod tests {
     fn conditional_paths_separate_alternative_arms_and_literal_dead_code() {
         let src = "#ifdef _WIN32\nint windows_value;\n#else\nint unix_value;\n#endif\n#if 0\nint dead_value;\n#else\nint live_value;\n#endif\n";
         let (tokens, diagnostics, directives) = lex_with_directives(src, &dialect::C);
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
         let paths = conditional_paths(&tokens, &directives);
         let path_for = |name: &str| {
             let index = tokens
@@ -975,7 +975,7 @@ mod tests {
     fn unclosed_conditionals_do_not_invent_an_exclusion() {
         let src = "#ifdef MAYBE\nint first_value;\n#else\nint second_value;\n";
         let (tokens, diagnostics, directives) = lex_with_directives(src, &dialect::C);
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
         let paths = conditional_paths(&tokens, &directives);
         let path_for = |name: &str| {
             let index = tokens
@@ -995,7 +995,7 @@ mod tests {
     fn comment_pseudo_directives_do_not_make_code_unreachable() {
         let src = "// #if 0\nint still_live;\n// #endif\n";
         let (tokens, diagnostics, directives) = lex_with_directives(src, &dialect::C);
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
         let paths = conditional_paths(&tokens, &directives);
         let index = tokens
             .iter()
@@ -1016,7 +1016,7 @@ mod tests {
             "arm paths come from the lex that already ran, not from a second one"
         );
 
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
         assert_eq!(paths.len(), tokens.len());
         let path_for = |name: &str| {
             let index = tokens
@@ -1032,7 +1032,7 @@ mod tests {
     #[test]
     fn strings_and_chars_lex_with_escapes_and_prefixes() {
         let (tokens, diags) = lex_c("char *s = \"a \\\"q\\\" b\"; char c = 'x'; int m = 'ab';");
-        assert!(diags.is_empty());
+        assert!(diags.is_empty(), "diags: {diags:?}");
         let strings: Vec<_> = tokens
             .iter()
             .filter(|t| t.kind == TokenKind::Literal(LiteralKind::String))
@@ -1047,7 +1047,7 @@ mod tests {
         assert_eq!(chars, vec!["'x'", "'ab'"]);
 
         let (tokens, diags) = lex_c("const wchar_t *w = L\"wide\"; int u = u8\"n\"[0];");
-        assert!(diags.is_empty());
+        assert!(diags.is_empty(), "diags: {diags:?}");
         let strings: Vec<_> = tokens
             .iter()
             .filter(|t| t.kind == TokenKind::Literal(LiteralKind::String))
@@ -1090,7 +1090,7 @@ mod tests {
         let (tokens, diags) = lex_c(
             "int a = 0xFF; double b = 1.5e3; double c = 0x1.8p3; long d = 100UL; float e = .5f; float f = 1.f;",
         );
-        assert!(diags.is_empty());
+        assert!(diags.is_empty(), "diags: {diags:?}");
         let by_text = |needle: &str| {
             tokens
                 .iter()
@@ -1272,7 +1272,7 @@ mod tests {
     fn raw_strings_do_not_exist_in_c() {
         // `R"(x)"` in C is the identifier `R` followed by an ordinary string.
         let (tokens, diags) = lex_c("R\"(x)\"");
-        assert!(diags.is_empty());
+        assert!(diags.is_empty(), "diags: {diags:?}");
         assert_eq!(tokens[0].kind, TokenKind::Identifier);
         assert_eq!(tokens[0].text, "R");
         assert_eq!(tokens[1].kind, TokenKind::Literal(LiteralKind::String));
@@ -1290,7 +1290,7 @@ mod tests {
     #[test]
     fn skips_a_leading_utf8_bom_without_shifting_source_columns() {
         let (tokens, diagnostics) = lex_c("\u{feff}int value;");
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
 
         let keyword = &tokens[0];
         assert_eq!(keyword.kind, TokenKind::Keyword);

@@ -977,7 +977,7 @@ mod tests {
         assert!(retained_sizes(&artifact).is_some());
         let dead = dead_code_candidates(&artifact).unwrap();
         assert!(!dead.definitive);
-        assert!(dead.symbols.is_empty());
+        assert!(dead.symbols.is_empty(), "symbols: {:?}", dead.symbols);
     }
 
     #[test]

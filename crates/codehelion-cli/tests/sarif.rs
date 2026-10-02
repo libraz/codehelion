@@ -135,7 +135,7 @@ fn structural_output_satisfies_the_published_schema() {
     assert_eq!(run["properties"]["mode"], "structural");
 
     let results = run["results"].as_array().unwrap();
-    assert!(!results.is_empty());
+    assert!(!results.is_empty(), "results is empty");
     let gapped = results
         .iter()
         .find(|result| result["ruleId"] == "clone/type-3")
@@ -262,7 +262,7 @@ fn the_stable_clone_id_is_published_as_a_partial_fingerprint() {
             .collect()
     };
     let before = fingerprints(&first);
-    assert!(!before.is_empty());
+    assert!(!before.is_empty(), "before is empty");
     // A rescan of unchanged sources yields the same identities, which is what
     // lets a consumer track a group across runs.
     assert_eq!(before, fingerprints(&second));
@@ -320,7 +320,7 @@ fn fast_output_satisfies_the_published_schema_and_scores_no_dimensions() {
 
     assert_eq!(log["runs"][0]["properties"]["mode"], "fast");
     let results = log["runs"][0]["results"].as_array().unwrap();
-    assert!(!results.is_empty());
+    assert!(!results.is_empty(), "results is empty");
     for result in results {
         assert_eq!(
             result["properties"]["similarity"],

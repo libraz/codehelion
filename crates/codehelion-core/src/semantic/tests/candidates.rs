@@ -195,7 +195,7 @@ fn cross_language_candidates_do_not_join_domains_or_unregistered_apis() {
         },
     ];
     let candidates = extract_cross_language_candidates(&inputs, SemanticCandidateConfig::default());
-    assert!(candidates.pairs.is_empty());
+    assert!(candidates.pairs.is_empty(), "pairs: {:?}", candidates.pairs);
     assert_eq!(candidates.stats.buckets, 2);
     assert_eq!(candidates.stats.ineligible_graphs, 1);
 }
@@ -211,7 +211,7 @@ fn sequence_rule_rejects_operations_outside_its_declared_pattern() {
     let extracted =
         extract_registered_candidates(&[validation], SemanticCandidateConfig::default());
     assert_eq!(extracted.stats.ineligible_graphs, 1);
-    assert!(extracted.pairs.is_empty());
+    assert!(extracted.pairs.is_empty(), "pairs: {:?}", extracted.pairs);
 }
 
 fn pipeline(
@@ -285,7 +285,11 @@ fn semantic_grouping_keeps_registered_rules_in_separate_groups() {
             .collect::<Vec<_>>(),
         expected
     );
-    assert!(grouping.ungrouped.is_empty());
+    assert!(
+        grouping.ungrouped.is_empty(),
+        "ungrouped: {:?}",
+        grouping.ungrouped
+    );
 }
 
 #[test]
@@ -542,7 +546,7 @@ fn candidate_limits_drop_complete_buckets_and_account_for_them() {
             max_candidate_pairs: 10,
         },
     );
-    assert!(oversized.pairs.is_empty());
+    assert!(oversized.pairs.is_empty(), "pairs: {:?}", oversized.pairs);
     assert_eq!(oversized.stats.oversized_buckets, 1);
     assert_eq!(oversized.stats.pairs_available, 0);
 
@@ -553,7 +557,7 @@ fn candidate_limits_drop_complete_buckets_and_account_for_them() {
             max_candidate_pairs: 2,
         },
     );
-    assert!(budgeted.pairs.is_empty());
+    assert!(budgeted.pairs.is_empty(), "pairs: {:?}", budgeted.pairs);
     assert_eq!(budgeted.stats.pairs_available, 3);
     assert_eq!(budgeted.stats.pairs_budget_dropped, 3);
 }
@@ -581,7 +585,15 @@ fn verifier_rejects_type_mismatch_and_out_of_range_candidate() {
                 SemanticCandidatePair { left: 0, right: 2 },
             ],
         )
-        .is_empty()
+        .is_empty(),
+        "{:?}",
+        verify_registered_candidates(
+            &graphs,
+            &[
+                SemanticCandidatePair { left: 0, right: 1 },
+                SemanticCandidatePair { left: 0, right: 2 },
+            ],
+        )
     );
 }
 
@@ -607,7 +619,7 @@ fn the_registered_bucket_index_cuts_at_the_stated_posting_ceiling() {
     assert_eq!(stated.max_bucket_members, profile.posting_cap);
 
     let contained = extract_registered_candidates(&bucket, stated);
-    assert!(contained.pairs.is_empty());
+    assert!(contained.pairs.is_empty(), "pairs: {:?}", contained.pairs);
     assert_eq!(contained.stats.oversized_buckets, 1);
 
     let default_profile = crate::execution::Limits::default();
@@ -618,7 +630,7 @@ fn the_registered_bucket_index_cuts_at_the_stated_posting_ceiling() {
             .semantic_candidates(),
     );
     assert_eq!(admitted.stats.oversized_buckets, 0);
-    assert!(!admitted.pairs.is_empty());
+    assert!(!admitted.pairs.is_empty(), "pairs is empty");
 }
 
 /// Refinement is quadratic in the size of the set it refines, so a profile that

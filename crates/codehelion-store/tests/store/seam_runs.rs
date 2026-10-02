@@ -230,7 +230,11 @@ fn an_empty_ledger_records_a_run_with_no_entries() {
 
     assert_eq!(stored.id, id);
     assert_eq!(stored.run, run);
-    assert!(stored.run.entries.is_empty());
+    assert!(
+        stored.run.entries.is_empty(),
+        "entries: {:?}",
+        stored.run.entries
+    );
 }
 
 /// A range with no commits in it is a measurement, not a failure: a repository

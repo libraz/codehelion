@@ -672,7 +672,7 @@ impl S {
             error_nodes >= 1,
             "the malformed region yields an Error node"
         );
-        assert!(!file.error_ranges.is_empty());
+        assert!(!file.error_ranges.is_empty(), "error ranges is empty");
     }
 
     #[test]
@@ -687,7 +687,7 @@ impl S {
             shapes_of(&function.children[0].children),
             vec![Shape::VarDecl]
         );
-        assert!(!file.error_ranges.is_empty());
+        assert!(!file.error_ranges.is_empty(), "error ranges is empty");
     }
 
     #[test]
@@ -767,6 +767,10 @@ impl S {
         assert_eq!(file.language, Language::Rust);
         assert_eq!(file.frontend_version, STRUCTURAL_FRONTEND_VERSION);
         assert_eq!(file.ir_schema_version, IR_SCHEMA_VERSION);
-        assert!(file.diagnostics.is_empty());
+        assert!(
+            file.diagnostics.is_empty(),
+            "diagnostics: {:?}",
+            file.diagnostics
+        );
     }
 }

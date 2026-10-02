@@ -290,7 +290,7 @@ mod tests {
     fn different_skeletons_do_not_pair() {
         let files = vec![file(vec![unit(1, 4, 20), unit(2, 4, 20)])];
         let set = generate(&files, &ControlFlowConfig::default());
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert_eq!(set.stats.distinct_skeletons, 2);
     }
 
@@ -300,7 +300,7 @@ mod tests {
         // otherwise pair are left out, and the skip is counted.
         let files = vec![file(vec![unit(1, 3, 20), unit(1, 3, 20)])];
         let set = generate(&files, &ControlFlowConfig::default());
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert_eq!(set.stats.skipped_shallow, 2);
         assert_eq!(set.stats.indexed_units, 0);
     }
@@ -310,7 +310,7 @@ mod tests {
         // Same skeleton, sizes 10 and 40: ratio 4 exceeds the cap of 3.
         let files = vec![file(vec![unit(1, 4, 10), unit(1, 4, 40)])];
         let set = generate(&files, &ControlFlowConfig::default());
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert_eq!(set.stats.filtered_by_size, 1);
     }
 
@@ -327,7 +327,7 @@ mod tests {
             ..ControlFlowConfig::default()
         };
         let set = generate(&files, &config);
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert_eq!(set.stats.stop_skeletons, 1);
         assert_eq!(set.stats.stop_postings, 4);
     }
@@ -348,7 +348,7 @@ mod tests {
             ..ControlFlowConfig::default()
         };
         let set = generate(&files, &config);
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert!(set.stats.budget_exhausted);
         assert_eq!(set.stats.budget_dropped, 6);
     }
@@ -372,7 +372,7 @@ mod tests {
             ..ControlFlowConfig::default()
         };
         let set = generate(&files, &config);
-        assert!(set.pairs.is_empty());
+        assert!(set.pairs.is_empty(), "pairs: {:?}", set.pairs);
         assert!(set.stats.budget_exhausted);
         assert_eq!(set.stats.filtered_by_size, 0);
         assert_eq!(set.stats.budget_dropped, 9);

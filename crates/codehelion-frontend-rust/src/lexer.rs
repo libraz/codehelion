@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn splits_keywords_identifiers_and_operators() {
         let (tokens, diags) = lex("fn add(a: i32) -> i32 { a + 1 }");
-        assert!(diags.is_empty());
+        assert!(diags.is_empty(), "diags: {diags:?}");
         let pairs: Vec<_> = tokens.iter().map(|t| (t.kind, t.text.as_str())).collect();
         assert_eq!(pairs[0], (TokenKind::Keyword, "fn"));
         assert_eq!(pairs[1], (TokenKind::Identifier, "add"));
@@ -627,7 +627,7 @@ mod tests {
     fn keeps_hex_and_unicode_character_escapes_together() {
         let (tokens, diagnostics) =
             lex("let a = '\\x41'; let b = '\\u{1f980}'; let c = b'\\xFF'; let tail = 1;");
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
         let characters: Vec<_> = tokens
             .iter()
             .filter(|token| token.kind == TokenKind::Literal(LiteralKind::Char))
@@ -680,7 +680,7 @@ mod tests {
     #[test]
     fn a_unicode_escape_with_digit_separators_stays_one_literal() {
         let (tokens, diagnostics) = lex("let a = '\\u{1_F980}'; let tail = 1;");
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
         let characters: Vec<_> = tokens
             .iter()
             .filter(|token| token.kind == TokenKind::Literal(LiteralKind::Char))
@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn integer_suffixes_do_not_turn_into_exponents() {
         let (tokens, diagnostics) = lex("a[1usize+x]; b[1isize+y]; c[1e2+z]");
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
         let literals: Vec<_> = tokens
             .iter()
             .filter(|token| matches!(token.kind, TokenKind::Literal(_)))
@@ -714,7 +714,7 @@ mod tests {
         // Source: let a = r#"x "q" y"#; let b = b"z"; let c = br#"w"#;
         let src = "let a = r#\"x \"q\" y\"#; let b = b\"z\"; let c = br#\"w\"#;";
         let (tokens, diags) = lex(src);
-        assert!(diags.is_empty());
+        assert!(diags.is_empty(), "diags: {diags:?}");
         let strings: Vec<_> = tokens
             .iter()
             .filter(|t| t.kind == TokenKind::Literal(LiteralKind::String))
@@ -730,7 +730,7 @@ mod tests {
             "let a = r##\"a \" b\"##; let b = r###\"c \" d\"###; let c = r{hashes_255}\"e \" f\"{hashes_255}; let tail = 1;"
         );
         let (tokens, diagnostics) = lex(&source);
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
 
         let strings: Vec<_> = tokens
             .iter()
@@ -763,7 +763,7 @@ mod tests {
         let (tokens, diagnostics) = lex(&source);
         let elapsed = started.elapsed();
 
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
         let strings: Vec<_> = tokens
             .iter()
             .filter(|token| token.kind == TokenKind::Literal(LiteralKind::String))
@@ -801,7 +801,7 @@ mod tests {
     #[test]
     fn handles_c_and_raw_c_strings() {
         let (tokens, diagnostics) = lex("let a = c\"path\"; let b = cr#\"raw # path\"#; tail();");
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
         let strings: Vec<_> = tokens
             .iter()
             .filter(|token| token.kind == TokenKind::Literal(LiteralKind::String))
@@ -859,7 +859,7 @@ mod tests {
     #[test]
     fn skips_a_leading_utf8_bom_without_shifting_source_columns() {
         let (tokens, diagnostics) = lex("\u{feff}fn f() {}");
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "diagnostics: {diagnostics:?}");
 
         let keyword = &tokens[0];
         assert_eq!(keyword.kind, TokenKind::Keyword);

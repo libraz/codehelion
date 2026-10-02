@@ -86,7 +86,11 @@ fn a_failure_recorded_beside_no_helper_still_counts_as_unavailable() {
     let silent = store
         .record_snapshot(&snapshot("/a", &variant, Vec::new(), Vec::new()))
         .unwrap();
-    assert!(store.run_compiler_units(silent).unwrap().is_empty());
+    assert!(
+        store.run_compiler_units(silent).unwrap().is_empty(),
+        "{:?}",
+        store.run_compiler_units(silent).unwrap()
+    );
 
     let asked = store
         .record_snapshot(&snapshot(

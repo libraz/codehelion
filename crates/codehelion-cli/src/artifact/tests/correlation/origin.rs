@@ -76,7 +76,11 @@ fn exact_generic_instantiation_key_maps_the_definition_origin() {
         BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(rows.mappings.len(), 2);
     assert_eq!(rows.mappings[0].source_fingerprint, [3; 16]);
     assert_eq!(
@@ -233,7 +237,11 @@ fn generic_origin_maps_one_source_to_each_instantiated_symbol() {
         BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(rows.mappings.len(), 2);
     assert!(
         rows.mappings
@@ -315,7 +323,11 @@ fn clang_template_display_key_maps_only_its_demangled_specialization() {
         BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(rows.mappings.len(), 1);
     assert_eq!(rows.mappings[0].source_fingerprint, [3; 16]);
     assert_eq!(
@@ -445,6 +457,14 @@ fn generic_type_arguments_keep_nested_specializations_intact() {
         generic_type_arguments("crate::make<Vec<Result<String, Error>>, 4>"),
         vec!["Vec<Result<String, Error>>", "4"]
     );
-    assert!(generic_type_arguments("crate::make<>").is_empty());
-    assert!(generic_type_arguments("crate::make<String").is_empty());
+    assert!(
+        generic_type_arguments("crate::make<>").is_empty(),
+        "{:?}",
+        generic_type_arguments("crate::make<>")
+    );
+    assert!(
+        generic_type_arguments("crate::make<String").is_empty(),
+        "{:?}",
+        generic_type_arguments("crate::make<String")
+    );
 }

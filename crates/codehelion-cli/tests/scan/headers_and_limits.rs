@@ -500,7 +500,7 @@ fn json_reports_follow_the_versioned_schema() {
 
     // Deterministic listing: priority descending across the whole document.
     let groups = value["groups"].as_array().unwrap();
-    assert!(!groups.is_empty());
+    assert!(!groups.is_empty(), "groups is empty");
     let priorities: Vec<f64> = groups
         .iter()
         .map(|group| group["priority"]["value"].as_f64().unwrap())

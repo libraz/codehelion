@@ -424,7 +424,9 @@ fn an_incomplete_partition_keeps_the_prior_snapshot_readable() {
         store
             .ids_starting_with(&group_fingerprint[..12])
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "{:?}",
+        store.ids_starting_with(&group_fingerprint[..12]).unwrap()
     );
 
     store.complete_snapshot_parts(&[incomplete_run]).unwrap();
@@ -473,7 +475,11 @@ fn writer_open_reaps_expired_partitions_left_by_another_invocation() {
     std::fs::copy(&database, &inherited).unwrap();
 
     let store = Store::open(&inherited).unwrap();
-    assert!(store.abandoned_runs().unwrap().is_empty());
+    assert!(
+        store.abandoned_runs().unwrap().is_empty(),
+        "{:?}",
+        store.abandoned_runs().unwrap()
+    );
     assert_eq!(store.table_count("scan_run").unwrap(), 0);
     assert_eq!(store.table_count("fingerprint").unwrap(), 0);
 }
@@ -509,7 +515,11 @@ fn a_long_invocation_still_finalizes_the_partition_it_staged() {
         )
         .unwrap();
 
-    assert!(store.abandoned_runs().unwrap().is_empty());
+    assert!(
+        store.abandoned_runs().unwrap().is_empty(),
+        "{:?}",
+        store.abandoned_runs().unwrap()
+    );
     assert_eq!(store.table_count("scan_run").unwrap(), 1);
     assert_eq!(
         store

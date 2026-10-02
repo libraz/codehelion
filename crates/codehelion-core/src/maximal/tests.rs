@@ -195,7 +195,7 @@ fn a_run_matching_a_shifted_copy_of_itself_is_dropped() {
     // Reporting that as two instances would double-count one stretch.
     let pairs = vec![seed(window(0, 0, 0, 0, 4), window(0, 0, 0, 1, 4))];
     let set = consolidate(&pairs, &MaximalConfig::default());
-    assert!(set.regions.is_empty());
+    assert!(set.regions.is_empty(), "regions: {:?}", set.regions);
     assert_eq!(set.stats.self_overlapping, 1);
 }
 
@@ -248,7 +248,7 @@ fn a_seed_whose_sides_cover_unequal_code_is_dropped() {
     a.end_byte = a.start_byte + 100;
     b.end_byte = b.start_byte + 300;
     let set = consolidate(&[seed(a, b)], &MaximalConfig::default());
-    assert!(set.regions.is_empty());
+    assert!(set.regions.is_empty(), "regions: {:?}", set.regions);
     assert_eq!(set.stats.seeds, 1);
     assert_eq!(set.stats.divergent_extent, 1);
 
@@ -268,7 +268,7 @@ fn the_minimum_length_drops_short_runs_and_counts_them() {
         ..MaximalConfig::default()
     };
     let set = consolidate(&pairs, &config);
-    assert!(set.regions.is_empty());
+    assert!(set.regions.is_empty(), "regions: {:?}", set.regions);
     assert_eq!(set.stats.below_minimum, 1);
 }
 
@@ -279,7 +279,7 @@ fn subtree_seeds_do_not_enter_the_fold() {
     pair.a.run = None;
     pair.b.run = None;
     let set = consolidate(&[pair], &MaximalConfig::default());
-    assert!(set.regions.is_empty());
+    assert!(set.regions.is_empty(), "regions: {:?}", set.regions);
     assert_eq!(set.stats.seeds, 0);
 }
 

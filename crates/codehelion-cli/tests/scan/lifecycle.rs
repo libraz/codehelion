@@ -23,7 +23,7 @@ fn scan_detects_clones_and_records_a_snapshot() {
     let run = store.latest_run().unwrap().expect("a recorded run");
     assert_eq!(run.analysis_mode, "fast");
     let groups = store.run_groups(run.id).unwrap();
-    assert!(!groups.is_empty());
+    assert!(!groups.is_empty(), "groups is empty");
 
     // The Rust copies share a body fragment; the renamed copy joins the same
     // Type-2 finding without turning that partial match into a whole-unit one.
@@ -67,7 +67,7 @@ fn scan_detects_clones_and_records_a_snapshot() {
     assert!(rust_group.members.iter().any(|m| m.file_path == "src/c.rs"));
 
     let findings = store.run_findings(run.id).unwrap();
-    assert!(!findings.is_empty());
+    assert!(!findings.is_empty(), "findings is empty");
 }
 
 #[test]

@@ -563,7 +563,10 @@ fn a_reader_that_stops_early_leaves_the_scan_successful_and_recorded() {
 
     let store = Store::open_existing(&dir.path().join(".codehelion/audit.db")).unwrap();
     let run = store.latest_run().unwrap().expect("recorded run");
-    assert!(!store.run_groups(run.id).unwrap().is_empty());
+    assert!(
+        !store.run_groups(run.id).unwrap().is_empty(),
+        "expected a non-empty value"
+    );
 }
 
 /// The arguments of the `codehelion <command> ...` a text report printed after

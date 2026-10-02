@@ -236,7 +236,11 @@ fn the_corpus_brackets_the_acceptance_threshold() {
     let report = analyze(&[SEED, REWRITTEN]);
     assert_eq!(report.stats.unit_pairs, 1);
     assert_eq!(report.stats.verified_pairs, 0);
-    assert!(report.groups.groups.is_empty());
+    assert!(
+        report.groups.groups.is_empty(),
+        "groups: {:?}",
+        report.groups.groups
+    );
 
     // Both sides of the threshold, with room to move it either way: that is
     // what makes this corpus usable for calibrating it.

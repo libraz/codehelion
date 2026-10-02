@@ -290,7 +290,7 @@ mod tests {
     fn identical_runs_witness_no_change() {
         let left = tokens(&[name("a"), name("b")]);
         let witness = witness(&left, &left).unwrap();
-        assert!(witness.changes.is_empty());
+        assert!(witness.changes.is_empty(), "changes: {:?}", witness.changes);
         assert_eq!(witness.edits, 0);
         // No change is not one width apart: they are the same text, which is
         // what a verbatim copy is.
@@ -317,7 +317,7 @@ mod tests {
         let left = tokens(&[name("a"), name("b"), name("c")]);
         let right = tokens(&[name("a"), name("c")]);
         let witness = witness(&left, &right).unwrap();
-        assert!(witness.changes.is_empty());
+        assert!(witness.changes.is_empty(), "changes: {:?}", witness.changes);
         assert_eq!(witness.edits, 1);
     }
 

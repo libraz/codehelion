@@ -69,7 +69,11 @@ fn conflicting_generic_origin_and_name_candidates_remain_ambiguous() {
         BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(rows.mappings.len(), 2);
     assert_eq!(
         rows.mappings
@@ -302,7 +306,11 @@ fn same_named_units_remain_ambiguous_name_candidates() {
         BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
-    assert!(rows.unmapped_symbols.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
     assert_eq!(rows.mappings.len(), 2);
     assert!(rows.mappings.iter().all(|mapping| {
         mapping.evidence.confidence()
@@ -412,7 +420,11 @@ fn equal_content_declarations_each_receive_their_own_name_mapping() {
             && mapping.evidence.confidence()
                 == Some(codehelion_store::artifact::ArtifactAnalysisMappingConfidence::Ambiguous)
     }));
-    assert!(rows.unmapped_sources.is_empty());
+    assert!(
+        rows.unmapped_sources.is_empty(),
+        "unmapped sources: {:?}",
+        rows.unmapped_sources
+    );
 }
 
 /// Debug information written on Windows spells a file with `\`, while the scan
@@ -420,6 +432,10 @@ fn equal_content_declarations_each_receive_their_own_name_mapping() {
 /// reach the same verdict about that pair, or a symbol is placed by one
 /// question and dropped as outside the scanned tree by the next.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fixture and the check of every correlation row read as one case"
+)]
 fn one_file_spelled_with_either_separator_correlates_the_same_way() {
     let mut artifact = ArtifactIr::empty(BinaryFormat::PeCoff, b"windows-paths");
     artifact.symbols.push(codehelion_artifact::ArtifactSymbol {
@@ -482,8 +498,16 @@ fn one_file_spelled_with_either_separator_correlates_the_same_way() {
         BuildVariantFingerprint::from_bytes([5; 16]),
     );
 
-    assert!(rows.unmapped_symbols.is_empty());
-    assert!(rows.unmapped_sources.is_empty());
+    assert!(
+        rows.unmapped_symbols.is_empty(),
+        "unmapped symbols: {:?}",
+        rows.unmapped_symbols
+    );
+    assert!(
+        rows.unmapped_sources.is_empty(),
+        "unmapped sources: {:?}",
+        rows.unmapped_sources
+    );
     let kinds: BTreeSet<_> = rows
         .mappings
         .iter()

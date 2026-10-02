@@ -252,8 +252,16 @@ mod tests {
 
     #[test]
     fn kgram_short_input_is_empty() {
-        assert!(kgram_hashes(&[1, 2, 3], 4).is_empty());
-        assert!(kgram_hashes(&[], 1).is_empty());
+        assert!(
+            kgram_hashes(&[1, 2, 3], 4).is_empty(),
+            "{:?}",
+            kgram_hashes(&[1, 2, 3], 4)
+        );
+        assert!(
+            kgram_hashes(&[], 1).is_empty(),
+            "{:?}",
+            kgram_hashes(&[], 1)
+        );
     }
 
     #[test]

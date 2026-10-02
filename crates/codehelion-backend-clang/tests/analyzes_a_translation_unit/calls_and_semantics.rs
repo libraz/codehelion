@@ -325,7 +325,11 @@ fn direct_standard_lock_guard_lifetimes_are_reported_at_function_scope() {
     let ir = overload_ir(&planted);
     assert!(ir.effects.computed);
     assert_eq!(ir.effects.interactions, ["synchronization"]);
-    assert!(ir.effects.writes.is_empty());
+    assert!(
+        ir.effects.writes.is_empty(),
+        "writes: {:?}",
+        ir.effects.writes
+    );
     let lifetimes = ir
         .semantic_constructs
         .iter()

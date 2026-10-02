@@ -190,8 +190,16 @@ mod tests {
         let leading_binder = parse(
             "template <class T> requires requires(int local) { local > 0; } int first(T value) { return 0; }",
         );
-        assert!(leading_binder.error_ranges.is_empty());
-        assert!(leading_binder.signatures.is_empty());
+        assert!(
+            leading_binder.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            leading_binder.error_ranges
+        );
+        assert!(
+            leading_binder.signatures.is_empty(),
+            "signatures: {:?}",
+            leading_binder.signatures
+        );
     }
 
     #[test]
@@ -258,14 +266,30 @@ mod tests {
         let ambiguous = parse(
             "template <typename T> int first(int T) requires (T > 0) { return 0; }\ntemplate <int N> int second(int N) requires (N > 0) { return 0; }",
         );
-        assert!(ambiguous.error_ranges.is_empty());
-        assert!(ambiguous.signatures.is_empty());
+        assert!(
+            ambiguous.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            ambiguous.error_ranges
+        );
+        assert!(
+            ambiguous.signatures.is_empty(),
+            "signatures: {:?}",
+            ambiguous.signatures
+        );
 
         let nested_shadow = parse(
             "template <class T> struct A { template <class T> T first(T value) { return value; } };",
         );
-        assert!(nested_shadow.error_ranges.is_empty());
-        assert!(nested_shadow.signatures.is_empty());
+        assert!(
+            nested_shadow.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            nested_shadow.error_ranges
+        );
+        assert!(
+            nested_shadow.signatures.is_empty(),
+            "signatures: {:?}",
+            nested_shadow.signatures
+        );
     }
 
     #[test]
@@ -327,7 +351,11 @@ mod tests {
     fn signatures_reject_returnless_cpp_special_members_and_keep_trailing_return_type() {
         let special_members =
             parse("struct S { S(int value) {} ~S() {} operator bool() const { return true; } };");
-        assert!(special_members.signatures.is_empty());
+        assert!(
+            special_members.signatures.is_empty(),
+            "signatures: {:?}",
+            special_members.signatures
+        );
 
         let trailing = parse("auto first(int value) -> long { return value; }");
         assert_eq!(trailing.signatures.len(), 1);
@@ -373,7 +401,7 @@ mod tests {
         let body_macro = parse("int body_macro(int value) { API(value); return value; }");
         assert_eq!(body_macro.signatures.len(), 1);
         let body_error = parse("int body_error(int value) { auto =; return value; }");
-        assert!(!body_error.error_ranges.is_empty());
+        assert!(!body_error.error_ranges.is_empty(), "error ranges is empty");
         assert_eq!(body_error.signatures.len(), 1);
     }
 
@@ -381,7 +409,7 @@ mod tests {
     fn signatures_keep_healthy_cpp_units_when_another_header_is_broken() {
         let source = "int healthy(int value) { API(value); return value; }\nint broken(int value { return value; }";
         let file = parse(source);
-        assert!(!file.error_ranges.is_empty());
+        assert!(!file.error_ranges.is_empty(), "error ranges is empty");
         assert_eq!(file.signatures.len(), 1);
         let (range, _) = &file.signatures[0];
         assert!(source[range.start..range.end].contains("healthy"));
@@ -607,8 +635,16 @@ mod tests {
         let local_binding = parse(
             "template <typename T> int first(int value) requires requires(int local) { value > local; } { return 0; }\ntemplate <typename T> int second(int renamed) requires requires(int other) { renamed > other; } { return 0; }",
         );
-        assert!(local_binding.error_ranges.is_empty());
-        assert!(local_binding.signatures.is_empty());
+        assert!(
+            local_binding.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            local_binding.error_ranges
+        );
+        assert!(
+            local_binding.signatures.is_empty(),
+            "signatures: {:?}",
+            local_binding.signatures
+        );
 
         let leading_requires = parse(
             "template <class T> requires First<T> int first(int value) { return 0; }\ntemplate <class T> requires Second<T> int second(int renamed) { return 0; }",
@@ -621,25 +657,52 @@ mod tests {
 
         let broken_leading_requires =
             parse("template <class T> requires (First<T> && ) int first(int value) { return 0; }");
-        assert!(!broken_leading_requires.error_ranges.is_empty());
-        assert!(broken_leading_requires.signatures.is_empty());
+        assert!(
+            !broken_leading_requires.error_ranges.is_empty(),
+            "error ranges is empty"
+        );
+        assert!(
+            broken_leading_requires.signatures.is_empty(),
+            "signatures: {:?}",
+            broken_leading_requires.signatures
+        );
 
         let shadowed = parse(
             "template <typename T> int first(int value) requires requires(int value) { value > 0; } { return 0; }\ntemplate <typename T> int second(int renamed) requires requires(int renamed) { renamed > 0; } { return 0; }",
         );
-        assert!(shadowed.error_ranges.is_empty());
-        assert!(shadowed.signatures.is_empty());
+        assert!(
+            shadowed.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            shadowed.error_ranges
+        );
+        assert!(
+            shadowed.signatures.is_empty(),
+            "signatures: {:?}",
+            shadowed.signatures
+        );
 
         let lambda = parse(
             "int first(int value) noexcept([&](int local) { return value + local; }(0)) { return value; }\nint second(int renamed) noexcept([&](int local) { return renamed + local; }(0)) { return renamed; }",
         );
-        assert!(lambda.error_ranges.is_empty());
-        assert!(lambda.signatures.is_empty());
+        assert!(
+            lambda.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            lambda.error_ranges
+        );
+        assert!(
+            lambda.signatures.is_empty(),
+            "signatures: {:?}",
+            lambda.signatures
+        );
 
         let default_lambda = parse(
             "int first(int value = [] { return 1; }()) { return value; }\nint second(int renamed = [] { return 2; }()) { return renamed; }",
         );
-        assert!(default_lambda.error_ranges.is_empty());
+        assert!(
+            default_lambda.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            default_lambda.error_ranges
+        );
         assert_eq!(default_lambda.signatures.len(), 2);
         assert_eq!(
             default_lambda.signatures[0].1,
@@ -649,7 +712,11 @@ mod tests {
         let default_literal = parse(
             "int first(const char *value = \"...\") { return 0; }\nint second(const char *renamed = \"...\") { return 0; }",
         );
-        assert!(default_literal.error_ranges.is_empty());
+        assert!(
+            default_literal.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            default_literal.error_ranges
+        );
         assert_eq!(default_literal.signatures.len(), 2);
         assert_eq!(
             default_literal.signatures[0].1,
@@ -659,7 +726,11 @@ mod tests {
         let default_templates = parse(
             "int first(int value = make<A>()) { return 0; }\nint second(int renamed = make<B>()) { return 0; }",
         );
-        assert!(default_templates.error_ranges.is_empty());
+        assert!(
+            default_templates.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            default_templates.error_ranges
+        );
         assert_eq!(default_templates.signatures.len(), 2);
         assert_eq!(
             default_templates.signatures[0].1,
@@ -669,7 +740,11 @@ mod tests {
         let default_requires = parse(
             "int first(int value = requires { requires true; }) { return 0; }\nint second(int renamed = 2) { return 0; }",
         );
-        assert!(default_requires.error_ranges.is_empty());
+        assert!(
+            default_requires.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            default_requires.error_ranges
+        );
         assert_eq!(default_requires.signatures.len(), 2);
         assert_eq!(
             default_requires.signatures[0].1,
@@ -682,14 +757,22 @@ mod tests {
         let words = parse(
             "struct constint {}; const int first(int value) noexcept(+ +value) { return value; }\nconstint second(int value) noexcept(+ +value) { return {}; }",
         );
-        assert!(words.error_ranges.is_empty());
+        assert!(
+            words.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            words.error_ranges
+        );
         assert_eq!(words.signatures.len(), 2);
         assert_ne!(words.signatures[0].1.key, words.signatures[1].1.key);
 
         let punctuation = parse(
             "int first(int value) noexcept(+ +value) { return value; }\nint second(int value) noexcept(++value) { return value; }",
         );
-        assert!(punctuation.error_ranges.is_empty());
+        assert!(
+            punctuation.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            punctuation.error_ranges
+        );
         assert_eq!(punctuation.signatures.len(), 2);
         assert_ne!(
             punctuation.signatures[0].1.key,
@@ -699,7 +782,11 @@ mod tests {
         let literals = parse(
             "decltype(\"a b\") first(int value) { return {}; }\ndecltype(\"ab\") second(int value) { return {}; }",
         );
-        assert!(literals.error_ranges.is_empty());
+        assert!(
+            literals.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            literals.error_ranges
+        );
         assert_eq!(literals.signatures.len(), 2);
         assert_ne!(literals.signatures[0].1.key, literals.signatures[1].1.key);
         assert!(literals.signatures[0].1.normalized.contains("\"a b\""));
@@ -710,7 +797,11 @@ mod tests {
         let attributes = parse(
             "[[nodiscard]] int discarded(int value) { return value; }\n[[maybe_unused]] int unused(int value) { return value; }",
         );
-        assert!(attributes.signatures.is_empty());
+        assert!(
+            attributes.signatures.is_empty(),
+            "signatures: {:?}",
+            attributes.signatures
+        );
 
         let specifiers = parse(
             "inline int first(int value) { return value; }\nconstexpr int second(int other) { return other; }",
@@ -745,12 +836,20 @@ mod tests {
         let ms_declspec = parse(
             "__declspec(noinline) int first(int value) { return value; }\n__declspec(nothrow) int second(int value) { return value; }",
         );
-        assert!(ms_declspec.signatures.is_empty());
+        assert!(
+            ms_declspec.signatures.is_empty(),
+            "signatures: {:?}",
+            ms_declspec.signatures
+        );
 
         let ms_calling_convention = parse(
             "int __cdecl first(int value) { return value; }\nint __stdcall second(int value) { return value; }",
         );
-        assert!(ms_calling_convention.signatures.is_empty());
+        assert!(
+            ms_calling_convention.signatures.is_empty(),
+            "signatures: {:?}",
+            ms_calling_convention.signatures
+        );
     }
 
     fn assert_bounded_depth_truncation(file: &SyntaxIrFile, source_len: usize) {
@@ -788,7 +887,11 @@ mod tests {
     #[test]
     fn deeply_nested_cpp_is_truncated_without_unbounded_ir() {
         let control = parse("int control() { return 0; }");
-        assert!(control.error_ranges.is_empty());
+        assert!(
+            control.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            control.error_ranges
+        );
         assert!(
             control.roots.iter().all(|node| node.shape != Shape::Error),
             "normal input remains unchanged"
@@ -1087,7 +1190,7 @@ int S::out_of_class() { return 2; }
         });
         assert!(function_names.contains(&Some("first".to_owned())));
         assert!(function_names.contains(&Some("second".to_owned())));
-        assert!(!file.error_ranges.is_empty());
+        assert!(!file.error_ranges.is_empty(), "error ranges is empty");
     }
 
     // Observed worst-case truncation behaviour: tree-sitter recovers the
@@ -1107,7 +1210,7 @@ int S::out_of_class() { return 2; }
             shapes_of(&function.children[0].children),
             vec![Shape::VarDecl]
         );
-        assert!(!file.error_ranges.is_empty());
+        assert!(!file.error_ranges.is_empty(), "error ranges is empty");
     }
 
     #[test]
@@ -1232,6 +1335,10 @@ int S::out_of_class() { return 2; }
         assert_eq!(file.language, Language::Cpp);
         assert_eq!(file.frontend_version, STRUCTURAL_FRONTEND_VERSION);
         assert_eq!(file.ir_schema_version, IR_SCHEMA_VERSION);
-        assert!(file.diagnostics.is_empty());
+        assert!(
+            file.diagnostics.is_empty(),
+            "diagnostics: {:?}",
+            file.diagnostics
+        );
     }
 }

@@ -390,7 +390,11 @@ mod tests {
     fn a_wasm_module_offers_names_without_lines_and_says_so() {
         let wasm = format_support(ArtifactFormat::Wasm);
 
-        assert!(wasm.source_evidence.line_frames.is_empty());
+        assert!(
+            wasm.source_evidence.line_frames.is_empty(),
+            "line frames: {:?}",
+            wasm.source_evidence.line_frames
+        );
         assert_eq!(wasm.source_evidence.symbol_carrier, "the name section");
         let limit = wasm
             .source_evidence

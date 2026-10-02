@@ -468,6 +468,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manifest = write_manifest(dir.path(), "[workspace]\nmembers = []\n");
         let layout = CargoLayout::from_manifests(&[manifest]);
-        assert!(layout.packages().is_empty());
+        assert!(layout.packages().is_empty(), "{:?}", layout.packages());
     }
 }

@@ -1010,7 +1010,7 @@ mod tests {
             &gated,
             &[],
         );
-        assert!(siblings.is_empty());
+        assert!(siblings.is_empty(), "siblings: {siblings:?}");
         assert_eq!(stats.accepted, 0);
         assert_eq!(stats.eligible_candidates, 0);
         assert_eq!(stats.candidates_examined, 0);
@@ -1093,7 +1093,10 @@ mod tests {
             &refused,
             &[],
         );
-        assert!(refused_siblings.is_empty());
+        assert!(
+            refused_siblings.is_empty(),
+            "refused siblings: {refused_siblings:?}"
+        );
         assert_eq!(refused_stats.accepted, 0);
     }
 
@@ -1118,7 +1121,7 @@ mod tests {
             &limited,
             &[],
         );
-        assert!(siblings.is_empty());
+        assert!(siblings.is_empty(), "siblings: {siblings:?}");
         assert_eq!(stats.common_signatures_skipped, 1);
         assert_eq!(stats.largest_skipped_signature_units, 4);
         assert_eq!(stats.common_signature_dropped, 2);

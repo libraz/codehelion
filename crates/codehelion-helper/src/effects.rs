@@ -56,7 +56,7 @@ mod tests {
         ]);
         assert!(summary.computed);
         assert_eq!(summary.interactions, ["file_io", "synchronization"]);
-        assert!(summary.writes.is_empty());
+        assert!(summary.writes.is_empty(), "writes: {:?}", summary.writes);
     }
 
     /// A resource kind the shared vocabulary does not list contributes nothing,
@@ -70,6 +70,10 @@ mod tests {
             construct(SemanticConstructKind::AcquireResource, None),
         ]);
         assert!(summary.computed);
-        assert!(summary.interactions.is_empty());
+        assert!(
+            summary.interactions.is_empty(),
+            "interactions: {:?}",
+            summary.interactions
+        );
     }
 }

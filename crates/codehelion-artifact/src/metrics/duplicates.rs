@@ -230,8 +230,12 @@ mod tests {
 
         let duplicates = find_duplicates(&artifact);
 
-        assert!(duplicates.exact.is_empty());
-        assert!(duplicates.normalized.is_empty());
+        assert!(duplicates.exact.is_empty(), "exact: {:?}", duplicates.exact);
+        assert!(
+            duplicates.normalized.is_empty(),
+            "normalized: {:?}",
+            duplicates.normalized
+        );
         assert_eq!(classify_sizes(&artifact).duplicated_bytes, 0);
 
         artifact.symbols.push(symbol(40, &[1, 2], Some(&[9])));
@@ -267,7 +271,11 @@ mod tests {
 
         let duplicates = find_duplicates(&artifact);
 
-        assert!(duplicates.exact.is_empty());
-        assert!(duplicates.normalized.is_empty());
+        assert!(duplicates.exact.is_empty(), "exact: {:?}", duplicates.exact);
+        assert!(
+            duplicates.normalized.is_empty(),
+            "normalized: {:?}",
+            duplicates.normalized
+        );
     }
 }

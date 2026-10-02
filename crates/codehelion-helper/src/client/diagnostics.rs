@@ -117,7 +117,7 @@ mod tests {
         let sink = Arc::new(Mutex::new(Diagnostics::default()));
         sink.lock().unwrap().push("first".to_string());
         assert_eq!(sink.lock().unwrap().take(), vec!["first".to_string()]);
-        assert!(sink.lock().unwrap().take().is_empty());
-        assert!(sink.lock().unwrap().peek().is_empty());
+        assert_eq!(sink.lock().unwrap().take(), Vec::<String>::new());
+        assert_eq!(sink.lock().unwrap().peek(), Vec::<String>::new());
     }
 }

@@ -380,7 +380,11 @@ mod tests {
         let control_source =
             format!("fn control() {{ /* {ignored_braces} */ let text = \"{ignored_braces}\"; }}");
         let control = parse(&control_source);
-        assert!(control.error_ranges.is_empty());
+        assert!(
+            control.error_ranges.is_empty(),
+            "error ranges: {:?}",
+            control.error_ranges
+        );
         assert!(
             control.roots.iter().all(|node| node.shape != Shape::Error),
             "delimiters in comments and literals must not consume nesting budget"
