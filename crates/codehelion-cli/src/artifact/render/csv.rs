@@ -1,12 +1,15 @@
 //! CSV rendering of one artifact report.
 
+use codehelion_artifact::ownership::Ownership;
+
 use super::{
     artifact_import_kind_label, attribution_basis_field, attribution_column, optional_bytes,
     stated_bytes, summary_column,
 };
 use crate::artifact::correlation::AttributionBasis;
 use crate::artifact::model::{
-    ARTIFACT_CSV_HEADER, ArtifactReport, SourceMapResolutionStatus, column, report_assumptions,
+    ARTIFACT_CSV_HEADER, ArtifactReport, SourceMapResolutionStatus, column, ownership_label,
+    report_assumptions,
 };
 use crate::artifact::{Context, Result, Write, csv};
 
@@ -169,6 +172,33 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
             let mut row = artifact_csv_row("retained-size", report);
             row[column::FINGERPRINT] = item.symbol.to_string();
             row[column::RETAINED_BYTES] = item.retained_bytes.to_string();
+            write_artifact_csv_row(out, &row)?;
+        }
+    }
+    for owner in &report.ownership.owners {
+        let mut row = artifact_csv_row("owner", report);
+        ownership_label(owner.ownership).clone_into(&mut row[column::KIND]);
+        row[column::NAME] = csv(&owner.key);
+        row[column::SIZE] = owner.size_bytes.to_string();
+        row[column::ARTIFACT_SYMBOLS] = owner.symbols.to_string();
+        write_artifact_csv_row(out, &row)?;
+    }
+    if let Some(holdings) = &report.toolchain_holdings {
+        for holding in &holdings.holdings {
+            let mut row = artifact_csv_row("toolchain-holding", report);
+            ownership_label(holding.holder_ownership).clone_into(&mut row[column::KIND]);
+            row[column::FINGERPRINT].clone_from(&holding.holder);
+            row[column::NAME] = csv(holding.holder_name.as_deref().unwrap_or(""));
+            row[column::RETAINED_BYTES] = holding.held_bytes.to_string();
+            row[column::ARTIFACT_SYMBOLS] = holding.held_symbols.to_string();
+            write_artifact_csv_row(out, &row)?;
+        }
+        for shared in &holdings.shared {
+            let mut row = artifact_csv_row("toolchain-shared", report);
+            ownership_label(Ownership::Toolchain).clone_into(&mut row[column::KIND]);
+            row[column::FINGERPRINT].clone_from(&shared.symbol);
+            row[column::NAME] = csv(shared.name.as_deref().unwrap_or(""));
+            row[column::SHARED_DEPENDENCY_BYTES] = shared.held_bytes.to_string();
             write_artifact_csv_row(out, &row)?;
         }
     }

@@ -208,6 +208,36 @@ pub(in crate::artifact) const RECORD_COLUMNS: &[RecordColumns] = &[
         columns: &[column::FINGERPRINT, column::RETAINED_BYTES],
     },
     RecordColumns {
+        record_type: "owner",
+        columns: &[
+            column::KIND,
+            column::NAME,
+            column::SIZE,
+            column::ARTIFACT_SYMBOLS,
+        ],
+    },
+    // The held bytes are a part of the holder's retained size: they sit in
+    // the holder's dominator subtree, so they are not added to it.
+    RecordColumns {
+        record_type: "toolchain-holding",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::NAME,
+            column::RETAINED_BYTES,
+            column::ARTIFACT_SYMBOLS,
+        ],
+    },
+    RecordColumns {
+        record_type: "toolchain-shared",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::NAME,
+            column::SHARED_DEPENDENCY_BYTES,
+        ],
+    },
+    RecordColumns {
         record_type: "clone-group-attribution",
         columns: &[
             column::KIND,

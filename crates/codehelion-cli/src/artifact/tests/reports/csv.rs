@@ -87,7 +87,7 @@ fn the_csv_summary_carries_every_size_category() {
 /// matters is that each kind appears: a kind nothing exercises is a
 /// declaration nothing checks.
 fn report_of_every_record_kind() -> ArtifactReport {
-    let artifact = resolved_call_graph_artifact();
+    let artifact = artifact_with_a_toolchain_holder();
     let mut report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None)
         .with_correlation(Some(populated_correlation()));
     report.containment = Some(ArtifactContainment {
@@ -144,6 +144,34 @@ fn report_of_every_record_kind() -> ArtifactReport {
         retained_bytes: 4,
     }]);
     report
+}
+
+/// The fixture with `parse, fast` calling the toolchain function `strtof`,
+/// which a second, unnamed function calls as well, so no single function
+/// dominates it, and `malloc`, which only `parse, fast` reaches.
+fn artifact_with_a_toolchain_holder() -> ArtifactIr {
+    let mut artifact = resolved_call_graph_artifact();
+    artifact.symbols[0].name = Some("parse, fast".to_owned());
+    artifact.symbols[1].name = Some("strtof".to_owned());
+    artifact
+        .symbols
+        .push(normalizable_symbol(30, &[1, 4], &[9]));
+    artifact.symbols[2].exported = true;
+    artifact.calls.push(codehelion_artifact::ArtifactCall {
+        caller: artifact.symbols[2].fingerprint,
+        target: Some(artifact.symbols[1].fingerprint),
+        unresolved: None,
+    });
+    artifact
+        .symbols
+        .push(normalizable_symbol(40, &[1, 5], &[9]));
+    artifact.symbols[3].name = Some("malloc".to_owned());
+    artifact.calls.push(codehelion_artifact::ArtifactCall {
+        caller: artifact.symbols[0].fingerprint,
+        target: Some(artifact.symbols[3].fingerprint),
+        unresolved: None,
+    });
+    artifact
 }
 
 /// No record fills a column its kind was not declared to carry, and every
@@ -285,5 +313,112 @@ fn every_clone_group_byte_count_reaches_every_rendering() {
                 category.key()
             );
         }
+    }
+}
+
+/// Every owner row of the table is written, carrying its class, bytes and
+/// symbol count.
+#[test]
+fn an_owner_record_is_written_for_every_owner() {
+    let artifact = artifact_with_a_toolchain_holder();
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None)
+        .with_own_declaration(&["<global>".to_owned()]);
+    let records = artifact_csv_records_of(&report, "owner");
+    assert_eq!(records.len(), report.ownership.owners.len());
+    for (record, owner) in records.iter().zip(&report.ownership.owners) {
+        assert_eq!(record[column::NAME], owner.key);
+        assert_eq!(record[column::KIND], ownership_label(owner.ownership));
+        assert_eq!(record[column::SIZE], owner.size_bytes.to_string());
+        assert_eq!(record[column::ARTIFACT_SYMBOLS], owner.symbols.to_string());
+    }
+    let own = records
+        .iter()
+        .find(|record| record[column::KIND] == "own")
+        .expect("the declared owner is written");
+    assert_eq!(own[column::NAME], "<global>");
+    assert_eq!(own[column::ARTIFACT_SYMBOLS], "1");
+}
+
+/// A holder and a shared toolchain entry each keep to the columns that name
+/// what they state, and no record is written while holdings are unavailable.
+#[test]
+fn holding_and_shared_records_carry_held_bytes_in_their_own_columns() {
+    let artifact = artifact_with_a_toolchain_holder();
+    let mut report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None)
+        .with_own_declaration(&["<global>".to_owned()]);
+
+    let holding = artifact_csv_records_of(&report, "toolchain-holding")
+        .pop()
+        .expect("one holding record");
+    assert_eq!(
+        holding[column::FINGERPRINT],
+        artifact.symbols[0].fingerprint.to_hex()
+    );
+    assert_eq!(holding[column::NAME], "parse, fast");
+    assert_eq!(holding[column::KIND], "own");
+    assert_eq!(
+        holding[column::RETAINED_BYTES],
+        artifact.symbols[3].size.to_string()
+    );
+    assert_eq!(holding[column::ARTIFACT_SYMBOLS], "1");
+    assert_eq!(holding[column::SHARED_DEPENDENCY_BYTES], "");
+
+    let shared = artifact_csv_records_of(&report, "toolchain-shared")
+        .pop()
+        .expect("one shared record");
+    assert_eq!(
+        shared[column::FINGERPRINT],
+        artifact.symbols[1].fingerprint.to_hex()
+    );
+    assert_eq!(shared[column::NAME], "strtof");
+    assert_eq!(shared[column::KIND], "toolchain");
+    assert_eq!(
+        shared[column::SHARED_DEPENDENCY_BYTES],
+        artifact.symbols[1].size.to_string()
+    );
+    assert_eq!(shared[column::RETAINED_BYTES], "");
+
+    report.toolchain_holdings = None;
+    assert_eq!(
+        artifact_csv_records_of(&report, "toolchain-holding").len(),
+        0
+    );
+    assert_eq!(
+        artifact_csv_records_of(&report, "toolchain-shared").len(),
+        0
+    );
+}
+
+/// Each owner whose bytes moved is one comparison record naming its class.
+#[test]
+fn an_owner_delta_record_is_written_for_every_changed_owner() {
+    let report = ArtifactComparisonReport::new(
+        FilePath::new("before.wasm"),
+        &resolved_call_graph_artifact(),
+        None,
+        FilePath::new("after.wasm"),
+        &{
+            let mut after = resolved_call_graph_artifact();
+            after.symbols[0].size += 2;
+            after
+        },
+        None,
+    );
+    assert!(!report.ownership_deltas.owners.is_empty());
+    let records: Vec<_> = compare_csv_records(&report)
+        .into_iter()
+        .filter(|record| record[compare_column::RECORD_TYPE] == "owner-delta")
+        .collect();
+    assert_eq!(records.len(), report.ownership_deltas.owners.len());
+    for (record, owner) in records.iter().zip(&report.ownership_deltas.owners) {
+        assert_eq!(
+            record[compare_column::CHANGE_KIND],
+            ownership_label(owner.ownership)
+        );
+        assert_eq!(record[compare_column::NAME], owner.key);
+        assert_eq!(
+            record[compare_column::SYMBOL_SIZE_DELTA_BYTES],
+            owner.delta_bytes.to_string()
+        );
     }
 }

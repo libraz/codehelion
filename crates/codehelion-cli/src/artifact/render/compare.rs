@@ -22,6 +22,13 @@ pub(in crate::artifact) fn render_compare_csv(
         row[compare_column::SYMBOL_SIZE_DELTA_BYTES] = delta.size_delta_bytes.to_string();
         write_compare_csv_row(out, &row)?;
     }
+    for owner in &report.ownership_deltas.owners {
+        let mut row = compare_csv_row(report, "owner-delta");
+        ownership_label(owner.ownership).clone_into(&mut row[compare_column::CHANGE_KIND]);
+        row[compare_column::NAME] = csv(&owner.key);
+        row[compare_column::SYMBOL_SIZE_DELTA_BYTES] = owner.delta_bytes.to_string();
+        write_compare_csv_row(out, &row)?;
+    }
     for delta in &report.duplicate_group_deltas {
         let mut row = compare_csv_row(report, "duplicate-group-delta");
         delta.kind.clone_into(&mut row[compare_column::CHANGE_KIND]);
