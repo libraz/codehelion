@@ -18,7 +18,7 @@ codehelion は 1.0 前で、部分ごとに成熟度が違います。
 
 **固まっている面** — Fast / Structural モードでのスキャン、text レポート、`report` と `explain` による記録済み実行の再描画、JSON 出力、`artifact analyze` によるコンパイル済み成果物の読み取り。いずれも精度を実測しており、実プロジェクトで使われています。これらに破壊的変更が入る場合はリリースノートに書きます。
 
-**まだ形が定まっていない面** — Semantic モード、baseline、SARIF、seam の追跡と `guard`、`artifact compare`、calibration、`history`、そして抑制を調整する設定キー。いずれも文書化もテストもされていますが、約束に値するだけの実利用を経ていないため、リリース間で変わり得ます。該当するページには冒頭にその旨を書いています。
+**まだ形が定まっていない面** — Semantic モード、baseline、SARIF、seam の追跡と `guard`、`artifact compare`、成果物レポートのコード所有者、calibration、`history`、そして抑制を調整する設定キー。いずれも文書化もテストもされていますが、約束に値するだけの実利用を経ていないため、リリース間で変わり得ます。該当するページには冒頭にその旨を書いています。
 
 データベースのレイアウトはどちらの面でも安定した面ではありません。スキャンし直せば作り直されます。
 
@@ -66,6 +66,7 @@ open one: codehelion explain 64f5bc34 · list every group: --limit 0
 - **安定した finding ID** — finding は行番号ではなく内容の fingerprint で名前を持ちます。同じ入力からは常に同じ識別子と同じグループ順序が得られ、これが抑制設定と baseline をリファクタリングをまたいで持続させます。
 - **単一スコアではなく根拠** — 欠落を伴うクローンは lexical / structural / control-flow / type / API の similarity を個別に報告し、clone confidence・maintenance risk・refactoring difficulty を並べて示します。そのモードで測れない次元は推測せず、測定なしとして報告します。
 - **見える上限** — 発火したリソース上限（ファイルサイズ・parse timeout・候補 budget）はすべてレポートに計上されます。
+- **所有者別の成果物サイズ** — `artifact analyze` は WASM / ELF / Mach-O / PE/COFF を実行せずに読み、コードのバイトを自分のコード・toolchain・それ以外に分け、toolchain のコードをリンクに残している関数を名指しします。
 - **構造としてのローカル実行** — ネットワークアクセスの禁止と対象ツリーを実行しない方針は、運用上の約束ではなく lint と依存ポリシーで強制しています。`clippy.toml` が scan path でのプロセス起動とソケットを禁止し、`cargo-deny` が主要な HTTP スタックを依存グラフごと拒否します。
 
 ## インストール

@@ -42,6 +42,11 @@ to each agreeing with the canonical member.
 **content entropy** — how much the content of a group varies, used to tell a
 routine from degenerate repetition of the same few tokens.
 
+**content fingerprint** — the fingerprint of an artifact symbol's content alone.
+Copies of one function share it while each keeps a fingerprint of its own, and
+`artifact compare` pairs symbols by it. See
+[Artifact analysis](artifact-analysis.md#copies-of-one-function).
+
 **duplicated tokens** — the tokens a group repeats past its canonical member; one
 of the axes `--sort` accepts.
 

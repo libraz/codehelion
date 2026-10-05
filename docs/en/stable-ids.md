@@ -21,6 +21,12 @@ implementation detail: an id derived from a position moves when an unrelated
 edit above it moves the position, and every record kept against it goes stale
 silently.
 
+Artifact symbols are named by their content too. The one exception is a set of
+copies of one function, same name and same body, that their callers, callees and
+roots cannot tell apart either: those are numbered in file order and marked
+`identity_by_order`, and a comparison of two builds pairs them by content. See
+[Artifact analysis](artifact-analysis.md#copies-of-one-function).
+
 The same tree, read the same way, always produces the same ids and the same group
 order.
 

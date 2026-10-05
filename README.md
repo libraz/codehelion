@@ -31,10 +31,11 @@ and have been used on real projects; a breaking change to one gets a release
 note.
 
 **Still finding its shape** — Semantic mode, baselines, SARIF, seam tracking and
-`guard`, `artifact compare`, calibration, `history`, and the configuration keys
-that tune suppression. Each is documented and tested, and none has had the real
-use that would make it worth a promise, so each can change between releases. The
-page for every one of them says so at the top.
+`guard`, `artifact compare`, code ownership in artifact reports, calibration,
+`history`, and the configuration keys that tune suppression. Each is documented
+and tested, and none has had the real use that would make it worth a promise, so
+each can change between releases. The page for every one of them says so at the
+top.
 
 The on-disk database layout is not a stable surface either way; a scan recreates
 it.
@@ -98,6 +99,10 @@ report, so a run that could not finish the search says what it left unexamined.
   dimension the mode cannot measure is reported as absent rather than guessed.
 - **Visible limits** — every resource ceiling that fires (file size, parse
   timeout, candidate budget) is counted in the report.
+- **Artifact size by owner** — `artifact analyze` reads WASM, ELF, Mach-O and
+  PE/COFF without running them, splits the code bytes between your code, the
+  toolchain and everything else, and names the functions through which toolchain
+  code stays linked in.
 - **Local by construction** — the ban on network access and on executing the
   scanned tree is enforced by lints and dependency policy, not by convention:
   `clippy.toml` disallows process spawning and sockets in the scan path, and

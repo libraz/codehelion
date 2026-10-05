@@ -24,6 +24,8 @@
 
 **content entropy** — グループの内容がどれだけ変化に富むか。本物のルーチンと、同じ数トークンの退化した繰り返しを分けるために使います。
 
+**content fingerprint** — 成果物のシンボルの内容だけから求めた fingerprint。同じ関数のコピーはこれを共有しつつ、それぞれ自分の fingerprint を持ちます。`artifact compare` はシンボルをこれで対応づけます。[成果物解析](artifact-analysis.md#同一関数のコピー)を参照。
+
 **duplicated tokens** — グループが canonical member を越えて繰り返しているトークン量。`--sort` が受け付ける軸のひとつです。
 
 **finding ID** — 出現箇所ひとつの安定 ID。`-v` で `[finding <ID>]` として表示されます。グループの ID とは別です。
