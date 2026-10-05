@@ -136,10 +136,12 @@ Static helpers of libc that sit directly under a root, or are called from severa
 entries, are reported as `other` owners and holders.
 
 Toolchain holders exist only where retained sizes do. On an emscripten C++ build,
-identical libc functions with the same name collide on one fingerprint, which
-withdraws retained sizes and with them the holders. Function-table entries count
-as roots, so on C++ builds much of the toolchain code is reported as shared
-toolchain code rather than attributed to a holder.
+identical libc functions with the same name are told apart by their callers,
+callees, roots, size and body; only copies that match in all of these are told
+apart by file order, which the report states. Which of such copies is which can
+therefore change between builds, and a comparison pairs copies by content.
+Function-table entries count as roots, so on C++ builds much of the toolchain
+code is reported as shared toolchain code rather than attributed to a holder.
 
 ## What history cannot say about a seam
 

@@ -50,7 +50,7 @@ strip 済みのバイナリからはほとんど何も得られないため、st
 
 所有者は名前だけで決めるため、レポートからは見えない限界があります。あなたの型でインスタンス化されたジェネリックなコードは、それを定義するライブラリのものとして数えます。`Vec<MyType>` のメソッドは `alloc` のものになります。C17 Annex B の関数と同名の自前の関数（`log`、`time`、`remove`）は toolchain のコードとして数えられ、直接呼んでいる POSIX 関数（`write`、`read`、`pthread_*`）は holder として現れ得ます。名前のない関数には owner がありません。ルートの直下にある、または複数の入口から呼ばれる libc の static 補助関数は、`other` の owner や holder として報告されます。
 
-toolchain の holder が出るのは retained size が出る成果物に限ります。emscripten の C++ ビルドでは、同名で同内容の libc 関数が 1 つの fingerprint に衝突して retained size が取り下げられ、holder も出ません。関数テーブルの要素はルートとして扱うため、C++ のビルドでは toolchain のコードの多くが holder に帰属せず shared toolchain code として報告されます。
+toolchain の holder が出るのは retained size が出る成果物に限ります。emscripten の C++ ビルドでは、同名で同内容の libc 関数は、呼び出し元、呼び出し先、ルート、サイズ、本体で見分けます。これらがすべて一致するコピーだけがファイル内の順序で見分けられ、レポートがそのことを明示します。そのため、そうしたコピーのどれがどれかはビルドごとに変わり得ますが、比較はコピーを内容で対応づけます。関数テーブルの要素はルートとして扱うため、C++ のビルドでは toolchain のコードの多くが holder に帰属せず shared toolchain code として報告されます。
 
 ## 履歴が seam について言えないこと
 

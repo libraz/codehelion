@@ -190,6 +190,16 @@ database. `artifact report` therefore follows the configuration as it is when yo
 run it, and `artifact compare` reads the configuration in the working directory
 the same way `artifact analyze` does.
 
+## Copies of one function
+
+Several functions of one artifact can share a name and a body, as identical libc
+functions do in a statically linked build. Each copy keeps its own fingerprint, so
+each has its own size and place in the call graph. The shared content is named by
+`content_fingerprint` in the JSON report. A copy that no caller, callee, root,
+size or body can tell from another is told apart by file order and is marked
+`identity_by_order`. `artifact compare` pairs copies by content rather than by
+fingerprint.
+
 ## Comparing two builds
 
 > **Pre-1.0 surface.** This is documented and tested, but has not had the real
