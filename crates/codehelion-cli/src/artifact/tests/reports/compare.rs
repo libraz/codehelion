@@ -190,6 +190,131 @@ fn two_named_function_module(bodies: [&[u8]; 2]) -> Vec<u8> {
     module
 }
 
+/// A module of `[] -> []` functions with the given names and whole bodies
+/// (local declarations included).
+fn named_function_module(functions: &[(&str, &[u8])]) -> Vec<u8> {
+    fn section(id: u8, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![id];
+        bytes.push(u8::try_from(payload.len()).expect("fixture section fits one byte"));
+        bytes.extend(payload);
+        bytes
+    }
+    let count = u8::try_from(functions.len()).expect("fixture function count is small");
+    let mut declared = vec![count];
+    declared.resize(functions.len() + 1, 0);
+    let mut code = vec![count];
+    let mut names = vec![count];
+    for (index, (name, body)) in (0_u8..).zip(functions) {
+        code.push(u8::try_from(body.len()).expect("fixture body is short"));
+        code.extend(*body);
+        names.push(index);
+        names.push(u8::try_from(name.len()).expect("fixture name is short"));
+        names.extend(name.as_bytes());
+    }
+    let mut custom = vec![4, b'n', b'a', b'm', b'e', 1];
+    custom.push(u8::try_from(names.len()).expect("fixture names are short"));
+    custom.extend(names);
+    let mut module = vec![0, 97, 115, 109, 1, 0, 0, 0];
+    module.extend(section(1, &[1, 0x60, 0, 0]));
+    module.extend(section(3, &declared));
+    module.extend(section(10, &code));
+    module.extend(section(0, &custom));
+    module
+}
+
+fn compare_modules(before: &ArtifactIr, after: &ArtifactIr) -> ArtifactComparisonReport {
+    ArtifactComparisonReport::new(
+        std::path::Path::new("before.wasm"),
+        before,
+        None,
+        std::path::Path::new("after.wasm"),
+        after,
+        None,
+    )
+}
+
+/// Copies of one function are told apart by their callers, so a build that
+/// rewires which copy is called gives them different fingerprints without
+/// changing a byte of any symbol's content. Pairing by content identity must
+/// report nothing for it.
+#[test]
+fn reordered_copies_compare_without_symbol_changes() {
+    const COPY: &[u8] = &[0, 0x01, 0x0b];
+    // Call immediates normalize away, so both callers keep their identity.
+    let call = |target: u8| [0, 0x10, target, 0x0b];
+    let before = named_function_module(&[
+        ("first", &call(2)),
+        ("second", &call(3)),
+        ("dup", COPY),
+        ("dup", COPY),
+    ]);
+    let after = named_function_module(&[
+        ("first", &call(2)),
+        ("second", &call(2)),
+        ("dup", COPY),
+        ("dup", COPY),
+    ]);
+    let before = WasmBackend.parse(&before).unwrap();
+    let after = WasmBackend.parse(&after).unwrap();
+
+    let copy_fingerprints = |artifact: &ArtifactIr| {
+        let mut found: Vec<_> = artifact
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.content_fingerprint.is_some())
+            .map(|symbol| symbol.fingerprint)
+            .collect();
+        found.sort();
+        found
+    };
+    assert_eq!(copy_fingerprints(&before).len(), 2);
+    assert_ne!(
+        copy_fingerprints(&before),
+        copy_fingerprints(&after),
+        "the rewiring must change the copies' fingerprints"
+    );
+
+    let report = compare_modules(&before, &after);
+    assert!(
+        report.symbol_deltas.is_empty(),
+        "{:#?}",
+        report.symbol_deltas
+    );
+    assert_eq!(report.symbol_changes.added, 0);
+    assert_eq!(report.symbol_changes.removed, 0);
+    assert_eq!(report.symbol_changes.modified_named_symbols, 0);
+}
+
+#[test]
+fn removing_one_copy_reports_one_removal_under_the_content_fingerprint() {
+    const COPY: &[u8] = &[0, 0x01, 0x0b];
+    let before = WasmBackend
+        .parse(&named_function_module(&[
+            ("dup", COPY),
+            ("dup", COPY),
+            ("dup", COPY),
+        ]))
+        .unwrap();
+    let after = WasmBackend
+        .parse(&named_function_module(&[("dup", COPY), ("dup", COPY)]))
+        .unwrap();
+    let content = before.symbols[0].content_identity().to_hex();
+
+    let report = compare_modules(&before, &after);
+    assert_eq!(
+        report
+            .symbol_deltas
+            .iter()
+            .map(|delta| (
+                delta.kind,
+                delta.name.as_deref(),
+                delta.fingerprint.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![("removed", Some("dup"), content.as_str())]
+    );
+}
+
 /// Normalization drops immediates on purpose, so a build that only rewrote a
 /// constant leaves both functions under the identity they already had. That is
 /// the characteristic effect of an optimizing build, and a comparison that

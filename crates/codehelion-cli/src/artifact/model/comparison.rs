@@ -142,9 +142,10 @@ pub(in crate::artifact) mod symbol_change {
 
 /// Whether this change names one symbol on both sides rather than one side.
 ///
-/// A paired change is identified by the single fingerprint both sides share,
-/// so it stays readable without a name; an unpaired one carries a different
-/// fingerprint on each side and needs the name to be matched up by a reader.
+/// A paired change is identified by the single content fingerprint both sides
+/// share, so it stays readable without a name; an unpaired one is one of
+/// several copies that may share its fingerprint with others still present on
+/// either side, so only a name says which one it was.
 pub(in crate::artifact) fn pairs_both_artifacts(kind: &str) -> bool {
     matches!(kind, symbol_change::RESIZED | symbol_change::MODIFIED)
 }
@@ -158,11 +159,11 @@ type SymbolsOfOneIdentity<'a> = (
 
 /// Everything one comparison uses to tell two builds of one symbol apart.
 ///
-/// [`ArtifactSymbol::fingerprint`] is the grouping key and stays so: it is the
-/// identity the rest of the artifact pipeline routes calls, duplicates and
-/// correlations through. It is derived from the normalized instruction stream,
-/// which deliberately drops immediates, so it cannot answer whether the bytes
-/// behind it moved. The body identity and the observed size answer that, and
+/// [`ArtifactSymbol::content_identity`] is the grouping key: it is shared by
+/// every copy of one body and does not move with a copy's call-graph context,
+/// unlike the unique per-symbol fingerprint. It is derived from the normalized
+/// instruction stream, which deliberately drops immediates, so it cannot answer
+/// whether the bytes behind it moved. The body identity and the observed size answer that, and
 /// they are held beside the key rather than folded into it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct SymbolContent {
@@ -431,8 +432,7 @@ pub(in crate::artifact) fn duplicate_group_deltas(
 /// Every per-symbol difference between two artifacts, ordered by absolute size
 /// delta.
 ///
-/// Symbols are collected under the identity the rest of the pipeline uses, and
-/// within one such group the members that carry the same bytes on both sides
+/// Symbols are collected under their content identity, and within one such group the members that carry the same bytes on both sides
 /// are struck off against each other first. What is left is one symbol the two
 /// builds disagree about: it is paired and reported as
 /// [`symbol_change::RESIZED`] or [`symbol_change::MODIFIED`], rather than
@@ -445,10 +445,18 @@ pub(in crate::artifact) fn symbol_deltas(
     let mut groups: BTreeMap<codehelion_artifact::ArtifactFingerprint, SymbolsOfOneIdentity<'_>> =
         BTreeMap::new();
     for symbol in &before.symbols {
-        groups.entry(symbol.fingerprint).or_default().0.push(symbol);
+        groups
+            .entry(symbol.content_identity())
+            .or_default()
+            .0
+            .push(symbol);
     }
     for symbol in &after.symbols {
-        groups.entry(symbol.fingerprint).or_default().1.push(symbol);
+        groups
+            .entry(symbol.content_identity())
+            .or_default()
+            .1
+            .push(symbol);
     }
     let before_strip = strips_platform_underscore(before);
     let after_strip = strips_platform_underscore(after);
@@ -563,7 +571,7 @@ pub(in crate::artifact) fn symbol_counts(
 ) -> BTreeMap<codehelion_artifact::ArtifactFingerprint, usize> {
     let mut counts = BTreeMap::new();
     for symbol in &artifact.symbols {
-        *counts.entry(symbol.fingerprint).or_default() += 1;
+        *counts.entry(symbol.content_identity()).or_default() += 1;
     }
     counts
 }
@@ -599,7 +607,7 @@ pub(in crate::artifact) fn modified_named_symbols(
                 result
                     .entry(name.to_owned())
                     .or_default()
-                    .insert((symbol.fingerprint, SymbolContent::of(symbol)));
+                    .insert((symbol.content_identity(), SymbolContent::of(symbol)));
             }
         }
         result
