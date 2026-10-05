@@ -22,6 +22,7 @@ pub mod elf;
 pub mod macho;
 pub mod metrics;
 pub mod native;
+pub mod ownership;
 #[cfg(feature = "pe")]
 pub mod pe;
 pub mod support;
