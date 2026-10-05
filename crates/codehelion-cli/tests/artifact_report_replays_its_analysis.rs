@@ -13,8 +13,8 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use assert_cmd::Command;
-use codehelion_artifact::ArtifactBackend;
 use codehelion_artifact::wasm::WasmBackend;
+use codehelion_artifact::{ArtifactBackend, ArtifactCall, ArtifactFingerprint, ArtifactSymbol};
 use codehelion_store::Store;
 use codehelion_store::artifact::{
     ArtifactAnalysisContainment, ArtifactAnalysisSnapshot, ArtifactAnalysisSourceMap,
@@ -311,5 +311,83 @@ fn every_rendering_states_the_ceilings_a_saved_analysis_ran_under() {
             .any(|line| line.starts_with("source-map,")),
         "{}",
         rendered("csv")
+    );
+}
+
+/// An analysis recorded before copies were told apart carries two symbols on one
+/// fingerprint and no `content_fingerprint`. It still renders, and it states why
+/// retained sizes are withdrawn rather than computing them over ambiguous nodes.
+#[test]
+fn an_analysis_recorded_with_shared_fingerprints_replays_with_retained_sizes_withdrawn() {
+    let directory = fixture_directory();
+    let database = directory.path().join("shared.sqlite");
+    let mut artifact = WasmBackend
+        .parse(&std::fs::read(directory.path().join("module.wasm")).expect("read wasm fixture"))
+        .expect("parse the WASM fixture");
+    let shared = ArtifactFingerprint::from_content("test-symbol", b"shared body");
+    let root = ArtifactFingerprint::from_content("test-symbol", b"root body");
+    let symbol = |fingerprint: ArtifactFingerprint, name: &str, offset: u64| ArtifactSymbol {
+        fingerprint,
+        name: Some(name.to_owned()),
+        exported: false,
+        section: None,
+        offset,
+        size: 16,
+        size_inferred: false,
+        code: Vec::new(),
+        normalized: None,
+        body_fingerprint: None,
+        inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
+    };
+    artifact.symbols = vec![
+        symbol(root, "entry", 0),
+        symbol(shared, "copy", 16),
+        symbol(shared, "copy", 32),
+    ];
+    artifact.entry_points = vec![root];
+    artifact.calls = vec![ArtifactCall {
+        caller: root,
+        target: Some(shared),
+        unresolved: None,
+    }];
+    let analysis_id = Store::open(&database)
+        .expect("open the audit database")
+        .record_artifact_analysis(&ArtifactAnalysisSnapshot {
+            schema_version: &artifact.schema_version,
+            path: "module.wasm",
+            format: artifact.format.name(),
+            content_fingerprint: artifact.fingerprint.as_bytes(),
+            observed_bytes: artifact.observed_bytes,
+            ir_json: &serde_json::to_string(&artifact).expect("serialize the artifact IR"),
+            build_variant_manifest_path: None,
+            build_variant_fingerprint: None,
+            started_at: "2026-08-01T00:00:00Z",
+            finished_at: "2026-08-01T00:00:01Z",
+            symbols: &[],
+            source_maps: &[],
+            containment: None,
+            mappings: &[],
+            unmapped_symbols: &[],
+            unmapped_sources: &[],
+            correlation: None,
+            clone_group_savings: &[],
+        })
+        .expect("record the analysis");
+
+    let text = stdout_of(
+        cmd()
+            .args(["artifact", "report", "--format", "text", "--analysis"])
+            .arg(analysis_id.to_string())
+            .arg("--db")
+            .arg(&database)
+            .assert(),
+    );
+    assert!(
+        text.contains(
+            "retained and shared dependency sizes need one symbol per content fingerprint"
+        ),
+        "{text}"
     );
 }
