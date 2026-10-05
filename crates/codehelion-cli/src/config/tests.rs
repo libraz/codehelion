@@ -17,6 +17,20 @@ fn defaults_are_the_evaluated_values() {
 }
 
 #[test]
+fn artifact_own_is_read_from_the_artifact_table() {
+    let config = Config::from_toml("[artifact]\nown = [\"mycrate\", \"<global>\"]").unwrap();
+    assert_eq!(config.artifact.own, ["mycrate", "<global>"]);
+    assert_eq!(Config::default().artifact, ArtifactSettings::default());
+}
+
+#[test]
+fn an_unknown_key_under_artifact_is_rejected() {
+    let error = Config::from_toml("[artifact]\nowns = [\"mycrate\"]")
+        .expect_err("a misspelled key must not be silently ignored");
+    assert!(format!("{error:#}").contains("owns"));
+}
+
+#[test]
 fn missing_keys_fall_back_to_defaults() {
     let config = Config::from_toml("min-clone-tokens = 30").unwrap();
     assert_eq!(config.min_clone_tokens, 30);

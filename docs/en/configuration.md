@@ -181,6 +181,23 @@ of the work worth looking at. A total counts duplication rather than progress:
 closing a handful of groups out of thousands leaves it almost where it was, so
 the comparison is made over the top of each run.
 
+## Artifact
+
+```toml
+[artifact]
+# own = []
+```
+
+`own` lists the owners whose code an artifact report counts as yours. An owner
+is named by the first path element of a symbol: a Rust crate name (spelled with
+`_`, as it appears in symbols), a top-level C++ namespace, or `<global>` for
+unqualified functions. Entries match exactly, with no globs.
+
+Toolchain classification comes first: libc, the language standard libraries and
+the runtime stay toolchain code even if they are listed here. With `own` empty,
+named code outside the toolchain is reported as other rather than guessed to be
+yours.
+
 ## Seams
 
 A seam is a set of paths that implement the same semantics in more than one place.

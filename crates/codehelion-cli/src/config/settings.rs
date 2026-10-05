@@ -348,6 +348,15 @@ impl Default for ReportSettings {
     }
 }
 
+/// Settings for artifact analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ArtifactSettings {
+    /// Owner keys declared as this project's own code: Rust crate names, C++
+    /// top-level namespaces, or `<global>`. Matched exactly.
+    pub own: Vec<String>,
+}
+
 /// Explicit compiler-helper locations for environments without a usable PATH.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]

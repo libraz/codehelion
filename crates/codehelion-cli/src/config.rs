@@ -26,8 +26,8 @@ pub use load::{CONFIG_FILE_NAME, ConfigSource, ResolvedConfig, load};
 pub use paths::{disregarded_helpers_note, helper_paths};
 pub use seam::{SeamLedgerEntry, SeamTracking};
 pub use settings::{
-    BoilerplatePolicy, CategoryAction, DEFAULT_VENDORED_PATHS, HeaderGrammar, Helpers, Languages,
-    LiteralNormalization, Priority, ReportSettings, SemanticRules, Suppression,
+    ArtifactSettings, BoilerplatePolicy, CategoryAction, DEFAULT_VENDORED_PATHS, HeaderGrammar,
+    Helpers, Languages, LiteralNormalization, Priority, ReportSettings, SemanticRules, Suppression,
 };
 
 pub(crate) use paths::configured_paths;
@@ -69,6 +69,8 @@ pub struct Config {
     pub seam_tracking: SeamTracking,
     /// What a report states about the run before it.
     pub report: ReportSettings,
+    /// Artifact-analysis settings.
+    pub artifact: ArtifactSettings,
     /// Frontend read-and-lex worker count; `None` selects it automatically.
     /// Clone grouping and report rendering remain serial.
     pub jobs: Option<usize>,
@@ -98,6 +100,7 @@ impl Default for Config {
             seam: Vec::new(),
             seam_tracking: SeamTracking::default(),
             report: ReportSettings::default(),
+            artifact: ArtifactSettings::default(),
             jobs: None,
         }
     }
@@ -434,6 +437,13 @@ pub const TEMPLATE: &str = "\
 # progress: closing a handful of groups out of thousands leaves it almost where
 # it was, so the comparison is made over the top of each run.
 # churn-top = 100
+
+# Artifact analysis.
+# [artifact]
+# Owners whose code is reported as own: Rust crate names (spelled with `_`),
+# C++ top-level namespaces, or \"<global>\" for unqualified functions. Exact
+# matches only; toolchain code stays toolchain whatever is listed here.
+# own = []
 ";
 
 #[cfg(test)]

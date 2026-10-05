@@ -108,6 +108,7 @@ pub(crate) fn configured_paths(resolved: &ResolvedConfig) -> ConfiguredPaths<'_>
         limits: _,
         semantic: _,
         report: _,
+        artifact: _,
         jobs: _,
         // The ledger names path globs and thresholds. A glob decides which of
         // the repository's own commits a count is taken over; none of it is
