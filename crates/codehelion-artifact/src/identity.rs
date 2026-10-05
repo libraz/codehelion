@@ -30,10 +30,6 @@ pub(crate) struct PositionalCall {
     pub(crate) unresolved: Option<UnresolvedCall>,
 }
 
-/// Rounds of refinement a component may take before its colours are used as
-/// they stand; real call graphs settle in two or three.
-const MAX_ROUNDS: usize = 16;
-
 /// Make every symbol's `fingerprint` unique within `symbols`.
 ///
 /// `roots` are the positions the backend treats as reachable from outside
@@ -183,8 +179,9 @@ fn components(copies: &BTreeSet<usize>, graph: &Graph) -> Vec<Vec<usize>> {
 
 /// Refine one component's colours until its partition stops splitting.
 ///
-/// Each colour folds in the previous one, so the partition only ever gets
-/// finer and an unchanged count of distinct colours means it is stable.
+/// Each colour folds in the previous one, so the partition only gets finer.
+/// Each splitting round adds at least one class, so at most
+/// `component.len() - initial_count` splitting rounds are possible.
 fn refine(component: &[usize], graph: &Graph, colours: &mut [Colour]) {
     let distinct = |colours: &[Colour]| {
         component
@@ -194,7 +191,7 @@ fn refine(component: &[usize], graph: &Graph, colours: &mut [Colour]) {
             .len()
     };
     let mut before = distinct(colours);
-    for _ in 0..MAX_ROUNDS {
+    loop {
         let next: Vec<Colour> = component
             .iter()
             .map(|position| graph.next_colour(*position, colours))
@@ -563,5 +560,63 @@ mod tests {
             }
         }
         assert!(graphs_with_copies > 200, "{graphs_with_copies}");
+    }
+
+    #[test]
+    fn refinement_matches_naive_partition_on_a_long_directed_chain() {
+        let count = 40;
+        let symbols: Vec<_> = (0..count).map(|_| symbol(9)).collect();
+        let roots = BTreeSet::from([0]);
+        let calls: Vec<_> = (0..count - 1)
+            .map(|position| call(position, position + 1))
+            .collect();
+
+        let expected = naive_partition(&symbols, &roots, &calls);
+        let colours = refined_colours(&symbols, &roots, &Graph::new(count, &calls));
+        let mut by_colour: BTreeMap<Colour, BTreeSet<usize>> = BTreeMap::new();
+        for (position, colour) in colours {
+            by_colour.entry(colour).or_default().insert(position);
+        }
+        let actual: BTreeSet<BTreeSet<usize>> = by_colour.into_values().collect();
+        let singleton_classes: BTreeSet<_> = (0..count)
+            .map(|position| BTreeSet::from([position]))
+            .collect();
+
+        assert_eq!(expected, singleton_classes);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn long_chain_identities_are_invariant_under_symbol_order() {
+        let count = 40;
+        let keys = vec![9; count];
+        let calls: Vec<_> = (0..count - 1)
+            .map(|position| call(position, position + 1))
+            .collect();
+        let baseline = assigned(&keys, &[0], &calls);
+
+        // Move the root and reorder all middle nodes while preserving the
+        // logical chain by remapping both calls and the root position.
+        let logical_to_position: Vec<_> = (0..count).rev().collect();
+        let remapped_calls: Vec<_> = (0..count - 1)
+            .map(|logical| {
+                call(
+                    logical_to_position[logical],
+                    logical_to_position[logical + 1],
+                )
+            })
+            .collect();
+        let remapped = assigned(&keys, &[logical_to_position[0]], &remapped_calls);
+
+        for (logical, position) in logical_to_position.iter().copied().enumerate() {
+            let original = &baseline.0[logical];
+            let reordered = &remapped.0[position];
+            assert_eq!(
+                original.fingerprint, reordered.fingerprint,
+                "logical symbol {logical}"
+            );
+            assert!(!original.identity_by_order, "logical symbol {logical}");
+            assert!(!reordered.identity_by_order, "logical symbol {logical}");
+        }
     }
 }
