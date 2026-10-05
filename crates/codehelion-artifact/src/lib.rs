@@ -18,6 +18,7 @@ pub mod archive;
 pub mod dwarf;
 #[cfg(feature = "elf")]
 pub mod elf;
+mod identity;
 #[cfg(feature = "macho")]
 pub mod macho;
 pub mod metrics;

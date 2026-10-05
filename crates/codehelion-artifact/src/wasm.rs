@@ -5,12 +5,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::identity::{PositionalCall, assign_identities};
 use crate::support::format_support;
 use crate::symbols::demangle;
 use crate::{
-    ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactDataSegment, ArtifactError,
-    ArtifactFingerprint, ArtifactFormat, ArtifactImport, ArtifactImportKind, ArtifactIr,
-    ArtifactSection, ArtifactSourceMapping, ArtifactSymbol, NormalizedInstructions, UnresolvedCall,
+    ArtifactBackend, ArtifactCapabilities, ArtifactDataSegment, ArtifactError, ArtifactFingerprint,
+    ArtifactFormat, ArtifactImport, ArtifactImportKind, ArtifactIr, ArtifactSection,
+    ArtifactSourceMapping, ArtifactSymbol, NormalizedInstructions, UnresolvedCall,
 };
 use wasmparser::{
     CompositeInnerType, ConstExpr, CustomSectionReader, ElementItems, Encoding, ExternalKind,
@@ -248,8 +249,10 @@ impl ArtifactBackend for WasmBackend {
             }
         }
 
+        // Calls and roots are gathered by position, and only become
+        // fingerprints once every copy has been given its own.
         let mut by_index = BTreeMap::new();
-        for function in &mut state.functions {
+        for (position, function) in state.functions.iter_mut().enumerate() {
             let name = resolved_name(&state.names, &state.export_names, function.index)
                 .map(|name| demangle(name));
             let normalized = NormalizedInstructions {
@@ -258,7 +261,7 @@ impl ArtifactBackend for WasmBackend {
             };
             let body = std::mem::take(&mut function.body);
             let fingerprint = symbol_fingerprint(name.as_deref(), &normalized.bytes);
-            by_index.insert(function.index, fingerprint);
+            by_index.insert(function.index, position);
             ir.symbols.push(ArtifactSymbol {
                 fingerprint,
                 name,
@@ -275,18 +278,16 @@ impl ArtifactBackend for WasmBackend {
                 identity_by_order: false,
             });
         }
-        if let Some(start) = state.start.and_then(|index| by_index.get(&index)) {
-            ir.entry_points.push(*start);
-        }
-        ir.indirect_references.extend(
-            state
-                .indirect_root_indices()
-                .iter()
-                .filter_map(|index| by_index.get(index))
-                .copied(),
-        );
-        for function in &state.functions {
-            let caller = by_index[&function.index];
+        let start = state.start.and_then(|index| by_index.get(&index)).copied();
+        let indirect: Vec<usize> = state
+            .indirect_root_indices()
+            .iter()
+            .filter_map(|index| by_index.get(index))
+            .copied()
+            .collect();
+        let roots: BTreeSet<usize> = start.iter().chain(&indirect).copied().collect();
+        let mut calls = Vec::new();
+        for (caller, function) in state.functions.iter().enumerate() {
             for call in &function.calls {
                 let (target, unresolved) = match call {
                     PendingCall::Direct(index) => match by_index.get(index) {
@@ -300,13 +301,22 @@ impl ArtifactBackend for WasmBackend {
                         (None, Some(UnresolvedCall::IndirectTable))
                     }
                 };
-                ir.calls.push(ArtifactCall {
+                calls.push(PositionalCall {
                     caller,
                     target,
                     unresolved,
                 });
             }
         }
+        ir.calls = assign_identities(&mut ir.symbols, &roots, calls);
+        if let Some(start) = start {
+            ir.entry_points.push(ir.symbols[start].fingerprint);
+        }
+        ir.indirect_references.extend(
+            indirect
+                .iter()
+                .map(|position| ir.symbols[*position].fingerprint),
+        );
         let unreadable = ir.capabilities.debug_info_unreadable;
         ir.capabilities = self.capabilities();
         ir.capabilities.source_mapping = !ir.source_mappings.is_empty();
@@ -1611,5 +1621,173 @@ mod tests {
         ));
         let referencing = SubType::func(FuncType::new([reference], []), false);
         assert!(plain_function_shape(&referencing).is_none());
+    }
+
+    /// A module of `[] -> []` functions with the given names and bodies, and
+    /// an active element segment placing `table` in a table when non-empty.
+    fn named_module(functions: &[(&str, &[u8])], table: &[u8]) -> Vec<u8> {
+        let count = u8::try_from(functions.len()).expect("fixture function count is small");
+        let mut declared = vec![count];
+        declared.resize(functions.len() + 1, 0);
+        let mut sections = vec![section(1, &[1, 0x60, 0, 0]), section(3, &declared)];
+        if !table.is_empty() {
+            let length = u8::try_from(table.len()).expect("fixture table is small");
+            sections.push(section(4, &[1, 0x70, 0, length]));
+            // Active segment for table 0 at `i32.const 0`.
+            let mut elements = vec![1, 0, 0x41, 0, 0x0b, length];
+            elements.extend(table);
+            sections.push(section(9, &elements));
+        }
+        let mut code = vec![count];
+        let mut names = vec![count];
+        for (index, (name, body)) in (0_u8..).zip(functions) {
+            code.push(u8::try_from(body.len()).expect("fixture body is short"));
+            code.extend(*body);
+            names.push(index);
+            names.push(u8::try_from(name.len()).expect("fixture name is short"));
+            names.extend(name.as_bytes());
+        }
+        sections.push(section(10, &code));
+        let mut custom = vec![4, b'n', b'a', b'm', b'e', 1];
+        custom.push(u8::try_from(names.len()).expect("fixture names are short"));
+        custom.extend(names);
+        sections.push(section(0, &custom));
+        module(&sections)
+    }
+
+    /// The one body every copy below shares: `nop; end`.
+    const COPY: &[u8] = &[0, 0x01, 0x0b];
+
+    fn copies(artifact: &ArtifactIr) -> usize {
+        artifact
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.content_fingerprint.is_some())
+            .count()
+    }
+
+    fn distinct_fingerprints(artifact: &ArtifactIr) -> usize {
+        artifact
+            .symbols
+            .iter()
+            .map(|symbol| symbol.fingerprint)
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    #[test]
+    fn wasm_copies_get_unique_fingerprints() {
+        let module = named_module(
+            &[
+                ("run", &[0, 0x10, 1, 0x10, 2, 0x0b]),
+                ("dup", COPY),
+                ("dup", COPY),
+            ],
+            &[],
+        );
+
+        let artifact = WasmBackend.parse(&module).expect("copy fixture parses");
+
+        assert!(copies(&artifact) >= 2, "{artifact:#?}");
+        assert_eq!(distinct_fingerprints(&artifact), artifact.symbols.len());
+        assert_eq!(
+            artifact.symbols[1].content_fingerprint,
+            artifact.symbols[2].content_fingerprint
+        );
+        assert!(artifact.symbols[1].identity_by_order);
+        assert!(artifact.symbols[2].identity_by_order);
+        assert_eq!(
+            artifact,
+            WasmBackend.parse(&module).expect("fixture parses")
+        );
+    }
+
+    /// The copy `caller` calls, found through the call edges alone.
+    fn copy_called_by(artifact: &ArtifactIr, caller: &str) -> ArtifactSymbol {
+        let caller = artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name.as_deref() == Some(caller))
+            .expect("caller is present")
+            .fingerprint;
+        let target = artifact
+            .calls
+            .iter()
+            .find(|call| call.caller == caller)
+            .and_then(|call| call.target)
+            .expect("caller calls a local function");
+        artifact
+            .symbols
+            .iter()
+            .find(|symbol| symbol.fingerprint == target)
+            .expect("callee is present")
+            .clone()
+    }
+
+    #[test]
+    fn a_copy_told_apart_by_its_caller_keeps_its_fingerprint_when_functions_are_reordered() {
+        // `a` calls the first copy in one module and the second in the other.
+        let forward = named_module(
+            &[
+                ("a", &[0, 0x10, 2, 0x0b]),
+                ("b", &[0, 0x10, 3, 0x0b]),
+                ("dup", COPY),
+                ("dup", COPY),
+            ],
+            &[],
+        );
+        let reversed = named_module(
+            &[
+                ("dup", COPY),
+                ("dup", COPY),
+                ("b", &[0, 0x10, 0, 0x0b]),
+                ("a", &[0, 0x10, 1, 0x0b]),
+            ],
+            &[],
+        );
+
+        let forward = WasmBackend.parse(&forward).expect("forward fixture parses");
+        let reversed = WasmBackend
+            .parse(&reversed)
+            .expect("reversed fixture parses");
+
+        assert!(copies(&forward) >= 2, "{forward:#?}");
+        assert!(copies(&reversed) >= 2, "{reversed:#?}");
+        let forward_a = copy_called_by(&forward, "a");
+        let forward_b = copy_called_by(&forward, "b");
+        assert_ne!(forward_a.fingerprint, forward_b.fingerprint);
+        assert_eq!(
+            forward_a.fingerprint,
+            copy_called_by(&reversed, "a").fingerprint
+        );
+        assert_eq!(
+            forward_b.fingerprint,
+            copy_called_by(&reversed, "b").fingerprint
+        );
+        assert!(!forward_a.identity_by_order);
+        assert!(!forward_b.identity_by_order);
+    }
+
+    #[test]
+    fn a_copy_in_the_element_table_keeps_retained_sizes_available() {
+        let module = named_module(
+            &[("run", &[0, 0x10, 1, 0x0b]), ("dup", COPY), ("dup", COPY)],
+            &[2],
+        );
+
+        let artifact = WasmBackend.parse(&module).expect("table fixture parses");
+
+        assert!(copies(&artifact) >= 2, "{artifact:#?}");
+        assert_eq!(
+            artifact.indirect_references,
+            vec![artifact.symbols[2].fingerprint]
+        );
+        assert!(
+            metrics::CallGraph::from_ir(&artifact)
+                .retained_sizes()
+                .is_some(),
+            "{:?}",
+            metrics::CallGraph::from_ir(&artifact).size_unavailability()
+        );
     }
 }
