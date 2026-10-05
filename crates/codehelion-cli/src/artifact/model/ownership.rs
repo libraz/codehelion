@@ -8,7 +8,7 @@
 
 use codehelion_artifact::ArtifactFingerprint;
 use codehelion_artifact::ownership::{
-    OwnDeclaration, Ownership, SymbolOwner, ToolchainFamily, owner_of, strips_platform_underscore,
+    OwnDeclaration, Ownership, PlatformUnderscoreLookup, SymbolOwner, ToolchainFamily, owner_of,
 };
 
 use super::code_section_bytes;
@@ -263,11 +263,17 @@ type SymbolLabels<'a> = BTreeMap<ArtifactFingerprint, (Option<&'a str>, Ownershi
 /// Owner labels of every symbol of `artifact`, in order, judged without a
 /// declaration.
 pub(in crate::artifact) fn symbol_owners(artifact: &ArtifactIr) -> Vec<SymbolOwner> {
-    let strip = strips_platform_underscore(artifact);
+    let platform = PlatformUnderscoreLookup::new(artifact);
     artifact
         .symbols
         .iter()
-        .map(|symbol| owner_of(symbol.name.as_deref(), strip, &OwnDeclaration::default()))
+        .map(|symbol| {
+            owner_of(
+                symbol.name.as_deref(),
+                platform.for_offset(symbol.offset),
+                &OwnDeclaration::default(),
+            )
+        })
         .collect()
 }
 

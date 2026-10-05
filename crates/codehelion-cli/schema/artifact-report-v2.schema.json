@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v3.schema.json",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
   "title": "codehelion artifact report",
   "description": "Machine-readable analysis of one locally read compiled artifact.",
   "type": "object",
@@ -12,7 +12,6 @@
     "architecture",
     "skipped_architectures",
     "sizes",
-    "symbol_assumptions",
     "sections",
     "section_details",
     "imports",
@@ -23,7 +22,7 @@
     "data_segment_details"
   ],
   "properties": {
-    "schema_version": { "const": "artifact-report-v3" },
+    "schema_version": { "const": "artifact-report-v2" },
     "path": { "type": "string" },
     "format": { "type": "string", "enum": ["wasm", "elf", "macho", "pe-coff", "archive"] },
     "architecture": { "type": ["string", "null"] },
@@ -43,11 +42,6 @@
     "symbols": {
       "type": "array",
       "items": { "$ref": "#/$defs/symbol" }
-    },
-    "symbol_assumptions": {
-      "type": "array",
-      "description": "Statements qualifying symbol identities; empty unless some symbol is told apart from a match only by its order in the file.",
-      "items": { "type": "string" }
     },
     "entry_points": {
       "type": "integer", "minimum": 0,
@@ -73,8 +67,6 @@
       "description": "Overlapping dominator regions, or null when the call graph is incomplete or ambiguous. The entries must never be added together as a total.",
       "items": { "$ref": "#/$defs/retained_size" }
     },
-    "ownership": { "$ref": "#/$defs/ownership" },
-    "toolchain_holdings": { "$ref": "#/$defs/toolchain_holdings" },
     "duplicates": { "$ref": "#/$defs/duplicate_summary" },
     "duplicate_groups": { "$ref": "#/$defs/duplicate_groups" },
     "sections": { "type": "integer", "minimum": 0 },
@@ -104,6 +96,13 @@
   },
   "$defs": {
     "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "fingerprint_bytes": {
+      "type": "array",
+      "description": "The same content identity written as its raw bytes, which is how the metric records nested inside this report spell it.",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+    },
     "build_variant": {
       "type": ["object", "null"],
       "required": ["manifest_path", "fingerprint"],
@@ -169,21 +168,9 @@
     },
     "symbol": {
       "type": "object",
-      "required": [
-        "fingerprint", "content_fingerprint", "identity_by_order", "name", "exported", "offset", "size",
-        "size_inferred", "owner", "ownership"
-      ],
+      "required": ["fingerprint", "name", "exported", "offset", "size", "size_inferred"],
       "properties": {
         "fingerprint": { "$ref": "#/$defs/fingerprint" },
-        "content_fingerprint": {
-          "type": ["string", "null"],
-          "pattern": "^[0-9a-f]{32}$",
-          "description": "Content identity used for comparisons; present when fingerprint distinguishes copies or includes an archive member identity."
-        },
-        "identity_by_order": {
-          "type": "boolean",
-          "description": "Whether fingerprint needed this symbol's position in the file because its content, callers and callees match another symbol's."
-        },
         "name": { "type": ["string", "null"] },
         "exported": { "type": "boolean" },
         "offset": { "type": "integer", "minimum": 0 },
@@ -191,138 +178,7 @@
         "size_inferred": {
           "type": "boolean",
           "description": "Whether the size was derived from neighbouring boundaries rather than declared."
-        },
-        "owner": {
-          "type": "string",
-          "description": "Owner key derived from the name: the first element of the defining path, or a fixed label such as <global>, <unnamed>, c-std, reserved or runtime."
-        },
-        "ownership": { "$ref": "#/$defs/ownership_class" }
-      }
-    },
-    "ownership_class": {
-      "type": "string",
-      "enum": ["own", "toolchain", "other", "unnamed"],
-      "description": "own only for keys listed in [artifact] own; toolchain classification takes precedence over that declaration."
-    },
-    "ownership": {
-      "type": "object",
-      "description": "Symbol bytes split by owner, derived from symbol names when the report is rendered.",
-      "required": ["declared_own", "classes", "owners", "outside_symbols_bytes", "assumptions"],
-      "properties": {
-        "declared_own": { "type": "array", "items": { "type": "string" } },
-        "classes": {
-          "type": "array",
-          "description": "One entry per class, in the order own, toolchain, other, unnamed.",
-          "items": { "$ref": "#/$defs/ownership_class_total" }
-        },
-        "owners": {
-          "type": "array",
-          "description": "Every owner key, by size descending.",
-          "items": { "$ref": "#/$defs/owner_total" }
-        },
-        "outside_symbols_bytes": {
-          "type": "integer",
-          "description": "Executable section bytes minus the sum of symbol sizes."
-        },
-        "assumptions": { "type": "array", "items": { "type": "string" } }
-      }
-    },
-    "ownership_class_total": {
-      "type": "object",
-      "required": ["ownership", "size_bytes", "symbols"],
-      "properties": {
-        "ownership": { "$ref": "#/$defs/ownership_class" },
-        "size_bytes": { "type": "integer", "minimum": 0 },
-        "symbols": { "type": "integer", "minimum": 0 }
-      }
-    },
-    "owner_total": {
-      "type": "object",
-      "required": ["key", "ownership", "family", "size_bytes", "symbols"],
-      "properties": {
-        "key": { "type": "string" },
-        "ownership": { "$ref": "#/$defs/ownership_class" },
-        "family": {
-          "type": ["string", "null"],
-          "enum": ["language_std", "c_std", "reserved", "runtime", null],
-          "description": "Toolchain part, present exactly when ownership is toolchain."
-        },
-        "size_bytes": { "type": "integer", "minimum": 0 },
-        "symbols": { "type": "integer", "minimum": 0 }
-      }
-    },
-    "toolchain_holdings": {
-      "type": ["object", "null"],
-      "description": "Toolchain code attributed to its nearest non-toolchain immediate dominator, or null under the same conditions as retained_sizes. Held bytes are part of the holder's retained size, not a savings value.",
-      "required": [
-        "holdings", "shared", "shared_bytes", "shared_symbols",
-        "shared_absorbed_bytes", "shared_absorbed_symbols", "assumptions"
-      ],
-      "properties": {
-        "holdings": { "type": "array", "items": { "$ref": "#/$defs/toolchain_holding" } },
-        "shared": {
-          "type": "array",
-          "description": "Toolchain entries dominated only by the joined root set.",
-          "items": { "$ref": "#/$defs/shared_toolchain" }
-        },
-        "shared_bytes": { "type": "integer", "minimum": 0 },
-        "shared_symbols": { "type": "integer", "minimum": 0 },
-        "shared_absorbed_bytes": { "type": "integer", "minimum": 0 },
-        "shared_absorbed_symbols": { "type": "integer", "minimum": 0 },
-        "assumptions": { "type": "array", "items": { "type": "string" } }
-      }
-    },
-    "toolchain_holding": {
-      "type": "object",
-      "required": [
-        "holder", "holder_name", "holder_ownership", "held_bytes", "held_symbols",
-        "absorbed_bytes", "absorbed_symbols", "heads"
-      ],
-      "properties": {
-        "holder": { "$ref": "#/$defs/fingerprint" },
-        "holder_name": { "type": ["string", "null"] },
-        "holder_ownership": { "$ref": "#/$defs/ownership_class" },
-        "held_bytes": { "type": "integer", "minimum": 0 },
-        "held_symbols": { "type": "integer", "minimum": 0 },
-        "absorbed_bytes": {
-          "type": "integer", "minimum": 0,
-          "description": "Part of held_bytes in unqualified functions counted as toolchain only because toolchain code is their immediate dominator."
-        },
-        "absorbed_symbols": { "type": "integer", "minimum": 0 },
-        "heads": { "type": "array", "items": { "$ref": "#/$defs/held_head" } }
-      }
-    },
-    "held_head": {
-      "type": "object",
-      "required": ["symbol", "name", "held_bytes"],
-      "properties": {
-        "symbol": { "$ref": "#/$defs/fingerprint" },
-        "name": { "type": ["string", "null"] },
-        "held_bytes": { "type": "integer", "minimum": 0 }
-      }
-    },
-    "shared_toolchain": {
-      "type": "object",
-      "required": ["symbol", "name", "held_bytes", "root", "callers"],
-      "properties": {
-        "symbol": { "$ref": "#/$defs/fingerprint" },
-        "name": { "type": ["string", "null"] },
-        "held_bytes": { "type": "integer", "minimum": 0 },
-        "root": { "type": "boolean" },
-        "callers": {
-          "type": "array",
-          "description": "Reachable symbols calling the entry directly. Reach is stated, not apportioned.",
-          "items": { "$ref": "#/$defs/toolchain_caller" }
         }
-      }
-    },
-    "toolchain_caller": {
-      "type": "object",
-      "required": ["symbol", "name", "ownership"],
-      "properties": {
-        "symbol": { "$ref": "#/$defs/fingerprint" },
-        "name": { "type": ["string", "null"] },
-        "ownership": { "$ref": "#/$defs/ownership_class" }
       }
     },
     "source_map": {
@@ -359,10 +215,10 @@
       "description": "Symbols not reached from a parser-established root set, or null when no trustworthy root set exists.",
       "required": ["symbols", "definitive", "assumptions"],
       "properties": {
-        "symbols": { "type": "array", "items": { "$ref": "#/$defs/fingerprint" } },
+        "symbols": { "type": "array", "items": { "$ref": "#/$defs/fingerprint_bytes" } },
         "definitive": {
           "type": "boolean",
-          "description": "True only when every call endpoint resolved and every symbol fingerprint is unique. Shared identities or a missing endpoint leave a candidate list and an assumption naming the reason."
+          "description": "True only when every call endpoint resolved and every symbol carries a distinct content fingerprint. Shared identities or a missing endpoint leave a candidate list and an assumption naming the reason."
         },
         "assumptions": { "type": "array", "items": { "type": "string" } }
       }
@@ -371,7 +227,7 @@
       "type": "object",
       "required": ["symbol", "retained_bytes"],
       "properties": {
-        "symbol": { "$ref": "#/$defs/fingerprint" },
+        "symbol": { "$ref": "#/$defs/fingerprint_bytes" },
         "retained_bytes": { "type": "integer", "minimum": 0 }
       }
     },
@@ -405,7 +261,7 @@
       "type": "object",
       "required": ["fingerprint", "duplicated_bytes", "members"],
       "properties": {
-        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "fingerprint": { "$ref": "#/$defs/fingerprint_bytes" },
         "duplicated_bytes": {
           "type": "integer", "minimum": 0,
           "description": "Observed excess bytes in this group, not a claimed size saving."
@@ -416,7 +272,7 @@
             "type": "object",
             "required": ["symbol", "offset", "size"],
             "properties": {
-              "symbol": { "$ref": "#/$defs/fingerprint" },
+              "symbol": { "$ref": "#/$defs/fingerprint_bytes" },
               "offset": { "type": "integer", "minimum": 0 },
               "size": { "type": "integer", "minimum": 0 }
             }

@@ -405,7 +405,7 @@ fn comparison_json_field_names_appear_in_the_shipped_schema() {
         }
     }
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v3.schema.json",
         ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
         &value,
     );

@@ -47,7 +47,7 @@ use crate::cli::{
 pub const ARTIFACT_REPORT_SCHEMA_VERSION: &str = "artifact-report-v3";
 
 /// JSON schema emitted by the artifact comparison command.
-pub const ARTIFACT_COMPARISON_REPORT_SCHEMA_VERSION: &str = "artifact-comparison-report-v2";
+pub const ARTIFACT_COMPARISON_REPORT_SCHEMA_VERSION: &str = "artifact-comparison-report-v3";
 
 /// JSON Schema for the versioned artifact-analysis report.
 pub const ARTIFACT_REPORT_JSON_SCHEMA: &str =
@@ -55,7 +55,7 @@ pub const ARTIFACT_REPORT_JSON_SCHEMA: &str =
 
 /// JSON Schema for the versioned artifact comparison report.
 pub const ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA: &str =
-    include_str!("../schema/artifact-comparison-report-v2.schema.json");
+    include_str!("../schema/artifact-comparison-report-v3.schema.json");
 
 /// JSON Schema for the versioned calibration summary report.
 pub const ARTIFACT_CALIBRATION_REPORT_JSON_SCHEMA: &str =

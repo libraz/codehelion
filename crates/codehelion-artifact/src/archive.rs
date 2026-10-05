@@ -251,8 +251,9 @@ fn merge_member(
     let wrap = |child| archive_member_fingerprint("archive-symbol", provenance.fingerprint, child);
     for mut symbol in member.symbols {
         positions.insert(symbol.fingerprint, archive.symbols.len());
+        let content = symbol.content_identity();
         symbol.fingerprint = wrap(symbol.fingerprint);
-        symbol.content_fingerprint = symbol.content_fingerprint.map(wrap);
+        symbol.content_fingerprint = Some(content);
         symbol.section = None;
         symbol.offset = base.saturating_add(symbol.offset);
         archive.symbols.push(symbol);
@@ -759,6 +760,155 @@ mod tests {
         object.write().expect("write ELF member")
     }
 
+    /// One ELF object with a stable function beside a function whose body can
+    /// change without changing the stable function's content identity.
+    fn elf_member_with_keep_and_changed(changed_code: &[u8]) -> Vec<u8> {
+        let mut object =
+            WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let text = object.section_id(StandardSection::Text);
+        let keep_offset = object.append_section_data(text, &[0x90, 0xc3], 1);
+        object.add_symbol(Symbol {
+            name: b"keep".to_vec(),
+            value: keep_offset,
+            size: 2,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        let changed_offset = object.append_section_data(text, changed_code, 1);
+        object.add_symbol(Symbol {
+            name: b"changed".to_vec(),
+            value: changed_offset,
+            size: u64::try_from(changed_code.len()).expect("fixture code length fits"),
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        object.write().expect("write ELF member")
+    }
+
+    fn named_symbol<'a>(ir: &'a ArtifactIr, name: &str) -> &'a crate::ArtifactSymbol {
+        ir.symbols
+            .iter()
+            .find(|symbol| symbol.name.as_deref() == Some(name))
+            .expect("named symbol")
+    }
+
+    #[test]
+    fn archive_content_identity_ignores_a_sibling_body_change() {
+        let before_member = elf_member_with_keep_and_changed(&[0x90, 0xc3]);
+        let after_member = elf_member_with_keep_and_changed(&[0x91, 0xc3]);
+        let parse = |member: &[u8]| {
+            let mut archive = b"!<arch>\n".to_vec();
+            archive.extend(archive_member("module.o", member));
+            ArchiveBackend.parse(&archive).expect("parse archive")
+        };
+        let before = parse(&before_member);
+        let after = parse(&after_member);
+        let before_keep = named_symbol(&before, "keep");
+        let after_keep = named_symbol(&after, "keep");
+        let before_changed = named_symbol(&before, "changed");
+        let after_changed = named_symbol(&after, "changed");
+        assert_eq!(before_keep.name, after_keep.name);
+        assert_eq!(before_keep.code, after_keep.code);
+        assert_eq!(
+            before_keep.content_identity(),
+            after_keep.content_identity()
+        );
+        assert_ne!(
+            before_changed.content_identity(),
+            after_changed.content_identity()
+        );
+    }
+
+    #[test]
+    fn macho_ownership_is_preserved_inside_a_mixed_archive() {
+        use crate::ownership::{OwnDeclaration, Ownership, PlatformUnderscoreLookup, owner_of};
+
+        let mut object = WriteObject::new(
+            BinaryFormat::MachO,
+            Architecture::X86_64,
+            Endianness::Little,
+        );
+        let text = object.section_id(StandardSection::Text);
+        let offset = object.append_section_data(text, &[0x90, 0xc3], 1);
+        object.add_symbol(Symbol {
+            name: b"strtof".to_vec(),
+            value: offset,
+            size: 2,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        let member = object.write().expect("write Mach-O member");
+        let alone = MachOBackend.parse(&member).expect("parse Mach-O member");
+        let mut archive = b"!<arch>\n".to_vec();
+        archive.extend(archive_member("native.o", &member));
+        archive.extend(archive_member("other.obj", &coff_member(b"_strtof")));
+        let inside = ArchiveBackend.parse(&archive).expect("parse mixed archive");
+        let own = OwnDeclaration::default();
+        let classify = |ir: &ArtifactIr, index: usize| {
+            owner_of(
+                ir.symbols[index].name.as_deref(),
+                PlatformUnderscoreLookup::new(ir).for_offset(ir.symbols[index].offset),
+                &own,
+            )
+        };
+        assert_eq!(classify(&alone, 0).ownership, Ownership::Toolchain);
+        assert_eq!(classify(&inside, 0), classify(&alone, 0));
+        assert_eq!(classify(&inside, 1).ownership, Ownership::Other);
+    }
+
+    #[test]
+    fn parsed_macho_reserved_namespace_keeps_standalone_and_archive_ownership() {
+        use crate::ownership::{
+            OwnDeclaration, Ownership, PlatformUnderscoreLookup, ToolchainFamily, owner_of,
+        };
+
+        let mut object = WriteObject::new(
+            BinaryFormat::MachO,
+            Architecture::X86_64,
+            Endianness::Little,
+        );
+        let text = object.section_id(StandardSection::Text);
+        let offset = object.append_section_data(text, &[0x90, 0xc3], 1);
+        object.add_symbol(Symbol {
+            name: b"_ZN9__gnu_cxx27__verbose_terminate_handlerEv".to_vec(),
+            value: offset,
+            size: 2,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        let member = object.write().expect("write Mach-O member");
+        let alone = MachOBackend.parse(&member).expect("parse Mach-O member");
+        let mut archive = b"!<arch>\n".to_vec();
+        archive.extend(archive_member("native.o", &member));
+        let inside = ArchiveBackend.parse(&archive).expect("parse archive");
+        let own = OwnDeclaration::default();
+        let classify = |ir: &ArtifactIr, lookup: &PlatformUnderscoreLookup| {
+            owner_of(
+                ir.symbols[0].name.as_deref(),
+                lookup.for_offset(ir.symbols[0].offset),
+                &own,
+            )
+        };
+        let standalone = classify(&alone, &PlatformUnderscoreLookup::new(&alone));
+        let archived = classify(&inside, &PlatformUnderscoreLookup::new(&inside));
+        assert_eq!(standalone, archived);
+        assert_eq!(standalone.key, "__gnu_cxx");
+        assert_eq!(standalone.ownership, Ownership::Toolchain);
+        assert_eq!(standalone.family, Some(ToolchainFamily::Reserved));
+    }
+
     #[test]
     fn identical_members_get_unique_symbol_fingerprints() {
         let member = coff_member(b"same");
@@ -799,7 +949,7 @@ mod tests {
             assert_eq!(merged.fingerprint, wrap(original.fingerprint));
             assert_eq!(
                 merged.content_fingerprint,
-                original.content_fingerprint.map(wrap)
+                Some(original.content_identity())
             );
             assert_eq!(merged.identity_by_order, original.identity_by_order);
         }

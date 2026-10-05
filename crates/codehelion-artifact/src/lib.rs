@@ -397,8 +397,8 @@ pub struct ArtifactSymbol {
     pub body_fingerprint: Option<ArtifactFingerprint>,
     /// Inline source locations, when debug information established them.
     pub inline_stack: Vec<ArtifactInlineFrame>,
-    /// Content identity shared with other symbols of this artifact, present
-    /// only when `fingerprint` had to be made unique among them.
+    /// Content identity used for comparisons, present when `fingerprint`
+    /// distinguishes copies or includes an archive member identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_fingerprint: Option<ArtifactFingerprint>,
     /// Whether `fingerprint` needed this symbol's position in the file,

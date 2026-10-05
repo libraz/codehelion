@@ -80,6 +80,38 @@ fn class(ownership: &str, size_bytes: u64, symbols: u64) -> (String, u64, u64) {
     (ownership.to_owned(), size_bytes, symbols)
 }
 
+fn mixed_archive_ownership_artifact(macho_code: &[u8], coff_code: &[u8]) -> ArtifactIr {
+    let mut macho = normalizable_symbol(100, macho_code, &[0x90, 0xc3]);
+    macho.name = Some("_strtof".to_owned());
+    let mut coff = normalizable_symbol(300, coff_code, &[0x90, 0xc3]);
+    coff.name = Some("_strtof".to_owned());
+    let mut artifact = ArtifactIr::empty(BinaryFormat::Archive, b"archive");
+    artifact.symbols = vec![macho, coff];
+    artifact.archive_members = vec![
+        codehelion_artifact::ArtifactArchiveMember {
+            name: "native.o".to_owned(),
+            fingerprint: codehelion_artifact::ArtifactFingerprint::from_content(
+                "member", b"native",
+            ),
+            offset: Some(100),
+            size: Some(10),
+            format: Some(BinaryFormat::MachO),
+            thin: false,
+            parse_error: None,
+        },
+        codehelion_artifact::ArtifactArchiveMember {
+            name: "other.obj".to_owned(),
+            fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("member", b"other"),
+            offset: Some(300),
+            size: Some(10),
+            format: Some(BinaryFormat::PeCoff),
+            thin: false,
+            parse_error: None,
+        },
+    ];
+    artifact
+}
+
 /// The toolchain chain below an exported function is held by that function:
 /// `strtof` and `__addtf3` by name, `strtox` by absorption. Declaring
 /// `<global>` own moves the unqualified functions into own and leaves the
@@ -173,7 +205,7 @@ fn a_toolchain_chain_is_held_by_its_caller() {
             .any(|value| value
                 .as_str()
                 .unwrap()
-                .starts_with("unqualified functions reached only through toolchain code")),
+                .starts_with("unqualified functions whose immediate dominator is toolchain code")),
         "{holdings}"
     );
     assert_valid_schema(
@@ -235,6 +267,61 @@ fn a_toolchain_chain_is_held_by_its_caller() {
         text.contains(&format!("    head strtof {strtof}: 10 bytes")),
         "{text}"
     );
+}
+
+#[test]
+fn archive_owner_projection_and_comparison_keep_member_formats_distinct() {
+    let mut standalone = ArtifactIr::empty(BinaryFormat::MachO, b"macho");
+    let mut standalone_symbol = normalizable_symbol(100, &[0x90, 0xc3], &[0x90, 0xc3]);
+    standalone_symbol.name = Some("_strtof".to_owned());
+    standalone.symbols = vec![standalone_symbol];
+    let standalone_json = serde_json::to_value(ArtifactReport::from_ir(
+        FilePath::new("standalone.o"),
+        &standalone,
+        None,
+        None,
+    ))
+    .unwrap();
+    assert_eq!(standalone_json["symbols"][0]["owner"], "c-std");
+    assert_eq!(standalone_json["symbols"][0]["ownership"], "toolchain");
+
+    let before = mixed_archive_ownership_artifact(&[0x90, 0xc3], &[0x90, 0xc3]);
+    let after = mixed_archive_ownership_artifact(&[0x91, 0xc3], &[0x91, 0xc3]);
+    let archive_json = serde_json::to_value(ArtifactReport::from_ir(
+        FilePath::new("mixed.a"),
+        &before,
+        None,
+        None,
+    ))
+    .unwrap();
+    assert_eq!(archive_json["symbols"][0]["owner"], "c-std");
+    assert_eq!(archive_json["symbols"][0]["ownership"], "toolchain");
+    assert_eq!(archive_json["symbols"][1]["owner"], "<global>");
+    assert_eq!(archive_json["symbols"][1]["ownership"], "other");
+
+    let comparison = ArtifactComparisonReport::new(
+        FilePath::new("before.a"),
+        &before,
+        None,
+        FilePath::new("after.a"),
+        &after,
+        None,
+    );
+    let deltas: Vec<_> = comparison
+        .symbol_deltas
+        .iter()
+        .map(|delta| (delta.name.as_deref(), delta.owner.as_str(), delta.ownership))
+        .collect();
+    assert!(deltas.contains(&(
+        Some("_strtof"),
+        "c-std",
+        codehelion_artifact::ownership::Ownership::Toolchain
+    )));
+    assert!(deltas.contains(&(
+        Some("_strtof"),
+        "<global>",
+        codehelion_artifact::ownership::Ownership::Other
+    )));
 }
 
 /// An empty declaration changes nothing, so a run without `[artifact] own`
@@ -315,7 +402,7 @@ fn a_comparison_splits_the_code_delta_by_owner_class() {
         report.assumptions
     );
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v3.schema.json",
         ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
         &json,
     );

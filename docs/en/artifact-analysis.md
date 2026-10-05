@@ -152,7 +152,7 @@ toolchain holders (held bytes are part of the holder's retained size):
     _emscripten_stack_restore ef2222560055353cb931a59336cb3e00: 10 bytes (root), called by nothing
     emscripten_stack_get_current 4eaae22504bd0bae04ab33f12aeef742: 8 bytes (root), called by nothing
     __wasm_call_ctors a0d352ddbe45c0d90cb9d358e3fa1f9d: 2 bytes (root), called by _initialize (toolchain)
-  assumption: unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers
+  assumption: unqualified functions whose immediate dominator is toolchain code are counted as toolchain code, except main and static initializers
   assumption: toolchain holders treat every recorded function reference as a root, so code reached through a function table is reported as shared
 ```
 
@@ -167,8 +167,8 @@ the artifact: the toolchain code is reachable only through it. Each toolchain
 function is attributed to its nearest non-toolchain dominator in the call graph.
 The toolchain functions entered directly below a holder are its **heads**, and the
 holder's line gives the bytes held by everything under them. An unqualified
-function reached only through toolchain code is counted as toolchain code, so a
-libc helper does not appear to hold the libc code it calls; these bytes are
+function whose immediate dominator is toolchain code is counted as toolchain code,
+so a libc helper does not appear to hold the libc code it calls; these bytes are
 reported separately as absorbed. `main` and static initializers are never
 absorbed.
 
@@ -198,7 +198,9 @@ each has its own size and place in the call graph. The shared content is named b
 `content_fingerprint` in the JSON report. A copy that no caller, callee, root,
 size or body can tell from another is told apart by file order and is marked
 `identity_by_order`. `artifact compare` pairs copies by content rather than by
-fingerprint.
+fingerprint. Archive symbols also keep a `content_fingerprint` independent of the
+member bytes, so changing one function does not change the comparison identity of
+other functions in the same member.
 
 ## Comparing two builds
 

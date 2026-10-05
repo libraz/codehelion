@@ -1,7 +1,7 @@
 //! Before/after artifact comparison models and per-symbol deltas.
 
 use codehelion_artifact::ownership::{
-    OwnDeclaration, Ownership, owner_of, strips_platform_underscore,
+    OwnDeclaration, Ownership, PlatformUnderscoreLookup, owner_of,
 };
 
 use super::ArtifactContainment;
@@ -458,12 +458,8 @@ pub(in crate::artifact) fn symbol_deltas(
             .1
             .push(symbol);
     }
-    let before_strip = strips_platform_underscore(before);
-    let after_strip = strips_platform_underscore(after);
-    let label = |name: Option<String>, strip: bool| {
-        let owner = owner_of(name.as_deref(), strip, &OwnDeclaration::default());
-        (name, owner.key, owner.ownership)
-    };
+    let before_platform = PlatformUnderscoreLookup::new(before);
+    let after_platform = PlatformUnderscoreLookup::new(after);
     let mut result = Vec::new();
     for (fingerprint, (before_members, after_members)) in groups {
         let fingerprint = fingerprint.to_hex();
@@ -476,8 +472,8 @@ pub(in crate::artifact) fn symbol_deltas(
                     // Both sides share one identity, so either name is the
                     // symbol's; the later artifact is what the report is about.
                     let (name, owner, ownership) = match &later.name {
-                        Some(_) => label(later.name.clone(), after_strip),
-                        None => label(earlier.name.clone(), before_strip),
+                        Some(_) => owner_label(&after_platform, later),
+                        None => owner_label(&before_platform, earlier),
                     };
                     result.push(SymbolDelta {
                         kind: if earlier.size == later.size {
@@ -493,7 +489,7 @@ pub(in crate::artifact) fn symbol_deltas(
                     });
                 }
                 (Some(earlier), None) => {
-                    let (name, owner, ownership) = label(earlier.name.clone(), before_strip);
+                    let (name, owner, ownership) = owner_label(&before_platform, earlier);
                     result.push(SymbolDelta {
                         kind: symbol_change::REMOVED,
                         name,
@@ -504,7 +500,7 @@ pub(in crate::artifact) fn symbol_deltas(
                     });
                 }
                 (None, Some(later)) => {
-                    let (name, owner, ownership) = label(later.name.clone(), after_strip);
+                    let (name, owner, ownership) = owner_label(&after_platform, later);
                     result.push(SymbolDelta {
                         kind: symbol_change::ADDED,
                         name,
@@ -526,6 +522,20 @@ pub(in crate::artifact) fn symbol_deltas(
             .then_with(|| left.fingerprint.cmp(&right.fingerprint))
     });
     result
+}
+
+/// Name and owner label for one symbol in its artifact's format context.
+fn owner_label(
+    platform: &PlatformUnderscoreLookup,
+    symbol: &codehelion_artifact::ArtifactSymbol,
+) -> (Option<String>, String, Ownership) {
+    let name = symbol.name.clone();
+    let owner = owner_of(
+        name.as_deref(),
+        platform.for_offset(symbol.offset),
+        &OwnDeclaration::default(),
+    );
+    (name, owner.key, owner.ownership)
 }
 
 /// Strike off the members of one identity group that carry the same bytes on

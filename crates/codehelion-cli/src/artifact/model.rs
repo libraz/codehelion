@@ -372,8 +372,7 @@ pub(super) fn data_segment_reports(artifact: &ArtifactIr) -> Vec<DataSegmentRepo
 #[derive(Debug, Serialize)]
 pub(super) struct SymbolReport {
     pub(super) fingerprint: String,
-    /// Shared by every copy of one body; absent unless `fingerprint` had to
-    /// be made unique among them.
+    /// Comparison identity, independent of copy numbering and archive member bytes.
     pub(super) content_fingerprint: Option<String>,
     /// Whether `fingerprint` needed the symbol's position in the file.
     pub(super) identity_by_order: bool,

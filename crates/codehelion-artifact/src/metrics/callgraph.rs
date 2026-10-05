@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use super::duplicates::{DuplicateGroup, DuplicateReport};
 use super::{EvidenceConfidence, SizeClassification};
 use crate::ownership::{
-    GLOBAL_KEY, OwnDeclaration, Ownership, is_main_spelling, is_static_initializer_spelling,
-    owner_of, strips_platform_underscore,
+    GLOBAL_KEY, OwnDeclaration, Ownership, PlatformUnderscoreLookup, is_main_spelling,
+    is_static_initializer_spelling, judging_name, owner_of,
 };
 use crate::{ArtifactFingerprint, ArtifactFormat, ArtifactIr, UnresolvedCall};
 
@@ -26,7 +26,7 @@ const MAX_SHARED_DEPENDENCY_ROOTS: usize = 1024;
 
 /// Stated with every holdings answer, because absorption moves code that is
 /// not named as toolchain code into the held totals.
-const ABSORPTION_ASSUMPTION: &str = "unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers";
+const ABSORPTION_ASSUMPTION: &str = "unqualified functions whose immediate dominator is toolchain code are counted as toolchain code, except main and static initializers";
 
 /// Stated when indirect dispatch is bounded by the recorded references.
 const RECORDED_ROOTS_ASSUMPTION: &str = "toolchain holders treat every recorded function reference as a root, so code reached through a function table is reported as shared";
@@ -640,13 +640,13 @@ impl<'a> CallGraph<'a> {
     pub fn toolchain_holdings(&self) -> Option<ToolchainHoldings> {
         let tree = self.dominator_tree()?;
         // Identities are unique whenever the tree exists.
-        let names: BTreeMap<_, _> = self
+        let symbols: BTreeMap<_, _> = self
             .artifact
             .symbols
             .iter()
-            .map(|symbol| (symbol.fingerprint, symbol.name.as_deref()))
+            .map(|symbol| (symbol.fingerprint, symbol))
             .collect();
-        let strip = strips_platform_underscore(self.artifact);
+        let platform = PlatformUnderscoreLookup::new(self.artifact);
         let own = OwnDeclaration::default();
         let count = tree.dfs_vertices.len();
         let mut toolchain = vec![false; count];
@@ -657,8 +657,10 @@ impl<'a> CallGraph<'a> {
         // Preorder visits every immediate dominator before what it dominates.
         for position in 1..count {
             let symbol = tree.symbol_at(position);
-            let name = names.get(&symbol).copied().flatten();
+            let symbol_data = symbols.get(&symbol).copied();
+            let name = symbol_data.and_then(|symbol| symbol.name.as_deref());
             let parent = tree.immediate[position].unwrap_or(0);
+            let strip = symbol_data.is_some_and(|symbol| platform.for_offset(symbol.offset));
             let owner = owner_of(name, strip, &own);
             let named_toolchain = owner.ownership == Ownership::Toolchain;
             let absorbed = !named_toolchain
@@ -823,11 +825,7 @@ impl<'a> CallGraph<'a> {
 /// Whether `name` is an entry or static-initializer spelling, judged after
 /// the platform underscore is removed.
 fn is_entry_spelling(name: &str, strip_platform_underscore: bool) -> bool {
-    let name = if strip_platform_underscore {
-        name.strip_prefix('_').unwrap_or(name)
-    } else {
-        name
-    };
+    let name = judging_name(name, strip_platform_underscore);
     is_main_spelling(name) || is_static_initializer_spelling(name)
 }
 
@@ -1474,6 +1472,55 @@ mod tests {
     }
 
     #[test]
+    fn archive_holdings_use_the_member_format_for_each_symbol() {
+        let entry = named(0, 1, Some("entry"));
+        let macho = named(100, 2, Some("_strtof"));
+        let coff = named(300, 2, Some("_strtof"));
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Archive, b"archive");
+        artifact.symbols = vec![entry.clone(), macho.clone(), coff.clone()];
+        artifact.symbols[0].exported = true;
+        artifact.capabilities.call_graph = true;
+        artifact.calls = vec![call(&entry, &macho), call(&entry, &coff)];
+        artifact.archive_members = vec![
+            crate::ArtifactArchiveMember {
+                name: "native.o".to_owned(),
+                fingerprint: ArtifactFingerprint::from_content("member", b"native"),
+                offset: Some(100),
+                size: Some(10),
+                format: Some(ArtifactFormat::MachO),
+                thin: false,
+                parse_error: None,
+            },
+            crate::ArtifactArchiveMember {
+                name: "other.obj".to_owned(),
+                fingerprint: ArtifactFingerprint::from_content("member", b"other"),
+                offset: Some(300),
+                size: Some(10),
+                format: Some(ArtifactFormat::PeCoff),
+                thin: false,
+                parse_error: None,
+            },
+        ];
+
+        let holdings = holdings_of(&artifact);
+        assert!(holdings.holdings.iter().any(|holding| {
+            holding.holder == entry.fingerprint
+                && holding.held_symbols == 1
+                && holding
+                    .heads
+                    .iter()
+                    .any(|head| head.symbol == macho.fingerprint)
+        }));
+        assert!(
+            !holdings
+                .holdings
+                .iter()
+                .flat_map(|holding| holding.heads.iter())
+                .any(|head| head.symbol == coff.fingerprint)
+        );
+    }
+
+    #[test]
     fn a_toolchain_chain_is_held_by_its_nearest_non_toolchain_dominator() {
         let parse = named(1, 1, Some("my::parse"));
         let strtof = named(2, 2, Some("strtof"));
@@ -1504,7 +1551,7 @@ mod tests {
         assert_eq!(
             holdings.assumptions,
             vec![
-                "unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers"
+                "unqualified functions whose immediate dominator is toolchain code are counted as toolchain code, except main and static initializers"
                     .to_owned()
             ]
         );
@@ -1720,7 +1767,7 @@ mod tests {
         assert_eq!(
             holdings.assumptions,
             vec![
-                "unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers"
+                "unqualified functions whose immediate dominator is toolchain code are counted as toolchain code, except main and static initializers"
                     .to_owned(),
                 "toolchain holders treat every recorded function reference as a root, so code reached through a function table is reported as shared"
                     .to_owned(),
@@ -1842,8 +1889,8 @@ mod tests {
     #[allow(clippy::too_many_lines)] // One self-contained reference computation.
     fn holdings_from_dominator_sets(artifact: &ArtifactIr) -> ToolchainHoldings {
         use crate::ownership::{
-            GLOBAL_KEY, OwnDeclaration, Ownership, is_main_spelling,
-            is_static_initializer_spelling, owner_of,
+            GLOBAL_KEY, OwnDeclaration, Ownership, PlatformUnderscoreLookup, is_main_spelling,
+            is_static_initializer_spelling, judging_name, owner_of,
         };
         let count = artifact.symbols.len() + 1;
         let mut successors = vec![Vec::new(); count];
@@ -1914,14 +1961,18 @@ mod tests {
         by_depth.sort_by_key(|vertex| dominators[*vertex].len());
         let mut toolchain = vec![false; count];
         let mut absorbed = vec![false; count];
+        let platform = PlatformUnderscoreLookup::new(artifact);
         for vertex in by_depth.iter().copied() {
-            let name = artifact.symbols[vertex - 1].name.as_deref();
-            let owner = owner_of(name, false, &OwnDeclaration::default());
+            let symbol = &artifact.symbols[vertex - 1];
+            let name = symbol.name.as_deref();
+            let strip = platform.for_offset(symbol.offset);
+            let owner = owner_of(name, strip, &OwnDeclaration::default());
             let parent = immediate(vertex);
             if owner.ownership == Ownership::Toolchain {
                 toolchain[vertex] = true;
             } else if owner.key == GLOBAL_KEY
                 && name.is_some_and(|name| {
+                    let name = judging_name(name, strip);
                     !is_main_spelling(name) && !is_static_initializer_spelling(name)
                 })
                 && parent != 0
@@ -1943,7 +1994,7 @@ mod tests {
             shared_absorbed_bytes: 0,
             shared_absorbed_symbols: 0,
             assumptions: vec![
-                "unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers"
+                "unqualified functions whose immediate dominator is toolchain code are counted as toolchain code, except main and static initializers"
                     .to_owned(),
             ],
         };

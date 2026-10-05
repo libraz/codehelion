@@ -97,13 +97,13 @@ toolchain holders (held bytes are part of the holder's retained size):
     _emscripten_stack_restore ef2222560055353cb931a59336cb3e00: 10 bytes (root), called by nothing
     emscripten_stack_get_current 4eaae22504bd0bae04ab33f12aeef742: 8 bytes (root), called by nothing
     __wasm_call_ctors a0d352ddbe45c0d90cb9d358e3fa1f9d: 2 bytes (root), called by _initialize (toolchain)
-  assumption: unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers
+  assumption: unqualified functions whose immediate dominator is toolchain code are counted as toolchain code, except main and static initializers
   assumption: toolchain holders treat every recorded function reference as a root, so code reached through a function table is reported as shared
 ```
 
 `outside symbols` は実行可能セクションのサイズからシンボルのサイズの合計を引いた残りで、これを足すとセクション全体に一致します。text 出力に並ぶのはバイト数の大きい上位 10 owner までで、JSON には全件が入ります。`artifact compare` もバイト差を同じように分けます。シンボルは after 側の owner に、削除されたものは before 側の owner に帰属させ、割り振れない残りは `outside symbols` として示します。
 
-holder は、toolchain のコードではないのに toolchain のコードを成果物に残している関数です。そのコードは holder を通してしか到達できません。toolchain の各関数は、コールグラフ上でいちばん近い非 toolchain の支配元に帰属します。holder の直下で直接入る toolchain 関数が head で、holder の行にはその下にあるものすべてのバイト数が入ります。toolchain のコードを通してしか届かない修飾なしの関数は toolchain のコードとして数えるため、libc の補助関数が自分の呼ぶ libc を抱えているようには見えません。この分は absorbed として別に示します。`main` と静的初期化子は吸収しません。
+holder は、toolchain のコードではないのに toolchain のコードを成果物に残している関数です。そのコードは holder を通してしか到達できません。toolchain の各関数は、コールグラフ上でいちばん近い非 toolchain の支配元に帰属します。holder の直下で直接入る toolchain 関数が head で、holder の行にはその下にあるものすべてのバイト数が入ります。直近の支配元が toolchain のコードである修飾なしの関数は、toolchain のコードとして数えるため、libc の補助関数が自分の呼ぶ libc を抱えているようには見えません。この分は absorbed として別に示します。`main` と静的初期化子は吸収しません。
 
 held bytes は holder の retained size の一部です。toolchain のコードがどこから入っているか、その入口を外すと何が切り離されるかを示すもので、削減の保証ではありません。次のビルドでは同じコードに別の経路から届くこともあります。
 
@@ -113,7 +113,7 @@ owner のラベルはレポートを描画するたびに、保存済みのシ�
 
 ## 同一関数のコピー
 
-静的リンクされたビルドの libc 関数のように、1 つの成果物の中に名前と本体が同じ関数が複数ある場合があります。各コピーは自分の fingerprint を持つので、サイズも呼び出しグラフ上の位置もコピーごとに別です。共有される内容は JSON レポートの `content_fingerprint` が示します。呼び出し元、呼び出し先、ルート、サイズ、本体のいずれでも他のコピーと区別できないコピーはファイル内の順序で見分けられ、`identity_by_order` が付きます。`artifact compare` はコピーを fingerprint ではなく内容で対応づけます。
+静的リンクされたビルドの libc 関数のように、1 つの成果物の中に名前と本体が同じ関数が複数ある場合があります。各コピーは自分の fingerprint を持つので、サイズも呼び出しグラフ上の位置もコピーごとに別です。共有される内容は JSON レポートの `content_fingerprint` が示します。呼び出し元、呼び出し先、ルート、サイズ、本体のいずれでも他のコピーと区別できないコピーはファイル内の順序で見分けられ、`identity_by_order` が付きます。`artifact compare` はコピーを fingerprint ではなく内容で対応づけます。アーカイブ内のシンボルも、メンバー全体のバイト列に依存しない `content_fingerprint` を持ちます。1 つの関数を変更しても、同じメンバー内のほかの関数の比較用識別子は変わりません。
 
 ## 2 つのビルドを比較する
 

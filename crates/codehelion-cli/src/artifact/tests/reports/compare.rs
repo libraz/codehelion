@@ -67,7 +67,7 @@ fn comparison_uses_fingerprint_for_additions_and_names_for_modifications() {
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["calibration"]["absolute_error_bytes"], 3);
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v3.schema.json",
         ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
         &json,
     );
@@ -394,7 +394,7 @@ fn a_changed_immediate_is_reported_even_though_it_normalizes_away() {
 
     let json = serde_json::to_value(&report).unwrap();
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v3.schema.json",
         ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
         &json,
     );
@@ -643,7 +643,7 @@ fn comparison_json_keeps_the_symbol_changes_the_text_folded() {
         2
     );
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v3.schema.json",
         ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
         &json,
     );
@@ -907,4 +907,89 @@ fn comparison_text_splits_the_code_delta_by_owner_class() {
     assert!(text.contains("  c-std (toolchain): +6 bytes"), "{text}");
     assert!(text.contains("  my (other): -4 bytes"), "{text}");
     assert!(text.contains("  outside symbols: -2 bytes"), "{text}");
+}
+
+/// Published schema versions continue to describe reports written by that release.
+#[test]
+fn published_comparison_schema_keeps_accepting_legacy_reports() {
+    const LEGACY_SCHEMA: &str =
+        include_str!("../../../../schema/artifact-comparison-report-v2.schema.json");
+    let report = symbol_comparison(
+        vec![comparison_symbol(Some("app::run"), b"removed", 2)],
+        Vec::new(),
+    );
+    let mut legacy = serde_json::to_value(&report).unwrap();
+    let legacy = legacy.as_object_mut().unwrap();
+    legacy.insert(
+        "schema_version".to_owned(),
+        "artifact-comparison-report-v2".into(),
+    );
+    legacy.remove("ownership_deltas");
+    for delta in legacy["symbol_deltas"].as_array_mut().unwrap() {
+        let delta = delta.as_object_mut().unwrap();
+        delta.remove("owner");
+        delta.remove("ownership");
+    }
+    assert_valid_schema(
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
+        LEGACY_SCHEMA,
+        &serde_json::Value::Object(legacy.clone()),
+    );
+    assert_eq!(report.schema_version, "artifact-comparison-report-v3");
+}
+
+#[test]
+fn published_artifact_schema_remains_available() {
+    let path =
+        FilePath::new(env!("CARGO_MANIFEST_DIR")).join("schema/artifact-report-v2.schema.json");
+    let schema = fs::read_to_string(path).expect("published artifact v2 schema remains shipped");
+    let artifact = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
+    let report = ArtifactReport::from_ir(FilePath::new("legacy.wasm"), &artifact, None, None);
+    let mut legacy = serde_json::to_value(&report).unwrap();
+    let legacy = legacy.as_object_mut().unwrap();
+    legacy.insert("schema_version".to_owned(), "artifact-report-v2".into());
+    for field in ["symbol_assumptions", "ownership", "toolchain_holdings"] {
+        legacy.remove(field);
+    }
+    assert_valid_schema(
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
+        &schema,
+        &serde_json::Value::Object(legacy.clone()),
+    );
+}
+
+#[test]
+fn an_archive_comparison_excludes_unchanged_sibling_functions() {
+    fn archive(changed: &[u8]) -> ArtifactIr {
+        let module = named_function_module(&[("keep", &[0, 0x01, 0x0b]), ("changed", changed)]);
+        let mut bytes = b"!<arch>\n".to_vec();
+        bytes.extend(
+            format!(
+                "{:<16}0           0     0     100644  {:<10}`\n",
+                "module.wasm/",
+                module.len()
+            )
+            .as_bytes(),
+        );
+        bytes.extend(&module);
+        if !module.len().is_multiple_of(2) {
+            bytes.push(b'\n');
+        }
+        codehelion_artifact::archive::ArchiveBackend
+            .parse(&bytes)
+            .unwrap()
+    }
+    let before = archive(&[0, 0x01, 0x0b]);
+    let after = archive(&[0, 0x00, 0x0b]);
+    let report = compare_modules(&before, &after);
+    assert!(!report.symbol_deltas.is_empty());
+    assert!(
+        report
+            .symbol_deltas
+            .iter()
+            .all(|delta| delta.name.as_deref() == Some("changed"))
+    );
+    assert_eq!(report.symbol_changes.added, 1);
+    assert_eq!(report.symbol_changes.removed, 1);
+    assert_eq!(report.symbol_changes.modified_named_symbols, 1);
 }

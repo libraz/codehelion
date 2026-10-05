@@ -14,7 +14,7 @@
 //! directly after the `operator` keyword, which is opaque so that `operator<`
 //! or `operator()` cannot unbalance the name.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -152,11 +152,7 @@ pub fn owner_of(
             family: None,
         };
     };
-    let name = if strip_platform_underscore {
-        name.strip_prefix('_').unwrap_or(name)
-    } else {
-        name
-    };
+    let name = judging_name(name, strip_platform_underscore);
     let normalized = normalize(name);
     let (key, family) = derive_key(function_name(head(&normalized)));
     let family = family.or_else(|| {
@@ -187,6 +183,83 @@ pub fn owner_of(
 #[must_use]
 pub const fn strips_platform_underscore(artifact: &ArtifactIr) -> bool {
     matches!(artifact.format, ArtifactFormat::MachO)
+}
+
+/// Per-symbol platform-prefix lookup for one parsed artifact.
+///
+/// Ordinary artifacts have one format-wide answer. Archives retain one
+/// interval per successfully parsed, non-thin Mach-O member, so symbols from
+/// mixed-format archives are judged against the format that supplied them.
+#[derive(Debug, Clone, Default)]
+pub struct PlatformUnderscoreLookup {
+    standalone_macho: bool,
+    macho_member_ends: BTreeMap<u64, u64>,
+}
+
+impl PlatformUnderscoreLookup {
+    /// Build a lookup from the parser-established format and archive members.
+    #[must_use]
+    pub fn new(artifact: &ArtifactIr) -> Self {
+        if artifact.format != ArtifactFormat::Archive {
+            return Self {
+                standalone_macho: strips_platform_underscore(artifact),
+                macho_member_ends: BTreeMap::new(),
+            };
+        }
+        let mut macho_member_ends: BTreeMap<u64, u64> = BTreeMap::new();
+        for member in &artifact.archive_members {
+            let (Some(offset), Some(size)) = (member.offset, member.size) else {
+                continue;
+            };
+            if member.thin
+                || member.parse_error.is_some()
+                || member.format != Some(ArtifactFormat::MachO)
+            {
+                continue;
+            }
+            let end = offset.saturating_add(size);
+            macho_member_ends
+                .entry(offset)
+                .and_modify(|known| *known = (*known).max(end))
+                .or_insert(end);
+        }
+        Self {
+            standalone_macho: false,
+            macho_member_ends,
+        }
+    }
+
+    /// Whether the symbol at `symbol_offset` belongs to a Mach-O name space.
+    #[must_use]
+    pub fn for_offset(&self, symbol_offset: u64) -> bool {
+        if self.standalone_macho {
+            return true;
+        }
+        self.macho_member_ends
+            .range(..=symbol_offset)
+            .next_back()
+            .is_some_and(|(_, end)| symbol_offset < *end)
+    }
+}
+
+/// Name used for ownership and entry-spelling decisions.
+///
+/// A leading underscore is an ABI prefix only on an otherwise raw symbol
+/// spelling. Demangled C++ and Rust names carry structure (`::`, argument
+/// lists, angle brackets, or special-name braces), so removing their first
+/// character would corrupt the defining path rather than remove an ABI
+/// prefix.
+pub(crate) fn judging_name(name: &str, strip_platform_underscore: bool) -> &str {
+    if strip_platform_underscore
+        && name.starts_with('_')
+        && !name
+            .bytes()
+            .any(|byte| matches!(byte, b':' | b'(' | b')' | b'<' | b'>' | b'{' | b'}'))
+    {
+        name.strip_prefix('_').unwrap_or(name)
+    } else {
+        name
+    }
 }
 
 /// Whether `name` is a program entry spelling: `main`, `__original_main`, or
@@ -508,6 +581,7 @@ fn is_reserved_identifier(name: &str) -> bool {
 mod tests {
     use super::{OwnDeclaration, Ownership, SymbolOwner, ToolchainFamily, owner_of, toolchain};
     use crate::symbols::demangle;
+    use crate::{ArtifactArchiveMember, ArtifactFingerprint, ArtifactFormat, ArtifactIr};
 
     /// Where a table row's name comes from.
     enum Input {
@@ -711,6 +785,19 @@ mod tests {
         });
         rows.push(other(Demangled("_strtof"), "<global>"));
         rows.push(Row {
+            strip: true,
+            ..toolchain(Demangled("__private::f()"), "__private", Reserved)
+        });
+        rows.push(Row {
+            strip: true,
+            ..toolchain(Demangled("__private()"), "reserved", Reserved)
+        });
+        rows.push(Row {
+            strip: true,
+            ..other(Demangled("_my::f()"), "_my")
+        });
+
+        rows.push(Row {
             own: &["<global>"],
             ..row(Demangled("parse"), "<global>", Ownership::Own, None)
         });
@@ -761,5 +848,41 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn platform_prefix_lookup_respects_many_member_boundaries() {
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Archive, b"archive");
+        for index in 0..128_u64 {
+            let offset = 1_000 + index * 20;
+            let failed = index == 2;
+            let thin = index == 4;
+            artifact.archive_members.push(ArtifactArchiveMember {
+                name: format!("member{index}.o"),
+                fingerprint: ArtifactFingerprint::from_content("member", &index.to_le_bytes()),
+                offset: Some(offset),
+                size: Some(10),
+                format: Some(if index % 2 == 0 {
+                    ArtifactFormat::MachO
+                } else {
+                    ArtifactFormat::PeCoff
+                }),
+                thin,
+                parse_error: failed.then(|| "member parse failed".to_owned()),
+            });
+        }
+        let lookup = super::PlatformUnderscoreLookup::new(&artifact);
+
+        assert!(lookup.for_offset(1_000));
+        assert!(lookup.for_offset(1_009));
+        assert!(!lookup.for_offset(1_010));
+        assert!(!lookup.for_offset(1_020));
+        assert!(!lookup.for_offset(1_040));
+        assert!(!lookup.for_offset(1_080));
+        assert!(lookup.for_offset(1_120));
+        assert!(lookup.for_offset(3_520));
+        assert!(lookup.for_offset(3_529));
+        assert!(!lookup.for_offset(3_530));
+        assert!(!lookup.for_offset(3_549));
     }
 }
