@@ -17,6 +17,8 @@ fn correlation_report_keeps_unmapped_bytes_and_reasons_visible() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let second = codehelion_artifact::ArtifactSymbol {
         fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"two"),
@@ -30,6 +32,8 @@ fn correlation_report_keeps_unmapped_bytes_and_reasons_visible() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols = vec![first.clone(), second.clone()];
@@ -84,6 +88,8 @@ fn symbol_coverage_counts_one_population() {
             normalized: None,
             body_fingerprint: None,
             inline_stack: Vec::new(),
+            content_fingerprint: None,
+            identity_by_order: false,
         },
         codehelion_artifact::ArtifactSymbol {
             fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"known"),
@@ -102,6 +108,8 @@ fn symbol_coverage_counts_one_population() {
                 line: Some(4),
                 column: None,
             }],
+            content_fingerprint: None,
+            identity_by_order: false,
         },
     ];
     let units = [SourceUnitIdentity {

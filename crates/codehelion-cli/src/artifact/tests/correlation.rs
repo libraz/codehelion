@@ -16,6 +16,8 @@ fn linker_map_recovers_an_unmapped_unit_without_basename_guessing() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol.clone());
@@ -180,6 +182,8 @@ fn unreadable_debug_information_has_a_distinct_unmapped_reason() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.capabilities.debug_info_unreadable = true;
@@ -217,6 +221,8 @@ fn resolved_wasm_source_map_token_is_persisted_as_direct_mapping_evidence() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"fixture");
     artifact.symbols.push(symbol);
@@ -288,6 +294,8 @@ fn duplicated_symbol(offset: u64) -> codehelion_artifact::ArtifactSymbol {
             line: Some(12),
             column: None,
         }],
+        content_fingerprint: None,
+        identity_by_order: false,
     }
 }
 
@@ -437,6 +445,8 @@ fn source_map_evidence_removes_a_unit_from_the_unmapped_source_side() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"fixture");
     artifact.symbols.push(symbol);
@@ -637,6 +647,8 @@ fn a_source_map_correspondence_settles_which_side_the_unit_is_reported_on() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     });
 
     let rows = correlate_source_run(
@@ -693,6 +705,8 @@ fn a_linker_map_correspondence_settles_which_side_the_unit_is_reported_on() {
             line: Some(5),
             column: None,
         }],
+        content_fingerprint: None,
+        identity_by_order: false,
     });
 
     let rows = correlate_source_run(
@@ -734,6 +748,8 @@ fn sized_symbol(
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     }
 }
 

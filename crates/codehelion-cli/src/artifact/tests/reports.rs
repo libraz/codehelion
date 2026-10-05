@@ -268,6 +268,8 @@ fn normalizable_symbol(
         }),
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     }
 }
 

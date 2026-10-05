@@ -271,6 +271,8 @@ impl ArtifactBackend for WasmBackend {
                 normalized: Some(normalized),
                 body_fingerprint: Some(body_fingerprint(&body)),
                 inline_stack: Vec::new(),
+                content_fingerprint: None,
+                identity_by_order: false,
             });
         }
         if let Some(start) = state.start.and_then(|index| by_index.get(&index)) {

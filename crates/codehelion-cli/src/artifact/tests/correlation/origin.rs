@@ -20,6 +20,8 @@ fn exact_generic_instantiation_key_maps_the_definition_origin() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
@@ -186,6 +188,8 @@ fn generic_origin_maps_one_source_to_each_instantiated_symbol() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let second = codehelion_artifact::ArtifactSymbol {
         fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"u16"),
@@ -278,6 +282,8 @@ fn clang_template_display_key_maps_only_its_demangled_specialization() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
@@ -357,6 +363,8 @@ fn clang_template_owner_key_maps_only_its_member_specialization() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let units = [SourceUnitIdentity {
         fingerprint: UnitFingerprint::from_bytes([3; 16]),
@@ -430,6 +438,8 @@ fn generic_origin_metrics_keep_normalized_duplicates_separate_from_savings() {
             }),
             body_fingerprint: None,
             inline_stack: Vec::new(),
+            content_fingerprint: None,
+            identity_by_order: false,
         });
     }
     let fingerprints = artifact

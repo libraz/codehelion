@@ -108,6 +108,8 @@ fn correlation_input(scale: &CorrelationScale) -> CorrelationInput {
                 line: Some(line),
                 column: None,
             }],
+            content_fingerprint: None,
+            identity_by_order: false,
         }
     }));
     let instantiations = (0..scale.compiler_facts)

@@ -17,6 +17,8 @@ fn comparison_uses_fingerprint_for_additions_and_names_for_modifications() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     }];
     let mut after = before.clone();
     after.observed_bytes = 7;
@@ -310,6 +312,8 @@ fn a_same_size_native_edit_is_reported_when_the_symbol_has_no_body_identity() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     }];
     let mut after = before.clone();
     after.symbols[0].code = vec![0xb8, 2, 0, 0, 0];
@@ -361,6 +365,8 @@ fn comparison_reports_individual_duplicate_group_changes() {
             normalized: None,
             body_fingerprint: None,
             inline_stack: Vec::new(),
+            content_fingerprint: None,
+            identity_by_order: false,
         })
         .collect();
     let mut after = before.clone();
@@ -404,6 +410,8 @@ fn comparison_symbol(
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     }
 }
 

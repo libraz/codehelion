@@ -17,6 +17,8 @@ fn conflicting_generic_origin_and_name_candidates_remain_ambiguous() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
@@ -113,6 +115,8 @@ fn symbol_assembled_from_two_files() -> codehelion_artifact::ArtifactSymbol {
             .map(|line| frame("/work/src/main.cpp", line))
             .chain((100..=109).map(|line| frame("/work/src/helper.cpp", line)))
             .collect(),
+        content_fingerprint: None,
+        identity_by_order: false,
     }
 }
 
@@ -269,6 +273,8 @@ fn same_named_units_remain_ambiguous_name_candidates() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
@@ -352,6 +358,8 @@ fn equal_content_declarations_each_receive_their_own_name_mapping() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
@@ -455,6 +463,8 @@ fn one_file_spelled_with_either_separator_correlates_the_same_way() {
             line: Some(12),
             column: None,
         }],
+        content_fingerprint: None,
+        identity_by_order: false,
     });
     let units = [SourceUnitIdentity {
         fingerprint: UnitFingerprint::from_bytes([3; 16]),

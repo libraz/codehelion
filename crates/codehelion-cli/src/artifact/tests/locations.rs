@@ -75,6 +75,8 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
             line: Some(12),
             column: Some(3),
         }],
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol.clone());
@@ -193,6 +195,8 @@ fn partial_fragment_attribution_is_proportional_and_not_exact() {
                 column: None,
             })
             .collect(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     artifact.symbols.push(symbol.clone());
     let fragment = SourceFragmentIdentity {
@@ -264,6 +268,8 @@ fn pdb_location_maps_with_pdb_evidence() {
             line: Some(12),
             column: Some(3),
         }],
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::PeCoff, b"fixture");
     artifact.symbols.push(symbol);
@@ -320,6 +326,8 @@ fn dwarf_frame_without_line_does_not_map_clone_fragments() {
             line: None,
             column: None,
         }],
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
@@ -420,6 +428,8 @@ fn inline_stack_retains_every_source_origin_without_double_counting_symbol_bytes
                 column: None,
             },
         ],
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
@@ -668,6 +678,8 @@ fn demangled_name_maps_one_named_unit_as_weak_evidence() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
@@ -731,6 +743,8 @@ fn macro_definition_anchor_beats_an_unrelated_unit_label() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols.push(symbol);
@@ -841,6 +855,8 @@ fn matching_static_calls_add_independent_neighborhood_evidence() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let target = codehelion_artifact::ArtifactSymbol {
         fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", b"target"),
@@ -854,6 +870,8 @@ fn matching_static_calls_add_independent_neighborhood_evidence() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     };
     let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
     artifact.symbols = vec![caller.clone(), target.clone()];

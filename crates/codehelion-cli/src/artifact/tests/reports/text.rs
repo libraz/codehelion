@@ -146,6 +146,8 @@ fn report_keeps_duplicate_group_members_without_emitting_code() {
             normalized: None,
             body_fingerprint: None,
             inline_stack: Vec::new(),
+            content_fingerprint: None,
+            identity_by_order: false,
         })
         .collect();
     artifact.symbols[0].exported = true;
@@ -194,6 +196,8 @@ fn dead_code_is_a_candidate_list_when_two_symbols_share_one_fingerprint() {
             normalized: None,
             body_fingerprint: None,
             inline_stack: Vec::new(),
+            content_fingerprint: None,
+            identity_by_order: false,
         })
         .collect();
 
@@ -235,6 +239,8 @@ fn dead_code_is_a_candidate_list_when_a_call_endpoint_matches_no_symbol() {
         normalized: None,
         body_fingerprint: None,
         inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
     }];
     artifact.calls.push(codehelion_artifact::ArtifactCall {
         caller: artifact.symbols[0].fingerprint,

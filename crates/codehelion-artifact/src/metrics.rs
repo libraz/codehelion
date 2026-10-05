@@ -351,6 +351,8 @@ mod tests {
             // are present here, rather than the cross-artifact body identity.
             body_fingerprint: None,
             inline_stack: Vec::new(),
+            content_fingerprint: None,
+            identity_by_order: false,
         }
     }
 

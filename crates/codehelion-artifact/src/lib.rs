@@ -396,6 +396,25 @@ pub struct ArtifactSymbol {
     pub body_fingerprint: Option<ArtifactFingerprint>,
     /// Inline source locations, when debug information established them.
     pub inline_stack: Vec<ArtifactInlineFrame>,
+    /// Content identity shared with other symbols of this artifact, present
+    /// only when `fingerprint` had to be made unique among them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_fingerprint: Option<ArtifactFingerprint>,
+    /// Whether `fingerprint` needed this symbol's position in the file,
+    /// because its content, callers and callees match another symbol's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub identity_by_order: bool,
+}
+
+impl ArtifactSymbol {
+    /// The identity a comparison pairs by: shared by every copy of one body.
+    #[must_use]
+    pub const fn content_identity(&self) -> ArtifactFingerprint {
+        match self.content_fingerprint {
+            Some(content) => content,
+            None => self.fingerprint,
+        }
+    }
 }
 
 /// One source frame associated with an inlined artifact symbol.
@@ -717,6 +736,47 @@ pub(crate) fn check_parse_answers(
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn bare_symbol(fingerprint: ArtifactFingerprint) -> ArtifactSymbol {
+        ArtifactSymbol {
+            fingerprint,
+            name: None,
+            exported: false,
+            section: None,
+            offset: 0,
+            size: 0,
+            size_inferred: false,
+            code: Vec::new(),
+            normalized: None,
+            body_fingerprint: None,
+            inline_stack: Vec::new(),
+            content_fingerprint: None,
+            identity_by_order: false,
+        }
+    }
+
+    #[test]
+    fn content_identity_falls_back_to_the_fingerprint() {
+        let own = ArtifactFingerprint::from_content("test", b"own");
+        let content = ArtifactFingerprint::from_content("test", b"content");
+        let mut symbol = bare_symbol(own);
+        assert_eq!(symbol.content_identity(), own);
+        symbol.content_fingerprint = Some(content);
+        assert_eq!(symbol.content_identity(), content);
+    }
+
+    #[test]
+    fn identity_fields_default_when_absent_and_are_not_written_when_default() {
+        let symbol = bare_symbol(ArtifactFingerprint::from_content("test", b"own"));
+        let mut value = serde_json::to_value(&symbol).expect("serialize");
+        let object = value.as_object_mut().expect("object");
+        assert!(!object.contains_key("content_fingerprint"));
+        assert!(!object.contains_key("identity_by_order"));
+        let back: ArtifactSymbol = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, symbol);
+        assert_eq!(back.content_fingerprint, None);
+        assert!(!back.identity_by_order);
+    }
 
     #[test]
     fn magic_detection_distinguishes_supported_planned_and_unknown_inputs() {
