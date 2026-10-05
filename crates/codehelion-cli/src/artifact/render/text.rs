@@ -1,14 +1,16 @@
 //! Human-readable rendering of one artifact report.
 
 use codehelion_artifact::metrics::ReportedSize;
+use codehelion_artifact::ownership::Ownership;
 
 use super::{
     artifact_import_kind_label, attribution_basis_label, optional_bytes,
     refactor_savings_assumption_text, stated_bytes,
 };
 use crate::artifact::model::{
-    ArtifactReport, AssumptionScope, ReportAssumption, SourceMapResolutionStatus,
-    dead_code_unavailability, report_assumptions, retained_size_unavailability,
+    ArtifactReport, AssumptionScope, OwnershipReport, ReportAssumption, SourceMapResolutionStatus,
+    ToolchainHoldingsReport, dead_code_unavailability, family_label, ownership_label,
+    report_assumptions, retained_size_unavailability,
 };
 use crate::artifact::{Result, Write, metrics};
 
@@ -374,6 +376,15 @@ pub(in crate::artifact) fn render_text(
             )?;
         }
     }
+    render_ownership(&report.ownership, &assumptions, out)?;
+    match &report.toolchain_holdings {
+        Some(holdings) => render_holdings(holdings, &assumptions, out)?,
+        // The retained-size line above already named the conditions.
+        None => writeln!(
+            out,
+            "toolchain holders: unavailable (same conditions as retained sizes)"
+        )?,
+    }
     render_groups("exact", &report.duplicate_groups.exact, out)?;
     render_groups("normalized", &report.duplicate_groups.normalized, out)?;
     render_groups("data", &report.duplicate_groups.data, out)?;
@@ -444,6 +455,174 @@ fn render_assumptions(
         .filter(|assumption| assumption.scope == scope)
     {
         writeln!(out, "  assumption: {}", assumption.text)?;
+    }
+    Ok(())
+}
+
+/// Owners listed in text; JSON carries every one.
+const LISTED_OWNERS: usize = 10;
+/// Holders listed in text.
+const LISTED_HOLDERS: usize = 10;
+/// Heads listed under each holder.
+const LISTED_HEADS: usize = 3;
+/// Shared toolchain entries listed in text.
+const LISTED_SHARED: usize = 5;
+/// Callers listed under each shared entry.
+const LISTED_CALLERS: usize = 3;
+
+/// The class split on one line, then the largest owners and what lies outside
+/// every symbol.
+fn render_ownership(
+    ownership: &OwnershipReport,
+    assumptions: &[ReportAssumption<'_>],
+    out: &mut impl Write,
+) -> Result<()> {
+    let classes: Vec<String> = ownership
+        .classes
+        .iter()
+        .map(|class| {
+            format!(
+                "{} {} bytes ({} symbols)",
+                ownership_label(class.ownership),
+                class.size_bytes,
+                class.symbols
+            )
+        })
+        .collect();
+    writeln!(out, "ownership: {}", classes.join(", "))?;
+    if !ownership.declared_own.is_empty() {
+        writeln!(out, "  declared own: {}", ownership.declared_own.join(", "))?;
+    }
+    // The unnamed class has one key, which the class line already states.
+    let owners: Vec<_> = ownership
+        .owners
+        .iter()
+        .filter(|owner| owner.ownership != Ownership::Unnamed)
+        .collect();
+    for owner in owners.iter().take(LISTED_OWNERS) {
+        let family = owner
+            .family
+            .map_or_else(String::new, |family| format!(", {}", family_label(family)));
+        writeln!(
+            out,
+            "  {} ({}{family}): {} bytes, {} symbols",
+            owner.key,
+            ownership_label(owner.ownership),
+            owner.size_bytes,
+            owner.symbols
+        )?;
+    }
+    render_omitted(owners.len(), LISTED_OWNERS, "owners", "  ", out)?;
+    writeln!(
+        out,
+        "  outside symbols: {} bytes",
+        ownership.outside_symbols_bytes
+    )?;
+    render_assumptions(assumptions, AssumptionScope::Ownership, out)
+}
+
+/// The largest holders with their heads, then the shared toolchain code.
+fn render_holdings(
+    holdings: &ToolchainHoldingsReport,
+    assumptions: &[ReportAssumption<'_>],
+    out: &mut impl Write,
+) -> Result<()> {
+    writeln!(
+        out,
+        "toolchain holders (held bytes are part of the holder's retained size):"
+    )?;
+    for holding in holdings.holdings.iter().take(LISTED_HOLDERS) {
+        writeln!(
+            out,
+            "  {} ({}) {}: {} bytes in {} symbols, {} bytes in {} symbols absorbed",
+            holding.holder_name.as_deref().unwrap_or("<unnamed>"),
+            ownership_label(holding.holder_ownership),
+            holding.holder,
+            holding.held_bytes,
+            holding.held_symbols,
+            holding.absorbed_bytes,
+            holding.absorbed_symbols,
+        )?;
+        for head in holding.heads.iter().take(LISTED_HEADS) {
+            writeln!(
+                out,
+                "    head {} {}: {} bytes",
+                head.name.as_deref().unwrap_or("<unnamed>"),
+                head.symbol,
+                head.held_bytes
+            )?;
+        }
+        render_omitted(holding.heads.len(), LISTED_HEADS, "heads", "    ", out)?;
+    }
+    render_omitted(
+        holdings.holdings.len(),
+        LISTED_HOLDERS,
+        "holders",
+        "  ",
+        out,
+    )?;
+    writeln!(
+        out,
+        "  shared: {} bytes in {} symbols, {} bytes in {} symbols absorbed",
+        holdings.shared_bytes,
+        holdings.shared_symbols,
+        holdings.shared_absorbed_bytes,
+        holdings.shared_absorbed_symbols,
+    )?;
+    for shared in holdings.shared.iter().take(LISTED_SHARED) {
+        let callers: Vec<String> = shared
+            .callers
+            .iter()
+            .take(LISTED_CALLERS)
+            .map(|caller| {
+                format!(
+                    "{} ({})",
+                    caller.name.as_deref().unwrap_or(caller.symbol.as_str()),
+                    ownership_label(caller.ownership)
+                )
+            })
+            .collect();
+        let more = shared.callers.len().saturating_sub(LISTED_CALLERS);
+        let more = if more > 0 {
+            format!(", {more} more")
+        } else {
+            String::new()
+        };
+        writeln!(
+            out,
+            "    {} {}: {} bytes{}, called by {}{more}",
+            shared.name.as_deref().unwrap_or("<unnamed>"),
+            shared.symbol,
+            shared.held_bytes,
+            if shared.root { " (root)" } else { "" },
+            if callers.is_empty() {
+                "nothing".to_owned()
+            } else {
+                callers.join(", ")
+            },
+        )?;
+    }
+    render_omitted(
+        holdings.shared.len(),
+        LISTED_SHARED,
+        "shared entries",
+        "    ",
+        out,
+    )?;
+    render_assumptions(assumptions, AssumptionScope::ToolchainHoldings, out)
+}
+
+/// Say how many entries a capped list left to the JSON output.
+fn render_omitted(
+    total: usize,
+    listed: usize,
+    what: &str,
+    indent: &str,
+    out: &mut impl Write,
+) -> Result<()> {
+    let omitted = total.saturating_sub(listed);
+    if omitted > 0 {
+        writeln!(out, "{indent}{omitted} more {what}")?;
     }
     Ok(())
 }

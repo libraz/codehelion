@@ -17,6 +17,10 @@ pub(in crate::artifact) enum AssumptionScope {
     RetainedSizes,
     /// Qualifies the reachability verdict.
     DeadCode,
+    /// Qualifies the owner labels.
+    Ownership,
+    /// Qualifies the toolchain holders.
+    ToolchainHoldings,
     /// The build-condition warning, which the report also exposes as its own
     /// field and which therefore has exactly one place in each rendering.
     BuildVariant,
@@ -31,6 +35,8 @@ impl AssumptionScope {
             Self::Sizes => "sizes",
             Self::RetainedSizes => "retained_sizes",
             Self::DeadCode => "dead_code",
+            Self::Ownership => "ownership",
+            Self::ToolchainHoldings => "toolchain_holdings",
             Self::BuildVariant => "build_variant",
             Self::Comparison => "comparison",
         }
@@ -119,6 +125,22 @@ pub(in crate::artifact) fn report_assumptions(
     if let Some(dead_code) = &report.dead_code {
         assumptions.extend(dead_code.assumptions.iter().map(|text| ReportAssumption {
             scope: AssumptionScope::DeadCode,
+            text: text.as_str(),
+        }));
+    }
+    assumptions.extend(
+        report
+            .ownership
+            .assumptions
+            .iter()
+            .map(|text| ReportAssumption {
+                scope: AssumptionScope::Ownership,
+                text: text.as_str(),
+            }),
+    );
+    if let Some(holdings) = &report.toolchain_holdings {
+        assumptions.extend(holdings.assumptions.iter().map(|text| ReportAssumption {
+            scope: AssumptionScope::ToolchainHoldings,
             text: text.as_str(),
         }));
     }

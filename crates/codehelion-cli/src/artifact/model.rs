@@ -1,18 +1,20 @@
 //! Serializable artifact report models and comparison deltas.
 
 use super::{
-    ARTIFACT_REPORT_SCHEMA_VERSION, ArtifactCorrelationReport, ArtifactIr, BinaryFormat, Serialize,
-    metrics,
+    ARTIFACT_REPORT_SCHEMA_VERSION, ArtifactCorrelationReport, ArtifactIr, BTreeMap, BinaryFormat,
+    Serialize, metrics,
 };
 
 mod assumption;
 mod columns;
 mod comparison;
+mod ownership;
 
 pub(super) use assumption::{
     AssumptionScope, ReportAssumption, comparison_assumptions, dead_code_unavailability,
     qualify_sizes, report_assumptions, retained_size_unavailability,
 };
+use codehelion_artifact::ownership::{OwnDeclaration, Ownership};
 pub(super) use columns::{ARTIFACT_CSV_HEADER, COMPARE_CSV_HEADER, column, compare_column};
 #[cfg(test)]
 pub(super) use columns::{EVERY_RECORD, RECORD_COLUMNS};
@@ -20,6 +22,10 @@ pub(super) use comparison::{
     ArtifactComparisonReport, BuildVariantEvidence, CalibrationReport, ComparisonArtifact,
     ComparisonBuildVariant, SymbolDelta, code_section_bytes, data_segment_bytes,
     pairs_both_artifacts,
+};
+pub(super) use ownership::{
+    OwnershipDeltaReport, OwnershipReport, ToolchainHoldingsReport, declared_ownership,
+    family_label, ownership_label, ownership_of, symbol_owners,
 };
 
 /// Stable summary of one artifact report, excluding raw code and data bytes.
@@ -56,6 +62,9 @@ pub(super) struct ArtifactReport {
     pub(super) sizes: metrics::SizeClassification,
     pub(super) dead_code: Option<metrics::DeadCodeReport>,
     pub(super) retained_sizes: Option<Vec<metrics::RetainedSize>>,
+    pub(super) ownership: OwnershipReport,
+    /// Absent under the same conditions as `retained_sizes`.
+    pub(super) toolchain_holdings: Option<ToolchainHoldingsReport>,
     pub(super) duplicates: DuplicateSummary,
     pub(super) duplicate_groups: DuplicateGroups,
 }
@@ -180,6 +189,8 @@ impl ArtifactReport {
         let graph = metrics::CallGraph::from_ir(artifact);
         let mut sizes = graph.classify_sizes_from_duplicates(&duplicates, &data);
         qualify_sizes(&mut sizes, &artifact.skipped_architectures);
+        let owners = symbol_owners(artifact);
+        let (ownership, toolchain_holdings) = ownership_of(artifact, &graph, &owners);
         Self {
             schema_version: ARTIFACT_REPORT_SCHEMA_VERSION,
             path: path.display().to_string(),
@@ -201,13 +212,16 @@ impl ArtifactReport {
             symbols: artifact
                 .symbols
                 .iter()
-                .map(|symbol| SymbolReport {
+                .zip(&owners)
+                .map(|(symbol, owner)| SymbolReport {
                     fingerprint: symbol.fingerprint.to_hex(),
                     name: symbol.name.clone(),
                     exported: symbol.exported,
                     offset: symbol.offset,
                     size: symbol.size,
                     size_inferred: symbol.size_inferred,
+                    owner: owner.key.clone(),
+                    ownership: owner.ownership,
                 })
                 .collect(),
             entry_points: artifact.entry_points.len(),
@@ -235,6 +249,8 @@ impl ArtifactReport {
             sizes,
             dead_code: graph.dead_code_candidates(),
             retained_sizes: graph.retained_sizes(),
+            ownership,
+            toolchain_holdings,
             duplicates: DuplicateSummary {
                 exact_groups: duplicates.exact.len(),
                 exact_duplicated_bytes: duplicates
@@ -275,6 +291,25 @@ impl ArtifactReport {
 
     pub(super) fn with_source_maps(mut self, source_maps: Vec<SourceMapResolution>) -> Self {
         self.source_maps = source_maps;
+        self
+    }
+
+    /// Report the owner keys `own` lists, from `[artifact] own`, as own code.
+    /// An empty declaration changes nothing.
+    pub(super) fn with_own_declaration(mut self, own: &[String]) -> Self {
+        if own.is_empty() {
+            return self;
+        }
+        let declared = OwnDeclaration::from(own);
+        let mut relabelled = BTreeMap::new();
+        for symbol in &mut self.symbols {
+            symbol.ownership = declared_ownership(symbol.ownership, &symbol.owner, &declared);
+            relabelled.insert(symbol.fingerprint.as_str(), symbol.ownership);
+        }
+        if let Some(holdings) = &mut self.toolchain_holdings {
+            holdings.declare(&relabelled);
+        }
+        self.ownership.declare(own, &declared);
         self
     }
 }
@@ -338,6 +373,9 @@ pub(super) struct SymbolReport {
     pub(super) offset: u64,
     pub(super) size: u64,
     pub(super) size_inferred: bool,
+    /// Owner key derived from the name.
+    pub(super) owner: String,
+    pub(super) ownership: Ownership,
 }
 
 #[derive(Debug, Serialize)]

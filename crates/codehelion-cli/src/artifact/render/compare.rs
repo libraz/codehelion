@@ -1,8 +1,10 @@
 //! Rendering of one before/after artifact comparison.
 
+use codehelion_artifact::ownership::Ownership;
+
 use crate::artifact::model::{
-    ArtifactComparisonReport, AssumptionScope, COMPARE_CSV_HEADER, compare_column,
-    comparison_assumptions, pairs_both_artifacts,
+    ArtifactComparisonReport, AssumptionScope, COMPARE_CSV_HEADER, OwnershipDeltaReport,
+    compare_column, comparison_assumptions, ownership_label, pairs_both_artifacts,
 };
 use crate::artifact::{Result, Write, csv, optional_f64};
 
@@ -248,6 +250,7 @@ pub(in crate::artifact) fn render_compare_text(
             delta.kind, delta.fingerprint, delta.duplicated_bytes_delta, delta.members_delta,
         )?;
     }
+    render_ownership_deltas(&report.ownership_deltas, out)?;
     for assumption in assumptions
         .iter()
         .filter(|assumption| assumption.scope != AssumptionScope::BuildVariant)
@@ -290,6 +293,51 @@ fn render_symbol_deltas(deltas: &[super::model::SymbolDelta], out: &mut impl Wri
             deltas.len()
         )?;
     }
+    Ok(())
+}
+
+/// Owners listed in text; JSON carries every one.
+const LISTED_OWNERS: usize = 10;
+
+/// The class split of the symbol deltas, the owners that moved most, and the
+/// part of the code delta no symbol covers.
+fn render_ownership_deltas(deltas: &OwnershipDeltaReport, out: &mut impl Write) -> Result<()> {
+    let classes: Vec<String> = deltas
+        .classes
+        .iter()
+        .map(|class| {
+            format!(
+                "{} {:+} bytes",
+                ownership_label(class.ownership),
+                class.delta_bytes
+            )
+        })
+        .collect();
+    writeln!(out, "ownership delta: {}", classes.join(", "))?;
+    // The unnamed class has one key, which the class line already states.
+    let owners: Vec<_> = deltas
+        .owners
+        .iter()
+        .filter(|owner| owner.ownership != Ownership::Unnamed)
+        .collect();
+    for owner in owners.iter().take(LISTED_OWNERS) {
+        writeln!(
+            out,
+            "  {} ({}): {:+} bytes",
+            owner.key,
+            ownership_label(owner.ownership),
+            owner.delta_bytes
+        )?;
+    }
+    let omitted = owners.len().saturating_sub(LISTED_OWNERS);
+    if omitted > 0 {
+        writeln!(out, "  {omitted} more owners")?;
+    }
+    writeln!(
+        out,
+        "  outside symbols: {:+} bytes",
+        deltas.outside_symbols_delta_bytes
+    )?;
     Ok(())
 }
 

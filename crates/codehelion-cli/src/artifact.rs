@@ -134,7 +134,7 @@ pub fn run(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
 /// Run the artifact pipeline in the already isolated worker process.
 fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
     worker::set_stage("persistence setup");
-    let (_, _, database) = crate::resolve_database(
+    let (_, config, database) = crate::resolve_database(
         crate::scan::DatabaseUse::Recording,
         std::path::Path::new("."),
         args.db.as_deref(),
@@ -181,7 +181,8 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
     )
     .with_containment(containment)
     .with_source_maps(source_maps)
-    .with_correlation(correlation);
+    .with_correlation(correlation)
+    .with_own_declaration(&config.config.artifact.own);
     worker::set_stage("rendering");
     let mut rendered = Vec::new();
     match args.format {
@@ -218,7 +219,7 @@ use calibration::{csv, optional_f64};
 pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome> {
     // A report only reads a committed SQLite snapshot. WAL lets this proceed
     // alongside one writer, so it deliberately does not take the writer lease.
-    let (_, _, db) = crate::resolve_database(
+    let (_, config, db) = crate::resolve_database(
         crate::scan::DatabaseUse::Reading,
         std::path::Path::new("."),
         args.db.as_deref(),
@@ -264,7 +265,8 @@ pub fn report(args: &ArtifactReportArgs, out: &mut impl Write) -> Result<Outcome
     )
     .with_containment(recorded_containment(&store, analysis_id)?)
     .with_source_maps(recorded_source_maps(&store, analysis_id)?)
-    .with_correlation(recorded_correlation(&store, analysis_id, &artifact)?);
+    .with_correlation(recorded_correlation(&store, analysis_id, &artifact)?)
+    .with_own_declaration(&config.config.artifact.own);
     let mut rendered = Vec::new();
     match args.format {
         ArtifactFormat::Json => serde_json::to_writer_pretty(&mut rendered, &report)?,
@@ -321,6 +323,8 @@ pub fn compare(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Outco
 /// Run an artifact comparison in the already isolated worker process.
 fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Outcome> {
     worker::set_stage("persistence setup");
+    // Owner labels follow `[artifact] own` exactly as analyze reads it.
+    let config = crate::config::load(None, FilePath::new("."))?;
     let database = calibration_database(args)?;
     let _database_lock = database
         .as_deref()
@@ -355,7 +359,8 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
         &args.after,
         &after,
         after_variant.as_ref().map(BuildVariantEvidence::for_report),
-    );
+    )
+    .with_own_declaration(&config.config.artifact.own);
     report.containment = compare_untrusted_containment(args);
     worker::set_stage("calibration persistence");
     report.calibration = record_comparison_calibration(

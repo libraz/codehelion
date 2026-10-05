@@ -55,15 +55,25 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
         normalizable_symbol(10, &[1, 2], &[9]),
         normalizable_symbol(20, &[1, 3], &[9]),
         normalizable_symbol(30, &[1, 2], &[9]),
+        normalizable_symbol(40, &[1, 4], &[9]),
     ];
+    // Two roots share `strtof`, and the first alone holds `__addtf3`.
+    for (index, name) in ["root", "strtof", "second_root", "__addtf3"]
+        .into_iter()
+        .enumerate()
+    {
+        artifact.symbols[index].name = Some(name.to_owned());
+    }
     artifact.symbols[0].exported = true;
-    artifact.symbols[0].name = Some("root".to_owned());
+    artifact.symbols[2].exported = true;
     artifact.entry_points.push(artifact.symbols[0].fingerprint);
-    artifact.calls.push(codehelion_artifact::ArtifactCall {
-        caller: artifact.symbols[0].fingerprint,
-        target: Some(artifact.symbols[1].fingerprint),
-        unresolved: None,
-    });
+    for (caller, target) in [(0, 1), (2, 1), (0, 3)] {
+        artifact.calls.push(codehelion_artifact::ArtifactCall {
+            caller: artifact.symbols[caller].fingerprint,
+            target: Some(artifact.symbols[target].fingerprint),
+            unresolved: None,
+        });
+    }
     artifact
         .sections
         .push(codehelion_artifact::ArtifactSection {
@@ -161,6 +171,8 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
     assert!(value["duplicate_groups"]["normalized"][0].is_object());
     assert!(value["duplicate_groups"]["data"][0].is_object());
     assert!(value["dead_code"].is_object());
+    assert!(value["toolchain_holdings"]["holdings"][0]["heads"][0].is_object());
+    assert!(value["toolchain_holdings"]["shared"][0]["callers"][0].is_object());
     let defs = &schema["$defs"];
     let correlation = &defs["correlation"]["properties"];
     let savings = &correlation["estimated_refactor_savings"]["items"]["properties"];
@@ -234,6 +246,35 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
             &value["correlation"]["macro_origins"][0],
             &correlation["macro_origins"]["items"]["properties"],
         ),
+        (&value["ownership"], &defs["ownership"]["properties"]),
+        (
+            &value["ownership"]["classes"][0],
+            &defs["ownership_class_total"]["properties"],
+        ),
+        (
+            &value["ownership"]["owners"][0],
+            &defs["owner_total"]["properties"],
+        ),
+        (
+            &value["toolchain_holdings"],
+            &defs["toolchain_holdings"]["properties"],
+        ),
+        (
+            &value["toolchain_holdings"]["holdings"][0],
+            &defs["toolchain_holding"]["properties"],
+        ),
+        (
+            &value["toolchain_holdings"]["holdings"][0]["heads"][0],
+            &defs["held_head"]["properties"],
+        ),
+        (
+            &value["toolchain_holdings"]["shared"][0],
+            &defs["shared_toolchain"]["properties"],
+        ),
+        (
+            &value["toolchain_holdings"]["shared"][0]["callers"][0],
+            &defs["toolchain_caller"]["properties"],
+        ),
     ];
     for (object, properties) in checks {
         let keys = object.as_object().expect("the fixture writes an object");
@@ -247,6 +288,67 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
     assert_valid_schema(
         "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
         ARTIFACT_REPORT_JSON_SCHEMA,
+        &value,
+    );
+}
+
+/// Every field the comparison report writes is declared where it is written.
+#[test]
+fn comparison_json_field_names_appear_in_the_shipped_schema() {
+    let schema: serde_json::Value =
+        serde_json::from_str(ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA).unwrap();
+    assert_eq!(
+        schema["properties"]["schema_version"]["const"],
+        ARTIFACT_COMPARISON_REPORT_SCHEMA_VERSION
+    );
+    let mut before = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
+    before.symbols = vec![normalizable_symbol(10, &[1, 2], &[9])];
+    before.symbols[0].name = Some("my::f".to_owned());
+    let mut after = before.clone();
+    after.symbols = vec![normalizable_symbol(20, &[1, 2, 3], &[9])];
+    after.symbols[0].name = Some("strtof".to_owned());
+    let report = ArtifactComparisonReport::new(
+        std::path::Path::new("before.wasm"),
+        &before,
+        None,
+        std::path::Path::new("after.wasm"),
+        &after,
+        None,
+    );
+
+    let value = serde_json::to_value(&report).unwrap();
+    let defs = &schema["$defs"];
+    let checks = [
+        (&value, &schema["properties"]),
+        (
+            &value["symbol_deltas"][0],
+            &defs["symbol_delta"]["properties"],
+        ),
+        (
+            &value["ownership_deltas"],
+            &defs["ownership_deltas"]["properties"],
+        ),
+        (
+            &value["ownership_deltas"]["classes"][0],
+            &defs["ownership_class_delta"]["properties"],
+        ),
+        (
+            &value["ownership_deltas"]["owners"][0],
+            &defs["owner_delta"]["properties"],
+        ),
+    ];
+    for (object, properties) in checks {
+        let keys = object.as_object().expect("the fixture writes an object");
+        for key in keys.keys() {
+            assert!(
+                properties.get(key).is_some(),
+                "field {key:?} missing from the shipped schema"
+            );
+        }
+    }
+    assert_valid_schema(
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
+        ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
         &value,
     );
 }

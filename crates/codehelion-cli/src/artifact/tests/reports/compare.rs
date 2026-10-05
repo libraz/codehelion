@@ -755,3 +755,23 @@ fn a_calibration_names_the_analysis_it_used_and_whether_it_was_already_recorded(
         "already recorded"
     );
 }
+
+/// The class split of the code delta is one line, followed by each owner that
+/// moved and by what lies outside every symbol.
+#[test]
+fn comparison_text_splits_the_code_delta_by_owner_class() {
+    let report = symbol_comparison(
+        vec![comparison_symbol(Some("my::f"), b"first", 4)],
+        vec![comparison_symbol(Some("strtof"), b"second", 6)],
+    );
+    let text = rendered_compare_text(&report);
+    assert!(
+        text.contains(
+            "ownership delta: own +0 bytes, toolchain +6 bytes, other -4 bytes, unnamed +0 bytes"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("  c-std (toolchain): +6 bytes"), "{text}");
+    assert!(text.contains("  my (other): -4 bytes"), "{text}");
+    assert!(text.contains("  outside symbols: -2 bytes"), "{text}");
+}

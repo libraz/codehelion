@@ -1,9 +1,14 @@
 //! Before/after artifact comparison models and per-symbol deltas.
 
+use codehelion_artifact::ownership::{
+    OwnDeclaration, Ownership, owner_of, strips_platform_underscore,
+};
+
 use super::ArtifactContainment;
 use super::assumption::{
     CONTAINER_WIDE_OBSERVED_BYTES, VERIFIED_SAVINGS_NEEDS_CONTROL, qualify_sizes,
 };
+use super::ownership::{DEFINING_PATH, NO_OWN_DECLARED, OwnershipDeltaReport, declared_ownership};
 use crate::artifact::{
     ARTIFACT_COMPARISON_REPORT_SCHEMA_VERSION, ArtifactIr, BTreeMap, BTreeSet, BinaryFormat,
     EstimatedRefactorSavingsBytes, ObservedSizeReductionBytes, Serialize, VerifiedSavingsBytes,
@@ -28,6 +33,7 @@ pub(in crate::artifact) struct ArtifactComparisonReport {
     pub(in crate::artifact) calibration: Option<CalibrationReport>,
     pub(in crate::artifact) symbol_changes: SymbolChanges,
     pub(in crate::artifact) symbol_deltas: Vec<SymbolDelta>,
+    pub(in crate::artifact) ownership_deltas: OwnershipDeltaReport,
     pub(in crate::artifact) duplicate_group_deltas: Vec<DuplicateGroupDelta>,
     pub(in crate::artifact) build_variant_warning: Option<String>,
     pub(in crate::artifact) assumptions: Vec<String>,
@@ -108,6 +114,10 @@ pub(in crate::artifact) struct SymbolDelta {
     pub(in crate::artifact) name: Option<String>,
     pub(in crate::artifact) fingerprint: String,
     pub(in crate::artifact) size_delta_bytes: i128,
+    /// Owner key, judged on the side the name was taken from: the earlier
+    /// artifact for a removal, the later one otherwise.
+    pub(in crate::artifact) owner: String,
+    pub(in crate::artifact) ownership: Ownership,
 }
 
 /// What a comparison established about one symbol, as [`SymbolDelta::kind`]
@@ -192,6 +202,10 @@ pub(in crate::artifact) struct DuplicateGroupDelta {
 }
 
 impl ArtifactComparisonReport {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one literal states every reported field beside its derivation"
+    )]
     pub(in crate::artifact) fn new(
         before_path: &std::path::Path,
         before: &ArtifactIr,
@@ -232,6 +246,8 @@ impl ArtifactComparisonReport {
             "observed_size_reduction_bytes is a measured artifact-byte difference, not a refactoring estimate"
                 .to_owned(),
             VERIFIED_SAVINGS_NEEDS_CONTROL.to_owned(),
+            DEFINING_PATH.to_owned(),
+            NO_OWN_DECLARED.to_owned(),
         ];
         if before.format != after.format {
             assumptions.push(
@@ -246,6 +262,9 @@ impl ArtifactComparisonReport {
         // stated twice reads as two independent conditions.
         let build_variant_warning =
             build_variant_warning(before_variant.as_ref(), after_variant.as_ref());
+        let code_section_delta_bytes =
+            difference(code_section_bytes(after), code_section_bytes(before));
+        let ownership_deltas = ownership_deltas(&symbol_deltas, code_section_delta_bytes);
         Self {
             schema_version: ARTIFACT_COMPARISON_REPORT_SCHEMA_VERSION,
             before: ComparisonArtifact {
@@ -282,10 +301,7 @@ impl ArtifactComparisonReport {
                 .duplicated_data_bytes
                 .zip(before_sizes.duplicated_data_bytes)
                 .map(|(after, before)| difference(after, before)),
-            code_section_delta_bytes: difference(
-                code_section_bytes(after),
-                code_section_bytes(before),
-            ),
+            code_section_delta_bytes,
             data_segment_delta_bytes: difference(
                 data_segment_bytes(after),
                 data_segment_bytes(before),
@@ -297,11 +313,45 @@ impl ArtifactComparisonReport {
                 modified_named_symbols,
             },
             symbol_deltas,
+            ownership_deltas,
             duplicate_group_deltas,
             build_variant_warning,
             assumptions,
         }
     }
+
+    /// Report the owner keys `own` lists, from `[artifact] own`, as own code.
+    /// An empty declaration changes nothing.
+    pub(in crate::artifact) fn with_own_declaration(mut self, own: &[String]) -> Self {
+        if own.is_empty() {
+            return self;
+        }
+        let declared = OwnDeclaration::from(own);
+        for delta in &mut self.symbol_deltas {
+            delta.ownership = declared_ownership(delta.ownership, &delta.owner, &declared);
+        }
+        self.ownership_deltas =
+            ownership_deltas(&self.symbol_deltas, self.code_section_delta_bytes);
+        self.assumptions.retain(|text| text != NO_OWN_DECLARED);
+        self
+    }
+}
+
+/// The owner split of `deltas`.
+fn ownership_deltas(
+    deltas: &[SymbolDelta],
+    code_section_delta_bytes: i128,
+) -> OwnershipDeltaReport {
+    OwnershipDeltaReport::new(
+        deltas.iter().map(|delta| {
+            (
+                delta.owner.as_str(),
+                delta.ownership,
+                delta.size_delta_bytes,
+            )
+        }),
+        code_section_delta_bytes,
+    )
 }
 
 pub(in crate::artifact) fn build_variant_warning(
@@ -400,6 +450,12 @@ pub(in crate::artifact) fn symbol_deltas(
     for symbol in &after.symbols {
         groups.entry(symbol.fingerprint).or_default().1.push(symbol);
     }
+    let before_strip = strips_platform_underscore(before);
+    let after_strip = strips_platform_underscore(after);
+    let label = |name: Option<String>, strip: bool| {
+        let owner = owner_of(name.as_deref(), strip, &OwnDeclaration::default());
+        (name, owner.key, owner.ownership)
+    };
     let mut result = Vec::new();
     for (fingerprint, (before_members, after_members)) in groups {
         let fingerprint = fingerprint.to_hex();
@@ -408,30 +464,48 @@ pub(in crate::artifact) fn symbol_deltas(
         let mut after_changed = after_changed.into_iter();
         loop {
             match (before_changed.next(), after_changed.next()) {
-                (Some(earlier), Some(later)) => result.push(SymbolDelta {
-                    kind: if earlier.size == later.size {
-                        symbol_change::MODIFIED
-                    } else {
-                        symbol_change::RESIZED
-                    },
+                (Some(earlier), Some(later)) => {
                     // Both sides share one identity, so either name is the
                     // symbol's; the later artifact is what the report is about.
-                    name: later.name.clone().or_else(|| earlier.name.clone()),
-                    fingerprint: fingerprint.clone(),
-                    size_delta_bytes: difference(later.size, earlier.size),
-                }),
-                (Some(earlier), None) => result.push(SymbolDelta {
-                    kind: symbol_change::REMOVED,
-                    name: earlier.name.clone(),
-                    fingerprint: fingerprint.clone(),
-                    size_delta_bytes: -i128::from(earlier.size),
-                }),
-                (None, Some(later)) => result.push(SymbolDelta {
-                    kind: symbol_change::ADDED,
-                    name: later.name.clone(),
-                    fingerprint: fingerprint.clone(),
-                    size_delta_bytes: i128::from(later.size),
-                }),
+                    let (name, owner, ownership) = match &later.name {
+                        Some(_) => label(later.name.clone(), after_strip),
+                        None => label(earlier.name.clone(), before_strip),
+                    };
+                    result.push(SymbolDelta {
+                        kind: if earlier.size == later.size {
+                            symbol_change::MODIFIED
+                        } else {
+                            symbol_change::RESIZED
+                        },
+                        name,
+                        fingerprint: fingerprint.clone(),
+                        size_delta_bytes: difference(later.size, earlier.size),
+                        owner,
+                        ownership,
+                    });
+                }
+                (Some(earlier), None) => {
+                    let (name, owner, ownership) = label(earlier.name.clone(), before_strip);
+                    result.push(SymbolDelta {
+                        kind: symbol_change::REMOVED,
+                        name,
+                        fingerprint: fingerprint.clone(),
+                        size_delta_bytes: -i128::from(earlier.size),
+                        owner,
+                        ownership,
+                    });
+                }
+                (None, Some(later)) => {
+                    let (name, owner, ownership) = label(later.name.clone(), after_strip);
+                    result.push(SymbolDelta {
+                        kind: symbol_change::ADDED,
+                        name,
+                        fingerprint: fingerprint.clone(),
+                        size_delta_bytes: i128::from(later.size),
+                        owner,
+                        ownership,
+                    });
+                }
                 (None, None) => break,
             }
         }

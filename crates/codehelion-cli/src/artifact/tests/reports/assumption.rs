@@ -94,6 +94,8 @@ fn text_json_and_csv_state_the_same_assumptions() {
         );
         let block = match assumption.scope {
             AssumptionScope::DeadCode => &json["dead_code"]["assumptions"],
+            AssumptionScope::Ownership => &json["ownership"]["assumptions"],
+            AssumptionScope::ToolchainHoldings => &json["toolchain_holdings"]["assumptions"],
             _ => &json["sizes"]["assumptions"],
         };
         assert!(
@@ -107,6 +109,21 @@ fn text_json_and_csv_state_the_same_assumptions() {
         );
     }
     assert_eq!(csv.len(), stated.len());
+    for scope in [
+        AssumptionScope::Ownership,
+        AssumptionScope::ToolchainHoldings,
+    ] {
+        assert!(
+            stated.iter().any(|assumption| assumption.scope == scope),
+            "no {} statement in {stated:?}",
+            scope.field()
+        );
+    }
+    assert_eq!(AssumptionScope::Ownership.field(), "ownership");
+    assert_eq!(
+        AssumptionScope::ToolchainHoldings.field(),
+        "toolchain_holdings"
+    );
 }
 
 /// The bound over duplicate code says so wherever it appears: the report

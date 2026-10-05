@@ -167,8 +167,8 @@ fn report_keeps_duplicate_group_members_without_emitting_code() {
     assert!(csv.contains("duplicate-member,fixture.wasm,wasm,exact,"));
     assert!(csv.contains("dead-code,fixture.wasm,wasm,"));
     let mut rows = csv.lines();
-    let columns = rows.next().unwrap().split(',').count();
-    let widths: Vec<_> = rows.map(|row| row.split(',').count()).collect();
+    let columns = artifact_csv_fields(rows.next().unwrap()).len();
+    let widths: Vec<_> = rows.map(|row| artifact_csv_fields(row).len()).collect();
     assert_eq!(widths, vec![columns; widths.len()]);
 }
 
@@ -339,4 +339,35 @@ fn archive_report_retains_member_failures_without_raw_member_bytes() {
     assert!(csv.contains("archive-member,fixture.a,archive,elf"));
     assert!(csv.contains("thin-member.o"));
     assert!(csv.contains("external member paths are not followed"));
+}
+
+/// The ownership table and the holders follow the retained sizes, with the
+/// unnamed-symbol caveat under the table that counted them.
+#[test]
+fn text_reports_ownership_classes_and_toolchain_holders() {
+    let artifact = resolved_call_graph_artifact();
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None);
+    let text = rendered_text(&report, false);
+    assert!(
+        text.contains(
+            "ownership: own 0 bytes (0 symbols), toolchain 0 bytes (0 symbols), other 0 bytes (0 symbols), unnamed 4 bytes (2 symbols)"
+        ),
+        "{text}"
+    );
+    // The unnamed class has one key, so no owner row repeats the class line.
+    assert!(!text.contains("<unnamed> (unnamed)"), "{text}");
+    assert!(text.contains("  outside symbols: 44 bytes"), "{text}");
+    assert!(
+        text.contains("  assumption: functions without a name cannot be assigned an owner"),
+        "{text}"
+    );
+    assert!(text.contains("toolchain holders"), "{text}");
+    assert!(
+        text.contains("  shared: 0 bytes in 0 symbols, 0 bytes in 0 symbols absorbed"),
+        "{text}"
+    );
+    let ownership = text.find("ownership:").unwrap();
+    let holders = text.find("toolchain holders").unwrap();
+    let retained = text.find("retained sizes").unwrap();
+    assert!(retained < ownership && ownership < holders, "{text}");
 }

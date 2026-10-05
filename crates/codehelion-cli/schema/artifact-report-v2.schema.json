@@ -67,6 +67,8 @@
       "description": "Overlapping dominator regions, or null when the call graph is incomplete or ambiguous. The entries must never be added together as a total.",
       "items": { "$ref": "#/$defs/retained_size" }
     },
+    "ownership": { "$ref": "#/$defs/ownership" },
+    "toolchain_holdings": { "$ref": "#/$defs/toolchain_holdings" },
     "duplicates": { "$ref": "#/$defs/duplicate_summary" },
     "duplicate_groups": { "$ref": "#/$defs/duplicate_groups" },
     "sections": { "type": "integer", "minimum": 0 },
@@ -168,7 +170,9 @@
     },
     "symbol": {
       "type": "object",
-      "required": ["fingerprint", "name", "exported", "offset", "size", "size_inferred"],
+      "required": [
+        "fingerprint", "name", "exported", "offset", "size", "size_inferred", "owner", "ownership"
+      ],
       "properties": {
         "fingerprint": { "$ref": "#/$defs/fingerprint" },
         "name": { "type": ["string", "null"] },
@@ -178,7 +182,138 @@
         "size_inferred": {
           "type": "boolean",
           "description": "Whether the size was derived from neighbouring boundaries rather than declared."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner key derived from the name: the first element of the defining path, or a fixed label such as <global>, <unnamed>, c-std, reserved or runtime."
+        },
+        "ownership": { "$ref": "#/$defs/ownership_class" }
+      }
+    },
+    "ownership_class": {
+      "type": "string",
+      "enum": ["own", "toolchain", "other", "unnamed"],
+      "description": "own only for keys listed in [artifact] own; toolchain classification takes precedence over that declaration."
+    },
+    "ownership": {
+      "type": "object",
+      "description": "Symbol bytes split by owner, derived from symbol names when the report is rendered.",
+      "required": ["declared_own", "classes", "owners", "outside_symbols_bytes", "assumptions"],
+      "properties": {
+        "declared_own": { "type": "array", "items": { "type": "string" } },
+        "classes": {
+          "type": "array",
+          "description": "One entry per class, in the order own, toolchain, other, unnamed.",
+          "items": { "$ref": "#/$defs/ownership_class_total" }
+        },
+        "owners": {
+          "type": "array",
+          "description": "Every owner key, by size descending.",
+          "items": { "$ref": "#/$defs/owner_total" }
+        },
+        "outside_symbols_bytes": {
+          "type": "integer",
+          "description": "Executable section bytes minus the sum of symbol sizes."
+        },
+        "assumptions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ownership_class_total": {
+      "type": "object",
+      "required": ["ownership", "size_bytes", "symbols"],
+      "properties": {
+        "ownership": { "$ref": "#/$defs/ownership_class" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "symbols": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "owner_total": {
+      "type": "object",
+      "required": ["key", "ownership", "family", "size_bytes", "symbols"],
+      "properties": {
+        "key": { "type": "string" },
+        "ownership": { "$ref": "#/$defs/ownership_class" },
+        "family": {
+          "type": ["string", "null"],
+          "enum": ["language_std", "c_std", "reserved", "runtime", null],
+          "description": "Toolchain part, present exactly when ownership is toolchain."
+        },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "symbols": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "toolchain_holdings": {
+      "type": ["object", "null"],
+      "description": "Toolchain code attributed to its nearest non-toolchain immediate dominator, or null under the same conditions as retained_sizes. Held bytes are part of the holder's retained size, not a savings value.",
+      "required": [
+        "holdings", "shared", "shared_bytes", "shared_symbols",
+        "shared_absorbed_bytes", "shared_absorbed_symbols", "assumptions"
+      ],
+      "properties": {
+        "holdings": { "type": "array", "items": { "$ref": "#/$defs/toolchain_holding" } },
+        "shared": {
+          "type": "array",
+          "description": "Toolchain entries dominated only by the joined root set.",
+          "items": { "$ref": "#/$defs/shared_toolchain" }
+        },
+        "shared_bytes": { "type": "integer", "minimum": 0 },
+        "shared_symbols": { "type": "integer", "minimum": 0 },
+        "shared_absorbed_bytes": { "type": "integer", "minimum": 0 },
+        "shared_absorbed_symbols": { "type": "integer", "minimum": 0 },
+        "assumptions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "toolchain_holding": {
+      "type": "object",
+      "required": [
+        "holder", "holder_name", "holder_ownership", "held_bytes", "held_symbols",
+        "absorbed_bytes", "absorbed_symbols", "heads"
+      ],
+      "properties": {
+        "holder": { "$ref": "#/$defs/fingerprint" },
+        "holder_name": { "type": ["string", "null"] },
+        "holder_ownership": { "$ref": "#/$defs/ownership_class" },
+        "held_bytes": { "type": "integer", "minimum": 0 },
+        "held_symbols": { "type": "integer", "minimum": 0 },
+        "absorbed_bytes": {
+          "type": "integer", "minimum": 0,
+          "description": "Part of held_bytes in unqualified functions counted as toolchain only because toolchain code is their immediate dominator."
+        },
+        "absorbed_symbols": { "type": "integer", "minimum": 0 },
+        "heads": { "type": "array", "items": { "$ref": "#/$defs/held_head" } }
+      }
+    },
+    "held_head": {
+      "type": "object",
+      "required": ["symbol", "name", "held_bytes"],
+      "properties": {
+        "symbol": { "$ref": "#/$defs/fingerprint" },
+        "name": { "type": ["string", "null"] },
+        "held_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "shared_toolchain": {
+      "type": "object",
+      "required": ["symbol", "name", "held_bytes", "root", "callers"],
+      "properties": {
+        "symbol": { "$ref": "#/$defs/fingerprint" },
+        "name": { "type": ["string", "null"] },
+        "held_bytes": { "type": "integer", "minimum": 0 },
+        "root": { "type": "boolean" },
+        "callers": {
+          "type": "array",
+          "description": "Reachable symbols calling the entry directly. Reach is stated, not apportioned.",
+          "items": { "$ref": "#/$defs/toolchain_caller" }
         }
+      }
+    },
+    "toolchain_caller": {
+      "type": "object",
+      "required": ["symbol", "name", "ownership"],
+      "properties": {
+        "symbol": { "$ref": "#/$defs/fingerprint" },
+        "name": { "type": ["string", "null"] },
+        "ownership": { "$ref": "#/$defs/ownership_class" }
       }
     },
     "source_map": {

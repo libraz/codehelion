@@ -153,8 +153,8 @@ fn exact_generic_instantiation_key_maps_the_definition_origin() {
     render_csv(&report, &mut csv_output).unwrap();
     let csv_output = String::from_utf8(csv_output).unwrap();
     let mut csv_rows = csv_output.lines();
-    let width = csv_rows.next().unwrap().split(',').count();
-    assert!(csv_rows.all(|row| row.split(',').count() == width));
+    let width = artifact_csv_fields(csv_rows.next().unwrap()).len();
+    assert!(csv_rows.all(|row| artifact_csv_fields(row).len() == width));
     assert!(csv_output.contains(&format!(
         "generic-origin,fixture.so,elf,generic-origin,{},crate::Buffer::push,,8,0",
         fingerprint_hex(generic_origin_fingerprint([3; 16], "crate::Buffer::push"))

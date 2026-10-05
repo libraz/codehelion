@@ -8,7 +8,7 @@
     "schema_version", "before", "after", "containment", "observed_size_reduction_bytes",
     "duplicated_code_delta_bytes", "duplicated_data_delta_bytes",
     "code_section_delta_bytes", "data_segment_delta_bytes", "calibration",
-    "symbol_changes", "symbol_deltas", "duplicate_group_deltas",
+    "symbol_changes", "symbol_deltas", "ownership_deltas", "duplicate_group_deltas",
     "build_variant_warning", "assumptions"
   ],
   "properties": {
@@ -30,6 +30,7 @@
     "calibration": { "$ref": "#/$defs/calibration" },
     "symbol_changes": { "$ref": "#/$defs/symbol_changes" },
     "symbol_deltas": { "type": "array", "items": { "$ref": "#/$defs/symbol_delta" } },
+    "ownership_deltas": { "$ref": "#/$defs/ownership_deltas" },
     "duplicate_group_deltas": { "type": "array", "items": { "$ref": "#/$defs/duplicate_group_delta" } },
     "build_variant_warning": { "type": ["string", "null"] },
     "assumptions": { "type": "array", "items": { "type": "string" } }
@@ -144,7 +145,7 @@
     },
     "symbol_delta": {
       "type": "object",
-      "required": ["kind", "name", "fingerprint", "size_delta_bytes"],
+      "required": ["kind", "name", "fingerprint", "size_delta_bytes", "owner", "ownership"],
       "properties": {
         "kind": {
           "type": "string",
@@ -156,7 +157,54 @@
         "size_delta_bytes": {
           "type": "integer",
           "description": "Observed byte-size change from before to after. Zero for a modified symbol, whose bytes changed while its size did not."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Owner key derived from the name, judged on the earlier artifact for a removal and on the later one otherwise."
+        },
+        "ownership": { "$ref": "#/$defs/ownership_class" }
+      }
+    },
+    "ownership_class": {
+      "type": "string",
+      "enum": ["own", "toolchain", "other", "unnamed"]
+    },
+    "ownership_deltas": {
+      "type": "object",
+      "description": "Symbol deltas split by owner.",
+      "required": ["classes", "owners", "outside_symbols_delta_bytes"],
+      "properties": {
+        "classes": {
+          "type": "array",
+          "description": "One entry per class, in the order own, toolchain, other, unnamed. Their sum equals the sum of symbol_deltas.",
+          "items": { "$ref": "#/$defs/ownership_class_delta" }
+        },
+        "owners": {
+          "type": "array",
+          "description": "Every owner key whose delta is not zero, by absolute delta descending.",
+          "items": { "$ref": "#/$defs/owner_delta" }
+        },
+        "outside_symbols_delta_bytes": {
+          "type": "integer",
+          "description": "code_section_delta_bytes minus the sum of symbol_deltas."
         }
+      }
+    },
+    "ownership_class_delta": {
+      "type": "object",
+      "required": ["ownership", "delta_bytes"],
+      "properties": {
+        "ownership": { "$ref": "#/$defs/ownership_class" },
+        "delta_bytes": { "type": "integer" }
+      }
+    },
+    "owner_delta": {
+      "type": "object",
+      "required": ["key", "ownership", "delta_bytes"],
+      "properties": {
+        "key": { "type": "string" },
+        "ownership": { "$ref": "#/$defs/ownership_class" },
+        "delta_bytes": { "type": "integer" }
       }
     },
     "duplicate_group_delta": {
