@@ -158,8 +158,8 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
     let csv = String::from_utf8(csv_out).unwrap();
     assert!(csv.contains("source_run,mappings,mapped_symbols,unmapped_symbols"));
     let mut rows = csv.lines();
-    let header: Vec<_> = rows.next().unwrap().split(',').collect();
-    let summary: Vec<_> = rows.next().unwrap().split(',').collect();
+    let header = artifact_csv_fields(rows.next().unwrap());
+    let summary = artifact_csv_fields(rows.next().unwrap());
     for (field, expected) in [
         ("source_run", "7"),
         ("mappings", "2"),

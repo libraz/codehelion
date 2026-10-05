@@ -162,8 +162,8 @@ fn calibration_comparison_reports_deltas_without_a_threshold_gate() {
     render_calibration_csv(&report, &mut csv).unwrap();
     let csv = String::from_utf8(csv).unwrap();
     let mut rows = csv.lines();
-    let width = rows.next().unwrap().split(',').count();
-    assert!(rows.all(|row| row.split(',').count() == width));
+    let width = artifact_csv_fields(rows.next().unwrap()).len();
+    assert!(rows.all(|row| artifact_csv_fields(row).len() == width));
     assert!(csv.contains("7,comparison-overall,,,6,,,,,,,2,2.5000,3,1,0.3000,0.3000"));
 }
 

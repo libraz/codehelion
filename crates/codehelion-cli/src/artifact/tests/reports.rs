@@ -325,8 +325,8 @@ fn savings_categories_remain_distinct_in_every_artifact_report_format() {
     render_csv(&report, &mut csv).unwrap();
     let csv = String::from_utf8(csv).unwrap();
     let mut rows = csv.lines();
-    let header: Vec<_> = rows.next().unwrap().split(',').collect();
-    let summary: Vec<_> = rows.next().unwrap().split(',').collect();
+    let header = artifact_csv_fields(rows.next().unwrap());
+    let summary = artifact_csv_fields(rows.next().unwrap());
 
     for (name, value) in &categories {
         assert!(

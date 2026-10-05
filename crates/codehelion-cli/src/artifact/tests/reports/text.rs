@@ -111,8 +111,8 @@ fn text_report_calls_duplicate_bytes_observed_not_savings() {
     render_csv(&report, &mut csv).unwrap();
     let csv = String::from_utf8(csv).unwrap();
     let mut lines = csv.lines();
-    let header: Vec<_> = lines.next().unwrap().split(',').collect();
-    let summary: Vec<_> = lines.next().unwrap().split(',').collect();
+    let header = artifact_csv_fields(lines.next().unwrap());
+    let summary = artifact_csv_fields(lines.next().unwrap());
     assert_eq!(header.len(), summary.len());
     for (field, expected) in [
         ("observed_bytes", "8"),
