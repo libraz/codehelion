@@ -126,6 +126,21 @@ is done for Rust and for the Itanium C++ ABI; a C++ artifact decorated for the
 Microsoft ABI is still read for size and duplication, but reports no source
 correspondence rather than a guessed one.
 
+Ownership is decided by name alone, which sets limits the report cannot see past.
+Generic code instantiated for your types is counted under the library that
+defines it, so a `Vec<MyType>` method is `alloc`'s. A function of yours that
+shares a name with a C17 Annex B function (`log`, `time`, `remove`) is counted as
+toolchain code, and a POSIX function you call directly (`write`, `read`,
+`pthread_*`) can appear as a holder. A function without a name has no owner.
+Static helpers of libc that sit directly under a root, or are called from several
+entries, are reported as `other` owners and holders.
+
+Toolchain holders exist only where retained sizes do. On an emscripten C++ build,
+identical libc functions with the same name collide on one fingerprint, which
+withdraws retained sizes and with them the holders. Function-table entries count
+as roots, so on C++ builds much of the toolchain code is reported as shared
+toolchain code rather than attributed to a holder.
+
 ## What history cannot say about a seam
 
 A correct one-sided change cannot be told from a broken one. A fix belonging to

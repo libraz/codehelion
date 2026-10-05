@@ -105,6 +105,91 @@ shrinking that figure means emitting fewer of them. The count needs only that a
 mapping named a single source unit, so symbol names are enough for it and debug
 line information is not required.
 
+## Who owns the code
+
+> **Pre-1.0 surface.** This is documented and tested, but has not had the real
+> use that would make it worth a promise, so it can change between releases.
+
+`artifact analyze` splits the code bytes of the symbols it reports by owner, and
+names the non-toolchain functions that keep toolchain code in the artifact. Both
+read symbol names only, so they apply to every format and language once a name
+exists; the holder view also needs the call graph and retained sizes (see
+[What each format can establish](#what-each-format-can-establish)).
+
+The **owner** of a symbol is the first element of its defining path: a Rust
+crate, a top-level C++ namespace, or `<global>` for an unqualified name. Each
+owner falls into one class:
+
+- `toolchain` — the Rust sysroot crates, C++ `std` and the global allocation
+  operators, C17 Annex B functions, identifiers C17 reserves for the
+  implementation, and runtime support.
+- `own` — an owner listed in `[artifact] own`, see
+  [Configuration](configuration.md#artifact).
+- `other` — a named owner that is neither, such as a third-party crate.
+- `unnamed` — a function without a name, which no owner can be assigned to.
+
+Toolchain classification never depends on the declaration. With `own` empty,
+named code outside the toolchain is reported as `other`, and the report says so.
+
+For a C function `parse` that returns `strtof(s, 0)`, built with emscripten at
+`-O1` and analysed with `own = ["<global>"]`:
+
+```
+ownership: own 6768 bytes (5 symbols), toolchain 10629 bytes (35 symbols), other 0 bytes (0 symbols), unnamed 0 bytes (0 symbols)
+  declared own: <global>
+  reserved (toolchain, reserved): 9013 bytes, 25 symbols
+  <global> (own): 6768 bytes, 5 symbols
+  c-std (toolchain, c_std): 1540 bytes, 6 symbols
+  runtime (toolchain, runtime): 76 bytes, 4 symbols
+  outside symbols: 61 bytes
+  assumption: ownership follows the defining path of each symbol name, so generic code instantiated for your types is counted under the library that defines it
+toolchain holders (held bytes are part of the holder's retained size):
+  parse (own) f31665862c71112cfffda8f55fc54dd2: 17307 bytes in 34 symbols, 6756 bytes in 4 symbols absorbed
+    head strtof 320251c57384d307522b489a48cc4e39: 17307 bytes
+  shared: 78 bytes in 5 symbols, 0 bytes in 0 symbols absorbed
+    setThrew ba286dbdc84dc40e5966ae8f29485879: 38 bytes (root), called by nothing
+    _initialize 4feb66b59715a8dcbf2af30ae02ec5d6: 20 bytes (root), called by nothing
+    _emscripten_stack_restore ef2222560055353cb931a59336cb3e00: 10 bytes (root), called by nothing
+    emscripten_stack_get_current 4eaae22504bd0bae04ab33f12aeef742: 8 bytes (root), called by nothing
+    __wasm_call_ctors a0d352ddbe45c0d90cb9d358e3fa1f9d: 2 bytes (root), called by _initialize (toolchain)
+  assumption: unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers
+  assumption: toolchain holders treat every recorded function reference as a root, so code reached through a function table is reported as shared
+```
+
+`outside symbols` is the executable section's size minus the symbols' sizes, so
+the figures add up to the section. Text output lists the ten largest owners; the
+JSON output carries all of them. `artifact compare` splits the byte delta the
+same way, attributing a symbol to its owner in the after build (in the before
+build when it was removed) and stating the remainder as `outside symbols`.
+
+A **holder** is a function that is not toolchain code but keeps toolchain code in
+the artifact: the toolchain code is reachable only through it. Each toolchain
+function is attributed to its nearest non-toolchain dominator in the call graph.
+The toolchain functions entered directly below a holder are its **heads**, and the
+holder's line gives the bytes held by everything under them. An unqualified
+function reached only through toolchain code is counted as toolchain code, so a
+libc helper does not appear to hold the libc code it calls; these bytes are
+reported separately as absorbed. `main` and static initializers are never
+absorbed.
+
+Held bytes are part of the holder's retained size. They show where toolchain code
+enters and what dropping the entry would unlink, not a guaranteed reduction: the
+same code may be reached again by another route in the next build.
+
+Toolchain code that no single non-toolchain function dominates is **shared
+toolchain code**. It is totalled, and each entry lists the functions that call it
+directly, or `(root)` when the artifact exports it. Shared bytes belong to no
+holder and are not split among the callers. Holders are unavailable whenever
+retained sizes are, and the report says so instead of giving a figure. The limits of
+name-based ownership are in
+[Limitations](limitations.md#artifact-inspection-depends-on-symbols).
+
+Owner labels are derived each time a report is rendered, from the stored symbol
+names and the current `[artifact] own`; nothing about ownership is written to the
+database. `artifact report` therefore follows the configuration as it is when you
+run it, and `artifact compare` reads the configuration in the working directory
+the same way `artifact analyze` does.
+
 ## Comparing two builds
 
 > **Pre-1.0 surface.** This is documented and tested, but has not had the real

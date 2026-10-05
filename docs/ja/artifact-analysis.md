@@ -62,6 +62,55 @@ codehelion artifact analyze path/to/binary --source-run 1 --build-variant build-
 
 これは、成果物が複数の実体として出力したソース単位を、実体の個数と観測サイズとともに並べます。ここに出るバイト数は成果物が現に費やしている量であって削減量ではありません。ソース上の 1 本を統合しても実体は 1 つも減らず、この数値を下げるには実体化の回数そのものを減らすことになります。数えるのに必要なのは「マッピングが単一のソース単位を指したこと」だけなので、シンボル名さえあれば足り、デバッグ行情報は要りません。
 
+## コードの所有者
+
+> **1.0 前の面です。** 文書化もテストもされていますが、約束に値するだけの実利用を経ていないため、リリース間で変わり得ます。
+
+`artifact analyze` は、報告するシンボルのコードバイトを所有者ごとに分け、toolchain のコードを成果物に残している非 toolchain の関数を名指しします。どちらもシンボル名だけを読むので、名前さえあればどのフォーマットでもどの言語でも使えます。holder の表示にはさらにコールグラフと retained size が必要です（[フォーマットごとに確立できること](#フォーマットごとに確立できること)を参照）。
+
+シンボルの owner（所有者）は、定義パスの先頭要素です。Rust ならクレート、C++ ならトップレベルの名前空間、修飾のない名前なら `<global>` です。owner は次のいずれかの class に入ります。
+
+- `toolchain` — Rust の sysroot クレート、C++ の `std` とグローバルなアロケーション演算子、C17 Annex B の関数、C17 が実装に予約している識別子、ランタイムサポート。
+- `own` — `[artifact] own` に列挙した owner。[設定](configuration.md#artifact)を参照。
+- `other` — 名前はあるが上のどちらでもない owner。サードパーティのクレートなど。
+- `unnamed` — 名前のない関数。owner を割り当てられません。
+
+toolchain の分類は宣言に左右されません。`own` が空のあいだ、toolchain の外にある名前付きのコードは `other` として報告され、レポートもそう述べます。
+
+`strtof(s, 0)` を返すだけの C 関数 `parse` を emscripten の `-O1` でビルドし、`own = ["<global>"]` で解析すると次のようになります。
+
+```
+ownership: own 6768 bytes (5 symbols), toolchain 10629 bytes (35 symbols), other 0 bytes (0 symbols), unnamed 0 bytes (0 symbols)
+  declared own: <global>
+  reserved (toolchain, reserved): 9013 bytes, 25 symbols
+  <global> (own): 6768 bytes, 5 symbols
+  c-std (toolchain, c_std): 1540 bytes, 6 symbols
+  runtime (toolchain, runtime): 76 bytes, 4 symbols
+  outside symbols: 61 bytes
+  assumption: ownership follows the defining path of each symbol name, so generic code instantiated for your types is counted under the library that defines it
+toolchain holders (held bytes are part of the holder's retained size):
+  parse (own) f31665862c71112cfffda8f55fc54dd2: 17307 bytes in 34 symbols, 6756 bytes in 4 symbols absorbed
+    head strtof 320251c57384d307522b489a48cc4e39: 17307 bytes
+  shared: 78 bytes in 5 symbols, 0 bytes in 0 symbols absorbed
+    setThrew ba286dbdc84dc40e5966ae8f29485879: 38 bytes (root), called by nothing
+    _initialize 4feb66b59715a8dcbf2af30ae02ec5d6: 20 bytes (root), called by nothing
+    _emscripten_stack_restore ef2222560055353cb931a59336cb3e00: 10 bytes (root), called by nothing
+    emscripten_stack_get_current 4eaae22504bd0bae04ab33f12aeef742: 8 bytes (root), called by nothing
+    __wasm_call_ctors a0d352ddbe45c0d90cb9d358e3fa1f9d: 2 bytes (root), called by _initialize (toolchain)
+  assumption: unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers
+  assumption: toolchain holders treat every recorded function reference as a root, so code reached through a function table is reported as shared
+```
+
+`outside symbols` は実行可能セクションのサイズからシンボルのサイズの合計を引いた残りで、これを足すとセクション全体に一致します。text 出力に並ぶのはバイト数の大きい上位 10 owner までで、JSON には全件が入ります。`artifact compare` もバイト差を同じように分けます。シンボルは after 側の owner に、削除されたものは before 側の owner に帰属させ、割り振れない残りは `outside symbols` として示します。
+
+holder は、toolchain のコードではないのに toolchain のコードを成果物に残している関数です。そのコードは holder を通してしか到達できません。toolchain の各関数は、コールグラフ上でいちばん近い非 toolchain の支配元に帰属します。holder の直下で直接入る toolchain 関数が head で、holder の行にはその下にあるものすべてのバイト数が入ります。toolchain のコードを通してしか届かない修飾なしの関数は toolchain のコードとして数えるため、libc の補助関数が自分の呼ぶ libc を抱えているようには見えません。この分は absorbed として別に示します。`main` と静的初期化子は吸収しません。
+
+held bytes は holder の retained size の一部です。toolchain のコードがどこから入っているか、その入口を外すと何が切り離されるかを示すもので、削減の保証ではありません。次のビルドでは同じコードに別の経路から届くこともあります。
+
+非 toolchain の関数がひとつも支配していない toolchain のコードは shared toolchain code です。合計を出し、入口ごとにそれを直接呼ぶ関数を挙げます。成果物がエクスポートしている入口には `(root)` が付きます。shared のバイトはどの holder にも属さず、呼び出し元の間で按分もしません。holder は retained size が出ないときは出ず、レポートは数値の代わりにその旨を述べます。名前だけで所有者を決めることの限界は[制限](limitations.md#成果物検査はシンボルに依存します)にあります。
+
+owner のラベルはレポートを描画するたびに、保存済みのシンボル名と現在の `[artifact] own` から導きます。所有者に関するものはデータベースに書き込みません。そのため `artifact report` は実行時点の設定に従い、`artifact compare` も `artifact analyze` と同じく作業ディレクトリの設定を読みます。
+
 ## 2 つのビルドを比較する
 
 > **1.0 前の面です。** 文書化もテストもされていますが、約束に値するだけの実利用を経ていないため、リリース間で変わり得ます。

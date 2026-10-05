@@ -53,6 +53,15 @@ under `-v`. Distinct from the group's id.
 **gate** — the similarity threshold a candidate must clear against the canonical
 member to join a group.
 
+**head** — a toolchain function entered directly from a holder. The holder's line
+in an artifact report gives the bytes held under each of its heads. See
+[Artifact analysis](artifact-analysis.md#who-owns-the-code).
+
+**holder** — a function that is not toolchain code but keeps toolchain code in an
+artifact, because that code is reachable only through it. The held bytes are part
+of the holder's retained size, not a guaranteed reduction. See
+[Artifact analysis](artifact-analysis.md#who-owns-the-code).
+
 **identifier agreement** — how much two occurrences' identifiers overlap,
 measured on whole units. High agreement usually means nobody has diverged the two
 copies yet.
@@ -69,6 +78,10 @@ and literals before comparison. The literal part is configurable.
 **occurrence** — one place a group's duplication appears: a file, a line range,
 and the unit it sits in.
 
+**owner** — the first element of a symbol's defining path: a Rust crate, a
+top-level C++ namespace, or `<global>`. Each owner is classed as own, toolchain,
+other or unnamed. See [Artifact analysis](artifact-analysis.md#who-owns-the-code).
+
 **posting** — an entry in the content index. A posting list shared by too many
 units is dropped, because it proposes work rather than duplication.
 
@@ -82,6 +95,10 @@ replays it.
 **seam** — a set of paths implementing the same semantics in more than one place,
 written down in `codehelion.toml`. The ledger is the source of truth; nothing
 discovers a seam on its own.
+
+**shared toolchain code** — toolchain code that no single non-toolchain function
+dominates, so it belongs to no holder. Reported as a total with the direct callers
+of each entry. See [Artifact analysis](artifact-analysis.md#who-owns-the-code).
 
 **sibling** — an ungrouped unit retained beside a group as evidence: close to the
 canonical member, or matching its normalized signature. See

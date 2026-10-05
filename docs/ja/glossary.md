@@ -32,6 +32,10 @@
 
 **gate（閾値）** — 候補がグループに入るために canonical member に対して越える必要のある類似度のしきい値。
 
+**head（先頭）** — holder から直接入る toolchain の関数。成果物レポートの holder の行には、head ごとにその下で抱えているバイト数が出ます。[成果物解析](artifact-analysis.md#コードの所有者)を参照。
+
+**holder（保持者）** — toolchain のコードではないのに、その到達経路を握っているために toolchain のコードを成果物に残している関数。抱えているバイトは holder の retained size の一部であり、削減の保証ではありません。[成果物解析](artifact-analysis.md#コードの所有者)を参照。
+
 **identifier agreement（識別子の一致度）** — 2 つの出現箇所の識別子がどれだけ重なるか。ユニット全体に対して測ります。一致度が高いのは、まだ誰も 2 つのコピーを分岐させていない状態です。
 
 **lineage** — 内容の変化で ID が動いたとき、ある実行のグループが直前の実行のどのグループから引き継いだかを記録したリンク。
@@ -42,6 +46,8 @@
 
 **occurrence（出現箇所）** — グループの重複が現れる 1 箇所。ファイル、行範囲、そして所属ユニット。
 
+**owner（所有者）** — シンボルの定義パスの先頭要素。Rust ならクレート、C++ ならトップレベルの名前空間、または `<global>`。owner は own・toolchain・other・unnamed のいずれかに分類されます。[成果物解析](artifact-analysis.md#コードの所有者)を参照。
+
 **posting** — 内容索引の項目。多すぎる unit が共有する posting list は、重複ではなく作業を提案するだけなので落とします。
 
 **priority** — レポートを並べている合成された順位づけの値。clone confidence・maintenance risk・refactoring difficulty から導かれます。設定できるのは合成の仕方だけです。
@@ -49,6 +55,8 @@
 **run（実行）** — 完了したスキャン 1 回。ローカルデータベースに、それを再現する id とともに記録されます。
 
 **seam** — 同じ意味論が複数の場所に実装されているパスの集合。`codehelion.toml` に書き下します。台帳が正本であり、seam を自動で発見する仕組みはありません。
+
+**shared toolchain code（共有 toolchain コード）** — 非 toolchain の関数がひとつも支配していない toolchain のコード。どの holder にも属しません。合計と、入口ごとの直接の呼び出し元を報告します。[成果物解析](artifact-analysis.md#コードの所有者)を参照。
 
 **sibling** — グループの傍らに証拠として保持される未グループのユニット。canonical member に近いか、その正規化済みシグネチャに一致するものです。[グループ化](grouping.md)を参照。
 
