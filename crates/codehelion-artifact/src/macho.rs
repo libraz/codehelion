@@ -4,17 +4,16 @@
 //! executes the inspected artifact. It deliberately records only container
 //! facts; DWARF and dSYM source locations remain a correlation-layer concern.
 
-use std::collections::HashMap;
+use std::collections::BTreeSet;
 
+use crate::identity::assign_identities;
 use crate::native::{
-    collect_sections, collect_text_symbols, collect_undefined_imports, symbol_fingerprint,
+    collect_sections, collect_text_symbols, collect_undefined_imports, join_addresses,
+    symbol_fingerprint,
 };
 use crate::support::format_support;
 use crate::x86::X86_NORMALIZATION_VERSION;
-use crate::{
-    ArtifactBackend, ArtifactCapabilities, ArtifactError, ArtifactFingerprint, ArtifactFormat,
-    ArtifactIr,
-};
+use crate::{ArtifactBackend, ArtifactCapabilities, ArtifactError, ArtifactFormat, ArtifactIr};
 use object::Object;
 use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
 
@@ -166,9 +165,10 @@ impl MachOBackend {
         } else {
             collected_addresses
         };
+        assign_identities(&mut ir.symbols, &BTreeSet::new(), Vec::new());
         crate::dwarf::attach_dwarf_frames(
             debug_file.as_ref().unwrap_or(&file),
-            &symbol_addresses,
+            &join_addresses(&symbol_addresses, &ir.symbols),
             &mut ir,
             budget,
         );
@@ -338,15 +338,16 @@ fn matching_uuid(artifact: &object::File<'_>, companion: &object::File<'_>) -> b
     )
 }
 
+/// Collect text symbols with each one's position, address and size.
 fn collect_symbols(
     file: &object::File<'_>,
     ir: &mut ArtifactIr,
-) -> Result<HashMap<ArtifactFingerprint, (u64, u64)>, ArtifactError> {
+) -> Result<Vec<(usize, u64, u64)>, ArtifactError> {
     collect_text_symbols(file, ir)
         .map(|ranges| {
             ranges
                 .into_iter()
-                .map(|range| (range.fingerprint, (range.address, range.size)))
+                .map(|range| (range.position, range.address, range.size))
                 .collect()
         })
         .map_err(|error| malformed(error.to_string()))
@@ -359,15 +360,11 @@ fn collect_symbols(
 fn infer_text_regions(
     file: &object::File<'_>,
     ir: &mut ArtifactIr,
-) -> Result<HashMap<ArtifactFingerprint, (u64, u64)>, ArtifactError> {
-    let ranges = crate::native::infer_text_regions(file, ir, |section, normalized, data| {
+) -> Result<Vec<(usize, u64, u64)>, ArtifactError> {
+    crate::native::infer_text_regions(file, ir, |section, normalized, data| {
         symbol_fingerprint(None, section, normalized, data)
     })
-    .map_err(|error| malformed(error.to_string()))?;
-    Ok(ranges
-        .into_iter()
-        .map(|(fingerprint, address, size)| (fingerprint, (address, size)))
-        .collect())
+    .map_err(|error| malformed(error.to_string()))
 }
 
 const fn malformed(message: String) -> ArtifactError {
@@ -393,6 +390,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::*;
+    use crate::ArtifactFingerprint;
     use object::write::{Object as WriteObject, StandardSection, Symbol, SymbolSection};
     use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolKind, SymbolScope};
 
@@ -674,6 +672,43 @@ mod tests {
             error.to_string().contains("not requested aarch64"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn macho_copies_get_unique_fingerprints() {
+        let mut object = WriteObject::new(
+            BinaryFormat::MachO,
+            Architecture::X86_64,
+            Endianness::Little,
+        );
+        let text = object.section_id(StandardSection::Text);
+        for _ in 0..2 {
+            let offset = object.append_section_data(text, &[0x90, 0xc3], 1);
+            object.add_symbol(Symbol {
+                name: b"_copy".to_vec(),
+                value: offset,
+                size: 2,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Compilation,
+                weak: false,
+                section: SymbolSection::Section(text),
+                flags: SymbolFlags::None,
+            });
+        }
+        let bytes = object.write().expect("write Mach-O copies fixture");
+
+        let ir = MachOBackend
+            .parse(&bytes)
+            .expect("parse Mach-O copies fixture");
+
+        assert_eq!(ir.symbols.len(), 2, "{ir:#?}");
+        assert!(
+            ir.symbols
+                .iter()
+                .all(|symbol| symbol.content_fingerprint.is_some()),
+            "{ir:#?}"
+        );
+        assert_ne!(ir.symbols[0].fingerprint, ir.symbols[1].fingerprint);
     }
 
     #[test]

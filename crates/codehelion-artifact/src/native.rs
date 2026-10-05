@@ -236,8 +236,8 @@ fn boundaries_and_reads(sorted: &[(u64, u64)]) -> (Vec<SymbolBoundary>, usize) {
 /// Transient native-symbol data used only by format-specific join code.
 #[derive(Debug, Clone, Copy)]
 pub struct NativeSymbolRange {
-    /// Stable identity assigned to the symbol.
-    pub fingerprint: ArtifactFingerprint,
+    /// Position of the symbol in `ArtifactIr::symbols`.
+    pub position: usize,
     /// Parser-local symbol index.
     pub index: object::SymbolIndex,
     /// Parser-local section index used to disambiguate relocatable addresses.
@@ -327,6 +327,7 @@ pub fn collect_text_symbols(
                 code,
             );
             let size = u64::try_from(code.len()).unwrap_or(u64::MAX);
+            let position = ir.symbols.len();
             ir.symbols.push(ArtifactSymbol {
                 fingerprint,
                 name,
@@ -343,7 +344,7 @@ pub fn collect_text_symbols(
                 identity_by_order: false,
             });
             ranges.push(NativeSymbolRange {
-                fingerprint,
+                position,
                 index: symbol.index(),
                 section: section_index,
                 address: symbol.address(),
@@ -360,9 +361,9 @@ pub fn collect_text_symbols(
 pub struct NativeTextSymbols {
     /// Symbol-table entries, empty for an object without code symbols.
     pub symbols: Vec<NativeSymbolRange>,
-    /// Join address and retained length of each appended code record, whether
-    /// it came from the symbol table or from an inferred region.
-    pub addresses: HashMap<ArtifactFingerprint, (u64, u64)>,
+    /// Position, join address and retained length of each appended code
+    /// record, whether it came from the symbol table or an inferred region.
+    pub addresses: Vec<(usize, u64, u64)>,
 }
 
 /// Collect a native object's code records, inferring one region per text
@@ -381,20 +382,32 @@ pub fn collect_text_symbol_ranges(
     ir: &mut ArtifactIr,
 ) -> Result<NativeTextSymbols, object::Error> {
     let symbols = collect_text_symbols(file, ir)?;
-    let mut addresses: HashMap<_, _> = symbols
+    let mut addresses: Vec<_> = symbols
         .iter()
-        .map(|range| (range.fingerprint, (range.address, range.size)))
+        .map(|range| (range.position, range.address, range.size))
         .collect();
     if ir.symbols.is_empty() {
-        addresses.extend(
-            infer_text_regions(file, ir, |section, normalized, data| {
-                symbol_fingerprint(None, section, normalized, data)
-            })?
-            .into_iter()
-            .map(|(fingerprint, address, size)| (fingerprint, (address, size))),
-        );
+        addresses.extend(infer_text_regions(
+            file,
+            ir,
+            |section, normalized, data| symbol_fingerprint(None, section, normalized, data),
+        )?);
     }
     Ok(NativeTextSymbols { symbols, addresses })
+}
+
+/// Key code records' join addresses by the fingerprints `symbols` now carry.
+///
+/// Built only once identities are assigned, so every copy keeps its own key.
+#[must_use]
+pub fn join_addresses(
+    addresses: &[(usize, u64, u64)],
+    symbols: &[ArtifactSymbol],
+) -> HashMap<ArtifactFingerprint, (u64, u64)> {
+    addresses
+        .iter()
+        .map(|(position, address, size)| (symbols[*position].fingerprint, (*address, *size)))
+        .collect()
 }
 
 fn append_field(identity: &mut Vec<u8>, value: &[u8]) {
@@ -418,9 +431,9 @@ fn relocation_target_name(
 
 /// Add one explicitly inferred region for every non-empty text section.
 ///
-/// The caller supplies its format-domain fingerprint recipe. Address ranges
-/// are returned as transient join evidence for backends that can attach debug
-/// frames; they are never used as identities.
+/// The caller supplies its format-domain fingerprint recipe. Each region's
+/// position, address and size are returned as transient join evidence for
+/// backends that can attach debug frames; they are never used as identities.
 ///
 /// # Errors
 ///
@@ -429,7 +442,7 @@ pub fn infer_text_regions<F>(
     file: &object::File<'_>,
     ir: &mut ArtifactIr,
     mut fingerprint: F,
-) -> Result<Vec<(ArtifactFingerprint, u64, u64)>, object::Error>
+) -> Result<Vec<(usize, u64, u64)>, object::Error>
 where
     F: FnMut(Option<&str>, Option<&NormalizedInstructions>, &[u8]) -> ArtifactFingerprint,
 {
@@ -446,6 +459,7 @@ where
         let normalized = normalize_x86(data, file.architecture());
         let symbol_fingerprint = fingerprint(section.name().ok(), normalized.as_ref(), data);
         let size = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        ranges.push((ir.symbols.len(), section.address(), size));
         ir.symbols.push(ArtifactSymbol {
             fingerprint: symbol_fingerprint,
             name: None,
@@ -461,7 +475,6 @@ where
             content_fingerprint: None,
             identity_by_order: false,
         });
-        ranges.push((symbol_fingerprint, section.address(), size));
     }
     Ok(ranges)
 }

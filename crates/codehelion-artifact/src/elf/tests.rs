@@ -620,6 +620,135 @@ fn a_function_pointer_stored_in_data_is_not_dead() {
     assert_eq!(dead_symbol_names(&artifact).0, vec!["unused".to_owned()]);
 }
 
+/// Symbols of `artifact` named `name`, in file order.
+fn named<'a>(artifact: &'a ArtifactIr, name: &str) -> Vec<&'a ArtifactSymbol> {
+    artifact
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.name.as_deref() == Some(name))
+        .collect()
+}
+
+fn assert_unique_fingerprints(artifact: &ArtifactIr) {
+    let distinct: BTreeSet<_> = artifact
+        .symbols
+        .iter()
+        .map(|symbol| symbol.fingerprint)
+        .collect();
+    assert_eq!(distinct.len(), artifact.symbols.len(), "{artifact:#?}");
+}
+
+#[test]
+fn elf_copies_get_unique_fingerprints() {
+    let artifact = ElfBackend
+        .parse(&functions_fixture(
+            &[
+                ("entry", &[0xc3], SymbolScope::Linkage, None),
+                ("copy", &[0x90, 0xc3], SymbolScope::Compilation, None),
+                ("copy", &[0x90, 0xc3], SymbolScope::Compilation, None),
+            ],
+            None,
+        ))
+        .expect("copies fixture parses");
+
+    let copies = named(&artifact, "copy");
+    assert_eq!(copies.len(), 2);
+    assert!(
+        copies.iter().all(|copy| copy.content_fingerprint.is_some()),
+        "{copies:#?}"
+    );
+    assert_eq!(copies[0].content_fingerprint, copies[1].content_fingerprint);
+    assert_unique_fingerprints(&artifact);
+}
+
+/// Two copies of one local function, each called by a caller of its own.
+fn copies_with_their_own_callers_fixture() -> Vec<u8> {
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let text = object.section_id(StandardSection::Text);
+    let mut function = |name: &str, code: &[u8], scope| {
+        let offset = object.append_section_data(text, code, 1);
+        let symbol = object.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: offset,
+            size: code.len() as u64,
+            kind: SymbolKind::Text,
+            scope,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        (offset, symbol)
+    };
+    let (_, first_copy) = function("copy", &[0x90, 0xc3], SymbolScope::Compilation);
+    let (_, second_copy) = function("copy", &[0x90, 0xc3], SymbolScope::Compilation);
+    let call = [0xe8, 0, 0, 0, 0, 0xc3];
+    let (first_caller, _) = function("first_caller", &call, SymbolScope::Linkage);
+    let (second_caller, _) = function("second_caller", &call, SymbolScope::Linkage);
+    for (caller, target) in [(first_caller, first_copy), (second_caller, second_copy)] {
+        object
+            .add_relocation(
+                text,
+                Relocation {
+                    offset: caller + 1,
+                    symbol: target,
+                    addend: -4,
+                    flags: RelocationFlags::Generic {
+                        kind: RelocationKind::Relative,
+                        encoding: RelocationEncoding::Generic,
+                        size: 32,
+                    },
+                },
+            )
+            .expect("add copy call relocation");
+    }
+    object.write().expect("write copies-with-callers fixture")
+}
+
+#[test]
+fn a_call_into_a_copy_reaches_that_copy() {
+    let artifact = ElfBackend
+        .parse(&copies_with_their_own_callers_fixture())
+        .expect("copies-with-callers fixture parses");
+    let copies = named(&artifact, "copy");
+    assert_eq!(copies.len(), 2);
+    assert!(
+        copies.iter().all(|copy| copy.content_fingerprint.is_some()),
+        "{copies:#?}"
+    );
+    assert_unique_fingerprints(&artifact);
+
+    for (caller, copy) in ["first_caller", "second_caller"].into_iter().zip(&copies) {
+        let caller = named(&artifact, caller)[0].fingerprint;
+        let targets: Vec<_> = artifact
+            .calls
+            .iter()
+            .filter(|call| call.caller == caller)
+            .map(|call| call.target)
+            .collect();
+        assert_eq!(targets, vec![Some(copy.fingerprint)], "{artifact:#?}");
+        assert!(!copy.identity_by_order);
+    }
+    assert!(crate::metrics::retained_sizes(&artifact).is_some());
+}
+
+#[test]
+fn every_copy_receives_its_inline_frames() {
+    let artifact = ElfBackend
+        .parse(&crate::dwarf::tests::copies_fixture(2))
+        .expect("DWARF copies fixture parses");
+
+    let copies = named(&artifact, "copy");
+    assert_eq!(copies.len(), 2);
+    assert!(
+        copies.iter().all(|copy| copy.content_fingerprint.is_some()),
+        "{copies:#?}"
+    );
+    assert_unique_fingerprints(&artifact);
+    for copy in copies {
+        assert!(!copy.inline_stack.is_empty(), "{copy:#?}");
+    }
+}
+
 fn immediate_that_contains_call_opcode_fixture() -> Vec<u8> {
     let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
     let text = object.section_id(StandardSection::Text);
@@ -969,14 +1098,10 @@ fn x86_call_opcode_inside_an_immediate_does_not_make_a_call_edge() {
 
 #[test]
 fn entry_address_becomes_a_stable_entry_point_without_becoming_an_id() {
-    let fingerprint = ArtifactFingerprint::from_content("test", b"entry");
-    let addresses = HashMap::from([(0x0040_1000, fingerprint)]);
-    let mut artifact = ArtifactIr::empty(ArtifactFormat::Elf, b"fixture");
+    let addresses = HashMap::from([(0x0040_1000, 3)]);
 
-    record_entry_point(0x0040_1000, &addresses, &mut artifact);
-    record_entry_point(0, &addresses, &mut artifact);
-
-    assert_eq!(artifact.entry_points, vec![fingerprint]);
+    assert_eq!(entry_root(0x0040_1000, &addresses), Some(3));
+    assert_eq!(entry_root(0, &addresses), None);
 }
 
 #[test]
@@ -995,8 +1120,7 @@ fn init_array_relocation_becomes_a_conservative_entry_point() {
 
 #[test]
 fn linked_init_array_pointers_become_conservative_entry_points() {
-    let first = ArtifactFingerprint::from_content("test", b"first");
-    let second = ArtifactFingerprint::from_content("test", b"second");
+    let (first, second) = (0, 1);
     let addresses = HashMap::from([(0x0040_1000, first), (0x0040_2000, second)]);
 
     assert_eq!(

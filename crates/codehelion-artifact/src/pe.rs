@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::Cursor;
 
 use crate::dwarf::{DwarfBudget, DwarfPathInterner, source_path_prefix_within};
+use crate::identity::assign_identities;
 use crate::native::{
     collect_sections, collect_text_symbols, collect_undefined_imports, symbol_fingerprint,
 };
@@ -16,7 +17,7 @@ use crate::support::format_support;
 use crate::x86::X86_NORMALIZATION_VERSION;
 use crate::{
     ArtifactBackend, ArtifactCapabilities, ArtifactError, ArtifactFingerprint, ArtifactFormat,
-    ArtifactIr, is_coff_machine,
+    ArtifactIr, ArtifactSymbol, is_coff_machine,
 };
 use object::Object;
 use pdb::{FallibleIterator, PDB};
@@ -108,11 +109,13 @@ impl PeCoffBackend {
         // linked image is the case where the debug information is all there is
         // to go on, so leaving the region out of the join would discard the
         // only evidence for exactly the input that needs it.
-        let symbol_ranges = if ir.symbols.is_empty() {
+        let positions = if ir.symbols.is_empty() {
             infer_text_regions(&file, &mut ir)?
         } else {
             named
         };
+        assign_identities(&mut ir.symbols, &BTreeSet::new(), Vec::new());
+        let symbol_ranges = symbol_ranges(&positions, &ir.symbols);
         let debug_info_unreadable = match pdb_bytes {
             Some(pdb_bytes) => {
                 collect_pdb_frames(&file, pdb_bytes, &symbol_ranges, &mut ir, budget)?
@@ -155,19 +158,29 @@ struct SymbolRange {
     end: u64,
 }
 
+/// Join ranges keyed by the fingerprints `symbols` carry once identities are
+/// assigned, from each record's position, address and size.
+fn symbol_ranges(positions: &[(usize, u64, u64)], symbols: &[ArtifactSymbol]) -> Vec<SymbolRange> {
+    positions
+        .iter()
+        .map(|(position, address, size)| SymbolRange {
+            fingerprint: symbols[*position].fingerprint,
+            start: *address,
+            end: address.saturating_add(*size),
+        })
+        .collect()
+}
+
+/// Collect text symbols with each one's position, address and size.
 fn collect_symbols(
     file: &object::File<'_>,
     ir: &mut ArtifactIr,
-) -> Result<Vec<SymbolRange>, ArtifactError> {
+) -> Result<Vec<(usize, u64, u64)>, ArtifactError> {
     collect_text_symbols(file, ir)
         .map(|ranges| {
             ranges
                 .into_iter()
-                .map(|range| SymbolRange {
-                    fingerprint: range.fingerprint,
-                    start: range.address,
-                    end: range.address.saturating_add(range.size),
-                })
+                .map(|range| (range.position, range.address, range.size))
                 .collect()
         })
         .map_err(|error| malformed(error.to_string()))
@@ -181,19 +194,11 @@ fn collect_symbols(
 fn infer_text_regions(
     file: &object::File<'_>,
     ir: &mut ArtifactIr,
-) -> Result<Vec<SymbolRange>, ArtifactError> {
-    let ranges = crate::native::infer_text_regions(file, ir, |section, normalized, data| {
+) -> Result<Vec<(usize, u64, u64)>, ArtifactError> {
+    crate::native::infer_text_regions(file, ir, |section, normalized, data| {
         symbol_fingerprint(None, section, normalized, data)
     })
-    .map_err(|error| malformed(error.to_string()))?;
-    Ok(ranges
-        .into_iter()
-        .map(|(fingerprint, address, size)| SymbolRange {
-            fingerprint,
-            start: address,
-            end: address.saturating_add(size),
-        })
-        .collect())
+    .map_err(|error| malformed(error.to_string()))
 }
 
 /// One PDB line row, held compactly until it is attached to a symbol.
@@ -625,7 +630,8 @@ mod tests {
         let bytes = coff_fixture_without_symbols();
         let file = object::File::parse(bytes.as_slice()).expect("parse symbol-free COFF fixture");
         let mut ir = ArtifactIr::empty(ArtifactFormat::PeCoff, &bytes);
-        let ranges = infer_text_regions(&file, &mut ir).expect("infer the text region");
+        let positions = infer_text_regions(&file, &mut ir).expect("infer the text region");
+        let ranges = symbol_ranges(&positions, &ir.symbols);
 
         assert_eq!(ranges.len(), ir.symbols.len());
         assert_eq!(ranges[0].fingerprint, ir.symbols[0].fingerprint);
@@ -682,6 +688,40 @@ mod tests {
         assert_eq!(ir.imports.len(), 1, "{ir:#?}");
         assert_eq!(ir.imports[0].name.as_deref(), Some("external_call"));
         assert_eq!(ir.imports[0].kind, ArtifactImportKind::Function);
+    }
+
+    #[test]
+    fn pe_copies_get_unique_fingerprints() {
+        let mut object =
+            WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = object.section_id(StandardSection::Text);
+        for _ in 0..2 {
+            let offset = object.append_section_data(text, &[0x90, 0xc3], 1);
+            object.add_symbol(Symbol {
+                name: b"copy".to_vec(),
+                value: offset,
+                size: 2,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Compilation,
+                weak: false,
+                section: SymbolSection::Section(text),
+                flags: SymbolFlags::None,
+            });
+        }
+        let bytes = object.write().expect("write COFF copies fixture");
+
+        let ir = PeCoffBackend
+            .parse(&bytes)
+            .expect("parse COFF copies fixture");
+
+        assert_eq!(ir.symbols.len(), 2, "{ir:#?}");
+        assert!(
+            ir.symbols
+                .iter()
+                .all(|symbol| symbol.content_fingerprint.is_some()),
+            "{ir:#?}"
+        );
+        assert_ne!(ir.symbols[0].fingerprint, ir.symbols[1].fingerprint);
     }
 
     #[test]

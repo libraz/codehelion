@@ -714,7 +714,7 @@ pub fn resolve_source_path(
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
@@ -768,8 +768,27 @@ mod tests {
         second_source: Option<&'static str>,
     }
 
+    /// An executable whose `count` functions share one name and one body,
+    /// each covered by line rows of its own.
+    #[allow(clippy::redundant_pub_crate)] // reached from the ELF tests
+    pub(crate) fn copies_fixture(count: usize) -> Vec<u8> {
+        DwarfFixture {
+            functions: count,
+            subprograms: count,
+            overlapping_ranges: false,
+            line_rows: count * TEXT_FUNCTION.len(),
+            distinct_row_lines: true,
+            second_source: None,
+        }
+        .build_named(|_| "copy".to_owned())
+    }
+
     impl DwarfFixture {
         fn build(&self) -> Vec<u8> {
+            self.build_named(|index| format!("function{index}"))
+        }
+
+        fn build_named(&self, name: impl Fn(usize) -> String) -> Vec<u8> {
             use object::write::{Object as WriteObject, StandardSection, StandardSegment};
             use object::{
                 Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind,
@@ -783,7 +802,7 @@ mod tests {
             for index in 0..self.functions {
                 let offset = object.append_section_data(text, &TEXT_FUNCTION, 1);
                 object.add_symbol(Symbol {
-                    name: format!("function{index}").into_bytes(),
+                    name: name(index).into_bytes(),
                     value: offset,
                     size: TEXT_FUNCTION.len() as u64,
                     kind: SymbolKind::Text,
@@ -1120,7 +1139,12 @@ mod tests {
         let addresses: HashMap<_, _> = crate::native::collect_text_symbols(&file, &mut ir)
             .unwrap()
             .into_iter()
-            .map(|range| (range.fingerprint, (range.address, range.size)))
+            .map(|range| {
+                (
+                    ir.symbols[range.position].fingerprint,
+                    (range.address, range.size),
+                )
+            })
             .collect();
         attach_dwarf_frames_within(&file, &addresses, &mut ir, budget);
         ir
@@ -1145,7 +1169,12 @@ mod tests {
             let mut addresses: HashMap<_, _> = crate::native::collect_text_symbols(&file, &mut ir)
                 .unwrap()
                 .into_iter()
-                .map(|range| (range.fingerprint, (range.address, range.size)))
+                .map(|range| {
+                    (
+                        ir.symbols[range.position].fingerprint,
+                        (range.address, range.size),
+                    )
+                })
                 .collect();
             let shared = *addresses.values().min().unwrap();
             for value in addresses.values_mut() {
@@ -1213,7 +1242,12 @@ mod tests {
         let addresses: HashMap<_, _> = crate::native::collect_text_symbols(&file, &mut ir)
             .unwrap()
             .into_iter()
-            .map(|range| (range.fingerprint, (range.address, range.size)))
+            .map(|range| {
+                (
+                    ir.symbols[range.position].fingerprint,
+                    (range.address, range.size),
+                )
+            })
             .collect();
         attach_dwarf_frames_within(&file, &addresses, &mut ir, DwarfBudget::default());
         ir

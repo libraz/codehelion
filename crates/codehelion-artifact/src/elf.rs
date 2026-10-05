@@ -4,12 +4,15 @@
 //! executes the artifact.
 
 use crate::dwarf::{DwarfBudget, attach_dwarf_frames};
-use crate::native::{collect_sections, collect_text_symbol_ranges, collect_undefined_imports};
+use crate::identity::{PositionalCall, assign_identities};
+use crate::native::{
+    collect_sections, collect_text_symbol_ranges, collect_undefined_imports, join_addresses,
+};
 use crate::support::format_support;
 use crate::x86::X86_NORMALIZATION_VERSION;
 use crate::{
-    ArtifactBackend, ArtifactCall, ArtifactCapabilities, ArtifactError, ArtifactFingerprint,
-    ArtifactFormat, ArtifactIr, ArtifactSymbol, UnresolvedCall,
+    ArtifactBackend, ArtifactCapabilities, ArtifactError, ArtifactFormat, ArtifactIr,
+    ArtifactSymbol, UnresolvedCall,
 };
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 use object::{
@@ -107,7 +110,9 @@ impl ElfBackend {
             })
             .transpose()?;
         let mut ir = ArtifactIr::empty(ArtifactFormat::Elf, bytes);
-        let mut symbol_fingerprints = HashMap::new();
+        // Joins resolve to symbol positions, so copies sharing a fingerprint
+        // stay apart until identities are assigned.
+        let mut symbol_positions = HashMap::new();
         let mut symbol_addresses = HashMap::new();
         let mut symbol_addresses_by_section = HashMap::new();
         collect_sections(&file, &mut ir).map_err(|error| malformed(error.to_string()))?;
@@ -116,29 +121,51 @@ impl ElfBackend {
         let text = collect_text_symbol_ranges(&file, &mut ir)
             .map_err(|error| malformed(error.to_string()))?;
         for symbol in &text.symbols {
-            symbol_fingerprints.insert(symbol.index, Some(symbol.fingerprint));
-            symbol_addresses_by_section
-                .insert((symbol.section, symbol.address), symbol.fingerprint);
+            symbol_positions.insert(symbol.index, symbol.position);
+            symbol_addresses_by_section.insert((symbol.section, symbol.address), symbol.position);
             if supports_global_address_join {
                 symbol_addresses
                     .entry(symbol.address)
-                    .or_insert(symbol.fingerprint);
+                    .or_insert(symbol.position);
             }
         }
-        record_entry_point(file.entry(), &symbol_addresses, &mut ir);
-        record_init_fini_roots(&file, &symbol_fingerprints, &symbol_addresses, &mut ir);
+        let entry = entry_root(file.entry(), &symbol_addresses);
+        let init_fini = init_fini_roots(&file, &symbol_positions, &symbol_addresses);
         let transfers = x86_transfers(
             &file,
             &ir.symbols,
-            &symbol_fingerprints,
+            &symbol_positions,
             &symbol_addresses_by_section,
             &symbol_addresses,
         );
-        ir.calls = transfers.calls;
-        ir.indirect_references.extend(transfers.address_taken);
+        let roots: BTreeSet<usize> = entry
+            .iter()
+            .chain(&init_fini)
+            .chain(&transfers.address_taken)
+            .copied()
+            .collect();
+        ir.calls = assign_identities(&mut ir.symbols, &roots, transfers.calls);
+        let fingerprints = |positions: &BTreeSet<usize>| -> BTreeSet<_> {
+            positions
+                .iter()
+                .map(|position| ir.symbols[*position].fingerprint)
+                .collect()
+        };
+        let init_fini = fingerprints(&init_fini);
+        let address_taken = fingerprints(&transfers.address_taken);
+        if let Some(entry) = entry {
+            ir.entry_points.push(ir.symbols[entry].fingerprint);
+        }
+        let existing: BTreeSet<_> = ir.entry_points.iter().copied().collect();
+        ir.entry_points.extend(
+            init_fini
+                .into_iter()
+                .filter(|fingerprint| !existing.contains(fingerprint)),
+        );
+        ir.indirect_references.extend(address_taken);
         attach_dwarf_frames(
             debug_file.as_ref().unwrap_or(&file),
-            &text.addresses,
+            &join_addresses(&text.addresses, &ir.symbols),
             &mut ir,
             budget,
         );
@@ -170,21 +197,15 @@ fn matching_build_id(artifact: &object::File<'_>, companion: &object::File<'_>) 
     artifact_id == companion_id
 }
 
-/// Preserve an ELF entry address only after resolving it to a stable symbol ID.
+/// The symbol an ELF entry address resolves to, by position.
 ///
 /// A zero entry address is the conventional absence marker for relocatable
 /// objects. Addresses are lookup evidence only and never become part of IR
 /// identity.
-fn record_entry_point(
-    entry_address: u64,
-    addresses: &HashMap<u64, ArtifactFingerprint>,
-    ir: &mut ArtifactIr,
-) {
-    if entry_address != 0
-        && let Some(fingerprint) = addresses.get(&entry_address)
-    {
-        ir.entry_points.push(*fingerprint);
-    }
+fn entry_root(entry_address: u64, addresses: &HashMap<u64, usize>) -> Option<usize> {
+    (entry_address != 0)
+        .then(|| addresses.get(&entry_address).copied())
+        .flatten()
 }
 
 /// Treat constructor and destructor arrays as conservative local roots.
@@ -192,12 +213,11 @@ fn record_entry_point(
 /// A relocation in either array is loader evidence that the target can run
 /// even without a normal call edge or external export. The section and symbol
 /// indexes are used only while parsing; the IR records the stable fingerprint.
-fn record_init_fini_roots(
+fn init_fini_roots(
     file: &object::File<'_>,
-    fingerprints: &HashMap<object::SymbolIndex, Option<ArtifactFingerprint>>,
-    addresses: &HashMap<u64, ArtifactFingerprint>,
-    ir: &mut ArtifactIr,
-) {
+    positions: &HashMap<object::SymbolIndex, usize>,
+    addresses: &HashMap<u64, usize>,
+) -> BTreeSet<usize> {
     let mut roots = BTreeSet::new();
     for section in file.sections() {
         if !matches!(section.name().ok(), Some(".init_array" | ".fini_array")) {
@@ -205,9 +225,9 @@ fn record_init_fini_roots(
         }
         for (_, relocation) in section.relocations() {
             if let RelocationTarget::Symbol(index) = relocation.target()
-                && let Some(Some(fingerprint)) = fingerprints.get(&index)
+                && let Some(position) = positions.get(&index)
             {
-                roots.insert(*fingerprint);
+                roots.insert(*position);
             }
         }
         if let Ok(data) = section.data() {
@@ -219,12 +239,7 @@ fn record_init_fini_roots(
             ));
         }
     }
-    let existing: BTreeSet<_> = ir.entry_points.iter().copied().collect();
-    ir.entry_points.extend(
-        roots
-            .into_iter()
-            .filter(|fingerprint| !existing.contains(fingerprint)),
-    );
+    roots
 }
 
 /// Resolve pointer-width values retained in a linked init/fini array.
@@ -232,8 +247,8 @@ fn pointer_roots(
     bytes: &[u8],
     is_64: bool,
     endianness: Endianness,
-    addresses: &HashMap<u64, ArtifactFingerprint>,
-) -> BTreeSet<ArtifactFingerprint> {
+    addresses: &HashMap<u64, usize>,
+) -> BTreeSet<usize> {
     let width = if is_64 { 8 } else { 4 };
     bytes
         .chunks_exact(width)
@@ -267,10 +282,10 @@ fn pointer_value(bytes: &[u8], endianness: Endianness) -> Option<u64> {
 struct X86Transfers {
     /// A call or a jump that leaves the function holding it, with its target
     /// when the object names one.
-    calls: Vec<ArtifactCall>,
+    calls: Vec<PositionalCall>,
     /// Functions whose address is stored, loaded, or otherwise handed out, and
     /// which therefore run without any call edge reaching them.
-    address_taken: BTreeSet<ArtifactFingerprint>,
+    address_taken: BTreeSet<usize>,
 }
 
 /// Where one function lies in its section's address space.
@@ -278,8 +293,11 @@ struct X86Transfers {
 struct FunctionRange {
     start: u64,
     end: u64,
-    fingerprint: ArtifactFingerprint,
+    position: usize,
 }
+
+/// A function by its position in the symbol list, beside its record.
+type Positioned<'a> = (usize, &'a ArtifactSymbol);
 
 /// Whether a section's pointers can name a function's address.
 fn holds_function_pointers<'data>(section: &impl ObjectSection<'data>) -> bool {
@@ -297,8 +315,8 @@ struct SectionBranches<'a> {
     relocation_targets: HashMap<u64, RelocationTarget>,
     /// Functions of the section sorted by start address.
     ranges: Vec<FunctionRange>,
-    fingerprints: &'a HashMap<object::SymbolIndex, Option<ArtifactFingerprint>>,
-    addresses: &'a HashMap<(object::SectionIndex, u64), ArtifactFingerprint>,
+    positions: &'a HashMap<object::SymbolIndex, usize>,
+    addresses: &'a HashMap<(object::SectionIndex, u64), usize>,
 }
 
 impl SectionBranches<'_> {
@@ -314,16 +332,16 @@ impl SectionBranches<'_> {
         is_jump: bool,
         inside: &std::ops::Range<u64>,
         consumed: &mut BTreeSet<u64>,
-    ) -> (Option<ArtifactFingerprint>, Option<UnresolvedCall>) {
+    ) -> (Option<usize>, Option<UnresolvedCall>) {
         let relocation = rel32_displacement(instruction, self.address)
             .and_then(|offset| self.relocation_targets.get(&offset).map(|t| (offset, t)));
         if let Some((offset, target)) = relocation {
             consumed.insert(offset);
             return match target {
                 RelocationTarget::Symbol(index) => self
-                    .fingerprints
+                    .positions
                     .get(index)
-                    .and_then(|value| *value)
+                    .copied()
                     .map_or((None, Some(UnresolvedCall::ExternalImport)), |target| {
                         (Some(target), None)
                     }),
@@ -377,21 +395,21 @@ const fn is_jump(mnemonic: Mnemonic) -> bool {
 
 /// Address ranges of the non-empty functions of one section, sorted by start.
 fn function_ranges(
-    functions: &[&ArtifactSymbol],
+    functions: &[Positioned<'_>],
     section_address: u64,
     section_offset: u64,
 ) -> Vec<FunctionRange> {
     let mut ranges: Vec<_> = functions
         .iter()
-        .filter(|function| !function.code.is_empty())
-        .filter_map(|function| {
+        .filter(|(_, function)| !function.code.is_empty())
+        .filter_map(|(position, function)| {
             let start =
                 section_address.checked_add(function.offset.checked_sub(section_offset)?)?;
             let length = u64::try_from(function.code.len()).ok()?;
             Some(FunctionRange {
                 start,
                 end: start.saturating_add(length),
-                fingerprint: function.fingerprint,
+                position: *position,
             })
         })
         .collect();
@@ -402,12 +420,12 @@ fn function_ranges(
 /// Decode one function and record the transfers and address-taking in it.
 #[allow(clippy::too_many_arguments)]
 fn scan_function(
-    caller: &ArtifactSymbol,
+    (position, caller): Positioned<'_>,
     ip: u64,
     inside: &std::ops::Range<u64>,
     bitness: u32,
     branches: &SectionBranches<'_>,
-    global_addresses: &HashMap<u64, ArtifactFingerprint>,
+    global_addresses: &HashMap<u64, usize>,
     consumed: &mut BTreeSet<u64>,
     transfers: &mut X86Transfers,
 ) {
@@ -449,8 +467,8 @@ fn scan_function(
             (None, Some(UnresolvedCall::NativeIndirect))
         };
         if target.is_some() || unresolved.is_some() {
-            transfers.calls.push(ArtifactCall {
-                caller: caller.fingerprint,
+            transfers.calls.push(PositionalCall {
+                caller: position,
                 target,
                 unresolved,
             });
@@ -461,9 +479,9 @@ fn scan_function(
 fn x86_transfers(
     file: &object::File<'_>,
     symbols: &[ArtifactSymbol],
-    fingerprints: &HashMap<object::SymbolIndex, Option<ArtifactFingerprint>>,
-    addresses: &HashMap<(object::SectionIndex, u64), ArtifactFingerprint>,
-    global_addresses: &HashMap<u64, ArtifactFingerprint>,
+    positions: &HashMap<object::SymbolIndex, usize>,
+    addresses: &HashMap<(object::SectionIndex, u64), usize>,
+    global_addresses: &HashMap<u64, usize>,
 ) -> X86Transfers {
     let bitness = match file.architecture() {
         Architecture::I386 => 32,
@@ -474,12 +492,12 @@ fn x86_transfers(
         return X86Transfers::default();
     }
     let mut transfers = X86Transfers::default();
-    let mut callers_by_section: HashMap<Option<u32>, Vec<&ArtifactSymbol>> = HashMap::new();
-    for symbol in symbols {
+    let mut callers_by_section: HashMap<Option<u32>, Vec<Positioned<'_>>> = HashMap::new();
+    for (position, symbol) in symbols.iter().enumerate() {
         callers_by_section
             .entry(symbol.section)
             .or_default()
-            .push(symbol);
+            .push((position, symbol));
     }
     for section in file
         .sections()
@@ -507,11 +525,11 @@ fn x86_transfers(
             address: section.address(),
             relocation_targets,
             ranges,
-            fingerprints,
+            positions,
             addresses,
         };
         let mut consumed = BTreeSet::new();
-        for caller in callers {
+        for &(position, caller) in callers {
             let Some(ip) = caller
                 .offset
                 .checked_sub(section_offset)
@@ -521,7 +539,7 @@ fn x86_transfers(
             };
             let inside = ip..ip.saturating_add(u64::try_from(caller.code.len()).unwrap_or(0));
             scan_function(
-                caller,
+                (position, caller),
                 ip,
                 &inside,
                 bitness,
@@ -540,7 +558,7 @@ fn x86_transfers(
             note_relocation_target(
                 file,
                 target,
-                fingerprints,
+                positions,
                 &callers_by_section,
                 &mut transfers.address_taken,
             );
@@ -548,7 +566,7 @@ fn x86_transfers(
     }
     note_data_references(
         file,
-        fingerprints,
+        positions,
         &callers_by_section,
         global_addresses,
         &mut transfers.address_taken,
@@ -559,17 +577,17 @@ fn x86_transfers(
 /// Record the functions that data sections and dynamic relocations point at.
 fn note_data_references(
     file: &object::File<'_>,
-    fingerprints: &HashMap<object::SymbolIndex, Option<ArtifactFingerprint>>,
-    callers_by_section: &HashMap<Option<u32>, Vec<&ArtifactSymbol>>,
-    global_addresses: &HashMap<u64, ArtifactFingerprint>,
-    address_taken: &mut BTreeSet<ArtifactFingerprint>,
+    positions: &HashMap<object::SymbolIndex, usize>,
+    callers_by_section: &HashMap<Option<u32>, Vec<Positioned<'_>>>,
+    global_addresses: &HashMap<u64, usize>,
+    address_taken: &mut BTreeSet<usize>,
 ) {
     for section in file.sections().filter(holds_function_pointers) {
         for (_, relocation) in section.relocations() {
             note_relocation_target(
                 file,
                 &relocation.target(),
-                fingerprints,
+                positions,
                 callers_by_section,
                 address_taken,
             );
@@ -591,20 +609,20 @@ fn note_data_references(
     for (_, relocation) in file.dynamic_relocations().into_iter().flatten() {
         if relocation.target() == RelocationTarget::Absolute
             && let Ok(address) = u64::try_from(relocation.addend())
-            && let Some(fingerprint) = global_addresses.get(&address)
+            && let Some(position) = global_addresses.get(&address)
         {
-            address_taken.insert(*fingerprint);
+            address_taken.insert(*position);
         }
     }
 }
 
 /// The function whose bytes contain `address`, among ranges sorted by start.
-fn containing_function(ranges: &[FunctionRange], address: u64) -> Option<ArtifactFingerprint> {
+fn containing_function(ranges: &[FunctionRange], address: u64) -> Option<usize> {
     let after = ranges.partition_point(|range| range.start <= address);
     ranges
         .get(after.checked_sub(1)?)
         .filter(|range| address < range.end)
-        .map(|range| range.fingerprint)
+        .map(|range| range.position)
 }
 
 /// Record the function a relocation points at as address-taken.
@@ -614,14 +632,14 @@ fn containing_function(ranges: &[FunctionRange], address: u64) -> Option<Artifac
 fn note_relocation_target(
     file: &object::File<'_>,
     target: &RelocationTarget,
-    fingerprints: &HashMap<object::SymbolIndex, Option<ArtifactFingerprint>>,
-    callers_by_section: &HashMap<Option<u32>, Vec<&ArtifactSymbol>>,
-    address_taken: &mut BTreeSet<ArtifactFingerprint>,
+    positions: &HashMap<object::SymbolIndex, usize>,
+    callers_by_section: &HashMap<Option<u32>, Vec<Positioned<'_>>>,
+    address_taken: &mut BTreeSet<usize>,
 ) {
     match target {
         RelocationTarget::Symbol(index) => {
-            if let Some(Some(fingerprint)) = fingerprints.get(index) {
-                address_taken.insert(*fingerprint);
+            if let Some(position) = positions.get(index) {
+                address_taken.insert(*position);
             }
         }
         RelocationTarget::Section(index)
@@ -634,7 +652,7 @@ fn note_relocation_target(
                     .get(&u32::try_from(index.0).ok())
                     .into_iter()
                     .flatten()
-                    .map(|symbol| symbol.fingerprint),
+                    .map(|(position, _)| *position),
             );
         }
         _ => {}
@@ -644,21 +662,21 @@ fn note_relocation_target(
 /// Record a function whose address an instruction of a linked image computes.
 fn note_address_taken(
     instruction: &Instruction,
-    addresses: &HashMap<u64, ArtifactFingerprint>,
+    addresses: &HashMap<u64, usize>,
     transfers: &mut X86Transfers,
 ) {
     if instruction.is_ip_rel_memory_operand()
-        && let Some(fingerprint) = addresses.get(&instruction.ip_rel_memory_address())
+        && let Some(position) = addresses.get(&instruction.ip_rel_memory_address())
     {
-        transfers.address_taken.insert(*fingerprint);
+        transfers.address_taken.insert(*position);
     }
     for operand in 0..instruction.op_count() {
         if matches!(
             instruction.op_kind(operand),
             OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate32to64
-        ) && let Some(fingerprint) = addresses.get(&instruction.immediate(operand))
+        ) && let Some(position) = addresses.get(&instruction.immediate(operand))
         {
-            transfers.address_taken.insert(*fingerprint);
+            transfers.address_taken.insert(*position);
         }
     }
 }
