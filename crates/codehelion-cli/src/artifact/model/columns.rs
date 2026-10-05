@@ -65,6 +65,22 @@ pub(in crate::artifact) const ARTIFACT_CSV_HEADER: &[&str] = &[
     "containing_symbol_bytes",
     "emitted_bodies",
     "max_debug_derived_items",
+    "content_fingerprint",
+    "identity_by_order",
+    "owner",
+    "ownership",
+    "toolchain_family",
+    "absorbed_bytes",
+    "absorbed_symbols",
+    "root",
+    "outside_symbols_bytes",
+    "declared_own_json",
+    "holder_fingerprint",
+    "head_fingerprint",
+    "shared_bytes",
+    "shared_symbols",
+    "shared_absorbed_bytes",
+    "shared_absorbed_symbols",
 ];
 
 /// The columns one kind of record in the artifact CSV carries.
@@ -118,6 +134,19 @@ pub(in crate::artifact) const RECORD_COLUMNS: &[RecordColumns] = &[
             column::CLONE_CONFIDENCE,
             column::SAVINGS_CONFIDENCE,
             column::ARTIFACT_SYMBOLS,
+        ],
+    },
+    RecordColumns {
+        record_type: "symbol",
+        columns: &[
+            column::FINGERPRINT,
+            column::NAME,
+            column::OFFSET,
+            column::SIZE,
+            column::CONTENT_FINGERPRINT,
+            column::IDENTITY_BY_ORDER,
+            column::OWNER,
+            column::OWNERSHIP,
         ],
     },
     RecordColumns {
@@ -214,7 +243,12 @@ pub(in crate::artifact) const RECORD_COLUMNS: &[RecordColumns] = &[
             column::NAME,
             column::SIZE,
             column::ARTIFACT_SYMBOLS,
+            column::TOOLCHAIN_FAMILY,
         ],
+    },
+    RecordColumns {
+        record_type: "ownership-summary",
+        columns: &[column::OUTSIDE_SYMBOLS_BYTES, column::DECLARED_OWN_JSON],
     },
     // The held bytes are a part of the holder's retained size: they sit in
     // the holder's dominator subtree, so they are not added to it.
@@ -226,6 +260,17 @@ pub(in crate::artifact) const RECORD_COLUMNS: &[RecordColumns] = &[
             column::NAME,
             column::RETAINED_BYTES,
             column::ARTIFACT_SYMBOLS,
+            column::ABSORBED_BYTES,
+            column::ABSORBED_SYMBOLS,
+        ],
+    },
+    RecordColumns {
+        record_type: "toolchain-head",
+        columns: &[
+            column::FINGERPRINT,
+            column::NAME,
+            column::RETAINED_BYTES,
+            column::HOLDER_FINGERPRINT,
         ],
     },
     RecordColumns {
@@ -235,6 +280,25 @@ pub(in crate::artifact) const RECORD_COLUMNS: &[RecordColumns] = &[
             column::FINGERPRINT,
             column::NAME,
             column::SHARED_DEPENDENCY_BYTES,
+            column::ROOT,
+        ],
+    },
+    RecordColumns {
+        record_type: "toolchain-caller",
+        columns: &[
+            column::KIND,
+            column::FINGERPRINT,
+            column::NAME,
+            column::HEAD_FINGERPRINT,
+        ],
+    },
+    RecordColumns {
+        record_type: "toolchain-holdings-summary",
+        columns: &[
+            column::SHARED_BYTES,
+            column::SHARED_SYMBOLS,
+            column::SHARED_ABSORBED_BYTES,
+            column::SHARED_ABSORBED_SYMBOLS,
         ],
     },
     RecordColumns {
@@ -391,6 +455,22 @@ pub(in crate::artifact) mod column {
     pub(in crate::artifact) const CONTAINING_SYMBOL_BYTES: usize = 53;
     pub(in crate::artifact) const EMITTED_BODIES: usize = 54;
     pub(in crate::artifact) const MAX_DEBUG_DERIVED_ITEMS: usize = 55;
+    pub(in crate::artifact) const CONTENT_FINGERPRINT: usize = 56;
+    pub(in crate::artifact) const IDENTITY_BY_ORDER: usize = 57;
+    pub(in crate::artifact) const OWNER: usize = 58;
+    pub(in crate::artifact) const OWNERSHIP: usize = 59;
+    pub(in crate::artifact) const TOOLCHAIN_FAMILY: usize = 60;
+    pub(in crate::artifact) const ABSORBED_BYTES: usize = 61;
+    pub(in crate::artifact) const ABSORBED_SYMBOLS: usize = 62;
+    pub(in crate::artifact) const ROOT: usize = 63;
+    pub(in crate::artifact) const OUTSIDE_SYMBOLS_BYTES: usize = 64;
+    pub(in crate::artifact) const DECLARED_OWN_JSON: usize = 65;
+    pub(in crate::artifact) const HOLDER_FINGERPRINT: usize = 66;
+    pub(in crate::artifact) const HEAD_FINGERPRINT: usize = 67;
+    pub(in crate::artifact) const SHARED_BYTES: usize = 68;
+    pub(in crate::artifact) const SHARED_SYMBOLS: usize = 69;
+    pub(in crate::artifact) const SHARED_ABSORBED_BYTES: usize = 70;
+    pub(in crate::artifact) const SHARED_ABSORBED_SYMBOLS: usize = 71;
 }
 
 /// Every comparison CSV column, in the order they are written, under the same
@@ -433,6 +513,9 @@ pub(in crate::artifact) const COMPARE_CSV_HEADER: &[&str] = &[
     "artifact_analysis_id",
     "matching_analyses",
     "calibration_record",
+    "owner",
+    "ownership",
+    "outside_symbols_delta_bytes",
 ];
 
 /// Column positions in [`COMPARE_CSV_HEADER`].
@@ -474,4 +557,7 @@ pub(in crate::artifact) mod compare_column {
     pub(in crate::artifact) const ARTIFACT_ANALYSIS_ID: usize = 34;
     pub(in crate::artifact) const MATCHING_ANALYSES: usize = 35;
     pub(in crate::artifact) const CALIBRATION_RECORD: usize = 36;
+    pub(in crate::artifact) const OWNER: usize = 37;
+    pub(in crate::artifact) const OWNERSHIP: usize = 38;
+    pub(in crate::artifact) const OUTSIDE_SYMBOLS_DELTA_BYTES: usize = 39;
 }

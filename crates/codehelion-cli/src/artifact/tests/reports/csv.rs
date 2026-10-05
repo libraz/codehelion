@@ -1,7 +1,7 @@
 //! CSV rendering: quoting, record kinds, and the columns each one fills.
 
 use super::*;
-use crate::artifact::model::ARTIFACT_CSV_HEADER;
+use crate::artifact::model::{ARTIFACT_CSV_HEADER, COMPARE_CSV_HEADER};
 use crate::artifact::render::{attribution_column, stated_bytes};
 use codehelion_artifact::metrics::ReportedSize;
 
@@ -169,6 +169,24 @@ fn artifact_with_a_toolchain_holder() -> ArtifactIr {
     artifact.calls.push(codehelion_artifact::ArtifactCall {
         caller: artifact.symbols[0].fingerprint,
         target: Some(artifact.symbols[3].fingerprint),
+        unresolved: None,
+    });
+    artifact
+}
+
+/// Add an unqualified function below a toolchain entry so the holding report
+/// has a nonzero absorbed total to carry through CSV.
+fn artifact_with_absorbed_toolchain_code() -> ArtifactIr {
+    let mut artifact = artifact_with_a_toolchain_holder();
+    let second_root = artifact.symbols[2].fingerprint;
+    artifact.calls.retain(|call| call.caller != second_root);
+    let mut absorbed = normalizable_symbol(50, &[1, 6], &[9]);
+    absorbed.name = Some("helper".to_owned());
+    let absorbed_fingerprint = absorbed.fingerprint;
+    artifact.symbols.push(absorbed);
+    artifact.calls.push(codehelion_artifact::ArtifactCall {
+        caller: artifact.symbols[1].fingerprint,
+        target: Some(absorbed_fingerprint),
         unresolved: None,
     });
     artifact
@@ -386,6 +404,204 @@ fn holding_and_shared_records_carry_held_bytes_in_their_own_columns() {
     assert_eq!(
         artifact_csv_records_of(&report, "toolchain-shared").len(),
         0
+    );
+    assert_eq!(
+        artifact_csv_records_of(&report, "toolchain-holdings-summary").len(),
+        0
+    );
+}
+
+/// Symbol, ownership and toolchain records keep every identity and ownership
+/// field that the JSON and text reports expose.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fixture checks every ownership-related CSV record"
+)]
+fn artifact_csv_carries_symbol_ownership_and_toolchain_details() {
+    let mut artifact = artifact_with_absorbed_toolchain_code();
+    let copy = codehelion_artifact::ArtifactFingerprint::from_content("copy", b"same-body");
+    artifact.symbols[0].content_fingerprint = Some(copy);
+    artifact.symbols[0].identity_by_order = true;
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None)
+        .with_own_declaration(&["<global>".to_owned(), "owner,with,comma".to_owned()]);
+
+    let column = |name: &str| {
+        ARTIFACT_CSV_HEADER
+            .iter()
+            .position(|candidate| *candidate == name)
+            .expect("CSV header carries the requested field")
+    };
+    let content_fingerprint = column("content_fingerprint");
+    let identity_by_order = column("identity_by_order");
+    let owner = column("owner");
+    let ownership = column("ownership");
+    let toolchain_family = column("toolchain_family");
+    let absorbed_bytes = column("absorbed_bytes");
+    let absorbed_symbols = column("absorbed_symbols");
+    let root = column("root");
+    let outside_symbols_bytes = column("outside_symbols_bytes");
+    let declared_own_json = column("declared_own_json");
+    let holder_fingerprint = column("holder_fingerprint");
+    let head_fingerprint = column("head_fingerprint");
+    let shared_bytes = column("shared_bytes");
+    let shared_symbols = column("shared_symbols");
+    let shared_absorbed_bytes = column("shared_absorbed_bytes");
+    let shared_absorbed_symbols = column("shared_absorbed_symbols");
+
+    let symbols = artifact_csv_records_of(&report, "symbol");
+    let symbol = symbols
+        .iter()
+        .find(|record| record[column("name")] == "parse, fast")
+        .expect("the symbol record is written");
+    assert_eq!(symbol[content_fingerprint], copy.to_hex());
+    assert_eq!(symbol[identity_by_order], "true");
+    assert_eq!(symbol[owner], "<global>");
+    assert_eq!(symbol[ownership], "own");
+    assert_eq!(
+        symbol[column("offset")],
+        artifact.symbols[0].offset.to_string()
+    );
+    assert_eq!(symbol[column("size")], artifact.symbols[0].size.to_string());
+
+    let ownership_summary = artifact_csv_records_of(&report, "ownership-summary")
+        .pop()
+        .expect("the ownership summary record is written");
+    assert_eq!(
+        ownership_summary[outside_symbols_bytes],
+        report.ownership.outside_symbols_bytes.to_string()
+    );
+    assert_eq!(
+        ownership_summary[declared_own_json],
+        serde_json::to_string(&report.ownership.declared_own).unwrap()
+    );
+    assert!(
+        ownership_summary[declared_own_json].contains(','),
+        "the declaration list must exercise CSV quoting"
+    );
+
+    let owner_record = artifact_csv_records_of(&report, "owner")
+        .into_iter()
+        .find(|record| record[column("name")] == "c-std")
+        .expect("the c-std owner record is written");
+    assert_eq!(owner_record[toolchain_family], "c_std");
+
+    let holding_model = &report.toolchain_holdings.as_ref().unwrap().holdings[0];
+    let holding = artifact_csv_records_of(&report, "toolchain-holding")
+        .pop()
+        .expect("the holding record is written");
+    assert_eq!(
+        holding[absorbed_bytes],
+        holding_model.absorbed_bytes.to_string()
+    );
+    assert_eq!(
+        holding[absorbed_symbols],
+        holding_model.absorbed_symbols.to_string()
+    );
+    assert_ne!(holding[absorbed_bytes], "0");
+    assert_ne!(holding[absorbed_symbols], "0");
+
+    let head = artifact_csv_records_of(&report, "toolchain-head")
+        .into_iter()
+        .find(|record| record[column("name")] == "strtof")
+        .expect("the head record is written");
+    assert_eq!(
+        head[column("fingerprint")],
+        artifact.symbols[1].fingerprint.to_hex()
+    );
+    assert_eq!(head[column("name")], "strtof");
+    assert_eq!(
+        head[column("retained_bytes")],
+        report.toolchain_holdings.as_ref().unwrap().holdings[0].heads[0]
+            .held_bytes
+            .to_string()
+    );
+    assert_eq!(head[holder_fingerprint], holding_model.holder);
+
+    let shared_report = ArtifactReport::from_ir(
+        FilePath::new("fixture.wasm"),
+        &artifact_with_a_toolchain_holder(),
+        None,
+        None,
+    )
+    .with_own_declaration(&["<global>".to_owned()]);
+    let shared_model = &shared_report.toolchain_holdings.as_ref().unwrap().shared[0];
+    let shared = artifact_csv_records_of(&shared_report, "toolchain-shared")
+        .pop()
+        .expect("the shared record is written");
+    assert_eq!(shared[root], shared_model.root.to_string());
+
+    let caller = artifact_csv_records_of(&shared_report, "toolchain-caller")
+        .into_iter()
+        .find(|record| record[column("name")] == "parse, fast")
+        .expect("the caller record is written");
+    assert_eq!(
+        caller[column("fingerprint")],
+        artifact.symbols[0].fingerprint.to_hex()
+    );
+    assert_eq!(caller[column("kind")], "own");
+    assert_eq!(caller[head_fingerprint], shared_model.symbol.clone());
+
+    let holdings_summary = artifact_csv_records_of(&shared_report, "toolchain-holdings-summary")
+        .pop()
+        .expect("the holdings summary record is written");
+    let shared_holdings = shared_report.toolchain_holdings.as_ref().unwrap();
+    assert_eq!(
+        holdings_summary[shared_bytes],
+        shared_holdings.shared_bytes.to_string()
+    );
+    assert_eq!(
+        holdings_summary[shared_symbols],
+        shared_holdings.shared_symbols.to_string()
+    );
+    assert_eq!(
+        holdings_summary[shared_absorbed_bytes],
+        shared_holdings.shared_absorbed_bytes.to_string()
+    );
+    assert_eq!(
+        holdings_summary[shared_absorbed_symbols],
+        shared_holdings.shared_absorbed_symbols.to_string()
+    );
+}
+
+/// Comparison CSV keeps the owner split on symbol rows and the uncovered code
+/// delta on its summary row.
+#[test]
+fn comparison_csv_carries_symbol_ownership_and_outside_delta() {
+    let mut before = resolved_call_graph_artifact();
+    before.symbols[0].name = Some("parse, fast".to_owned());
+    let mut after = before.clone();
+    after.symbols[0].size += 2;
+    let report = ArtifactComparisonReport::new(
+        FilePath::new("before.wasm"),
+        &before,
+        None,
+        FilePath::new("after.wasm"),
+        &after,
+        None,
+    );
+    let column = |name: &str| {
+        COMPARE_CSV_HEADER
+            .iter()
+            .position(|candidate| *candidate == name)
+            .expect("comparison CSV header carries the requested field")
+    };
+    let symbol = compare_csv_records(&report)
+        .into_iter()
+        .find(|record| record[compare_column::RECORD_TYPE] == "symbol-delta")
+        .expect("the symbol delta record is written");
+    assert_eq!(symbol[column("owner")], "<global>");
+    assert_eq!(symbol[column("ownership")], "other");
+    let summary = compare_csv_records(&report)
+        .into_iter()
+        .find(|record| record[compare_column::RECORD_TYPE] == "summary")
+        .expect("the summary record is written");
+    assert_eq!(
+        summary[column("outside_symbols_delta_bytes")],
+        report
+            .ownership_deltas
+            .outside_symbols_delta_bytes
+            .to_string()
     );
 }
 

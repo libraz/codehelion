@@ -8,8 +8,8 @@ use super::{
 };
 use crate::artifact::correlation::AttributionBasis;
 use crate::artifact::model::{
-    ARTIFACT_CSV_HEADER, ArtifactReport, SourceMapResolutionStatus, column, ownership_label,
-    report_assumptions,
+    ARTIFACT_CSV_HEADER, ArtifactReport, SourceMapResolutionStatus, column, family_label,
+    ownership_label, report_assumptions,
 };
 use crate::artifact::{Context, Result, Write, csv};
 
@@ -40,6 +40,20 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
     summary[column::SAVINGS_CONFIDENCE] = format!("{:?}", report.sizes.savings_confidence);
     summary[column::ARTIFACT_SYMBOLS] = report.symbols.len().to_string();
     write_artifact_csv_row(out, &summary)?;
+    for symbol in &report.symbols {
+        let mut row = artifact_csv_row("symbol", report);
+        row[column::FINGERPRINT].clone_from(&symbol.fingerprint);
+        row[column::NAME] = symbol.name.as_deref().map_or_else(String::new, csv);
+        row[column::OFFSET] = symbol.offset.to_string();
+        row[column::SIZE] = symbol.size.to_string();
+        if let Some(content_fingerprint) = &symbol.content_fingerprint {
+            row[column::CONTENT_FINGERPRINT].clone_from(content_fingerprint);
+        }
+        row[column::IDENTITY_BY_ORDER] = symbol.identity_by_order.to_string();
+        row[column::OWNER] = csv(&symbol.owner);
+        ownership_label(symbol.ownership).clone_into(&mut row[column::OWNERSHIP]);
+        write_artifact_csv_row(out, &row)?;
+    }
     if let Some(variant) = &report.build_variant {
         let mut row = artifact_csv_row("build-variant", report);
         row[column::FINGERPRINT].clone_from(&variant.fingerprint);
@@ -181,8 +195,18 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
         row[column::NAME] = csv(&owner.key);
         row[column::SIZE] = owner.size_bytes.to_string();
         row[column::ARTIFACT_SYMBOLS] = owner.symbols.to_string();
+        row[column::TOOLCHAIN_FAMILY] = owner
+            .family
+            .map_or_else(String::new, |family| family_label(family).to_owned());
         write_artifact_csv_row(out, &row)?;
     }
+    let mut ownership_summary = artifact_csv_row("ownership-summary", report);
+    ownership_summary[column::OUTSIDE_SYMBOLS_BYTES] =
+        report.ownership.outside_symbols_bytes.to_string();
+    ownership_summary[column::DECLARED_OWN_JSON] =
+        csv(&serde_json::to_string(&report.ownership.declared_own)
+            .context("serializing CSV declared own owners")?);
+    write_artifact_csv_row(out, &ownership_summary)?;
     if let Some(holdings) = &report.toolchain_holdings {
         for holding in &holdings.holdings {
             let mut row = artifact_csv_row("toolchain-holding", report);
@@ -191,7 +215,17 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
             row[column::NAME] = csv(holding.holder_name.as_deref().unwrap_or(""));
             row[column::RETAINED_BYTES] = holding.held_bytes.to_string();
             row[column::ARTIFACT_SYMBOLS] = holding.held_symbols.to_string();
+            row[column::ABSORBED_BYTES] = holding.absorbed_bytes.to_string();
+            row[column::ABSORBED_SYMBOLS] = holding.absorbed_symbols.to_string();
             write_artifact_csv_row(out, &row)?;
+            for head in &holding.heads {
+                let mut row = artifact_csv_row("toolchain-head", report);
+                row[column::FINGERPRINT].clone_from(&head.symbol);
+                row[column::NAME] = csv(head.name.as_deref().unwrap_or(""));
+                row[column::RETAINED_BYTES] = head.held_bytes.to_string();
+                row[column::HOLDER_FINGERPRINT].clone_from(&holding.holder);
+                write_artifact_csv_row(out, &row)?;
+            }
         }
         for shared in &holdings.shared {
             let mut row = artifact_csv_row("toolchain-shared", report);
@@ -199,8 +233,23 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
             row[column::FINGERPRINT].clone_from(&shared.symbol);
             row[column::NAME] = csv(shared.name.as_deref().unwrap_or(""));
             row[column::SHARED_DEPENDENCY_BYTES] = shared.held_bytes.to_string();
+            row[column::ROOT] = shared.root.to_string();
             write_artifact_csv_row(out, &row)?;
+            for caller in &shared.callers {
+                let mut row = artifact_csv_row("toolchain-caller", report);
+                ownership_label(caller.ownership).clone_into(&mut row[column::KIND]);
+                row[column::FINGERPRINT].clone_from(&caller.symbol);
+                row[column::NAME] = csv(caller.name.as_deref().unwrap_or(""));
+                row[column::HEAD_FINGERPRINT].clone_from(&shared.symbol);
+                write_artifact_csv_row(out, &row)?;
+            }
         }
+        let mut row = artifact_csv_row("toolchain-holdings-summary", report);
+        row[column::SHARED_BYTES] = holdings.shared_bytes.to_string();
+        row[column::SHARED_SYMBOLS] = holdings.shared_symbols.to_string();
+        row[column::SHARED_ABSORBED_BYTES] = holdings.shared_absorbed_bytes.to_string();
+        row[column::SHARED_ABSORBED_SYMBOLS] = holdings.shared_absorbed_symbols.to_string();
+        write_artifact_csv_row(out, &row)?;
     }
     if let Some(correlation) = correlation {
         // Observed and line-proportional bytes occupy separate columns, so a

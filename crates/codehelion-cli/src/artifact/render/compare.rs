@@ -13,13 +13,20 @@ pub(in crate::artifact) fn render_compare_csv(
     out: &mut impl Write,
 ) -> Result<()> {
     writeln!(out, "{}", COMPARE_CSV_HEADER.join(","))?;
-    write_compare_csv_row(out, &compare_csv_row(report, "summary"))?;
+    let mut summary = compare_csv_row(report, "summary");
+    summary[compare_column::OUTSIDE_SYMBOLS_DELTA_BYTES] = report
+        .ownership_deltas
+        .outside_symbols_delta_bytes
+        .to_string();
+    write_compare_csv_row(out, &summary)?;
     for delta in &report.symbol_deltas {
         let mut row = compare_csv_row(report, "symbol-delta");
         delta.kind.clone_into(&mut row[compare_column::CHANGE_KIND]);
         row[compare_column::NAME] = csv(delta.name.as_deref().unwrap_or(""));
         row[compare_column::FINGERPRINT].clone_from(&delta.fingerprint);
         row[compare_column::SYMBOL_SIZE_DELTA_BYTES] = delta.size_delta_bytes.to_string();
+        row[compare_column::OWNER] = csv(&delta.owner);
+        ownership_label(delta.ownership).clone_into(&mut row[compare_column::OWNERSHIP]);
         write_compare_csv_row(out, &row)?;
     }
     for owner in &report.ownership_deltas.owners {
