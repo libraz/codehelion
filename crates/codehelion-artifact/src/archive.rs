@@ -4,9 +4,10 @@
 //! member is parsed by its format backend, then flattened only for common
 //! metrics while retaining member provenance in [`ArtifactIr::archive_members`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::elf::ElfBackend;
+use crate::identity::{PositionalCall, assign_identities};
 use crate::macho::MachOBackend;
 use crate::pe::PeCoffBackend;
 use crate::support::format_support;
@@ -79,6 +80,7 @@ impl ArchiveBackend {
         // has no position of its own, so this is the last position about this
         // archive that was actually observed.
         let mut next_header = MEMBER_REGION_START;
+        let mut pending = PendingGraph::default();
         for member in archive.members() {
             let member = match member {
                 Ok(member) => member,
@@ -150,7 +152,9 @@ impl ArchiveBackend {
                 );
             } else if let Some(format) = format {
                 match parse_member(format, data, budget) {
-                    Ok(member_ir) => merge_member(&mut ir, member_ir, &provenance, offset),
+                    Ok(member_ir) => {
+                        merge_member(&mut ir, member_ir, &provenance, offset, &mut pending);
+                    }
                     Err(error) => provenance.parse_error = Some(error.to_string()),
                 }
             } else {
@@ -158,6 +162,7 @@ impl ArchiveBackend {
             }
             ir.archive_members.push(provenance);
         }
+        pending.finish(&mut ir);
         ir.capabilities = ArtifactCapabilities {
             symbols: !ir.symbols.is_empty(),
             call_graph: !ir.calls.is_empty(),
@@ -228,6 +233,7 @@ fn merge_member(
     member: ArtifactIr,
     provenance: &ArtifactArchiveMember,
     base: u64,
+    pending: &mut PendingGraph,
 ) {
     archive.capabilities.debug_info_unreadable |= member.capabilities.debug_info_unreadable;
     archive.capabilities.normalized_duplicates |= member.capabilities.normalized_duplicates;
@@ -240,44 +246,44 @@ fn merge_member(
             section
         }));
     archive.imports.extend(member.imports);
-    let mut fingerprints = BTreeMap::new();
+    // A member's own fingerprints are unique, so each names one merged position.
+    let mut positions = BTreeMap::new();
+    let wrap = |child| archive_member_fingerprint("archive-symbol", provenance.fingerprint, child);
     for mut symbol in member.symbols {
-        let original = symbol.fingerprint;
-        let fingerprint =
-            archive_member_fingerprint("archive-symbol", provenance.fingerprint, original);
-        fingerprints.insert(original, fingerprint);
-        symbol.fingerprint = fingerprint;
+        positions.insert(symbol.fingerprint, archive.symbols.len());
+        symbol.fingerprint = wrap(symbol.fingerprint);
+        symbol.content_fingerprint = symbol.content_fingerprint.map(wrap);
         symbol.section = None;
         symbol.offset = base.saturating_add(symbol.offset);
         archive.symbols.push(symbol);
     }
-    archive.entry_points.extend(
-        member
-            .entry_points
+    let positioned = |values: Vec<ArtifactFingerprint>| {
+        values
             .into_iter()
-            .filter_map(|value| fingerprints.get(&value).copied()),
-    );
-    archive.indirect_references.extend(
-        member
-            .indirect_references
-            .into_iter()
-            .filter_map(|value| fingerprints.get(&value).copied()),
-    );
-    archive
+            .filter_map(|value| positions.get(&value).copied())
+            .collect::<Vec<_>>()
+    };
+    pending.entry_points.extend(positioned(member.entry_points));
+    pending
+        .indirect_references
+        .extend(positioned(member.indirect_references));
+    pending
         .calls
-        .extend(member.calls.into_iter().filter_map(|mut call| {
-            let caller = fingerprints.get(&call.caller).copied()?;
-            call.caller = caller;
-            if let Some(target) = call.target {
-                call.target = fingerprints.get(&target).copied();
-                // A target the member established but this merge could not
-                // re-map is a lost edge. Recording why keeps it unresolved
-                // evidence instead of a call that looks like it had no target.
-                if call.target.is_none() {
-                    call.unresolved = Some(UnresolvedCall::MissingRelocation);
-                }
-            }
-            Some(call)
+        .extend(member.calls.into_iter().filter_map(|call| {
+            let caller = positions.get(&call.caller).copied()?;
+            let target = call.target.map(|target| positions.get(&target).copied());
+            // A target the member established but this merge could not
+            // re-map is a lost edge. Recording why keeps it unresolved
+            // evidence instead of a call that looks like it had no target.
+            let unresolved = match target {
+                Some(None) => Some(UnresolvedCall::MissingRelocation),
+                _ => call.unresolved,
+            };
+            Some(PositionalCall {
+                caller,
+                target: target.flatten(),
+                unresolved,
+            })
         }));
     archive
         .relocations
@@ -303,10 +309,41 @@ fn merge_member(
             data.offset = base.saturating_add(data.offset);
             data
         }));
-    archive.entry_points.sort();
-    archive.entry_points.dedup();
-    archive.indirect_references.sort();
-    archive.indirect_references.dedup();
+}
+
+/// Calls and roots of the merged members, by position in the archive's
+/// symbol list, held until every member's symbols are in place.
+#[derive(Default)]
+struct PendingGraph {
+    entry_points: Vec<usize>,
+    indirect_references: Vec<usize>,
+    calls: Vec<PositionalCall>,
+}
+
+impl PendingGraph {
+    /// Give every merged symbol its own fingerprint, then record calls and
+    /// roots by it. Byte-identical members collide on every symbol here.
+    fn finish(self, archive: &mut ArtifactIr) {
+        let roots: BTreeSet<usize> = self
+            .entry_points
+            .iter()
+            .chain(&self.indirect_references)
+            .copied()
+            .collect();
+        archive.calls = assign_identities(&mut archive.symbols, &roots, self.calls);
+        let symbols = &archive.symbols;
+        let fingerprints = |positions: Vec<usize>| {
+            let mut values: Vec<_> = positions
+                .into_iter()
+                .map(|position| symbols[position].fingerprint)
+                .collect();
+            values.sort();
+            values.dedup();
+            values
+        };
+        archive.entry_points = fingerprints(self.entry_points);
+        archive.indirect_references = fingerprints(self.indirect_references);
+    }
 }
 
 fn archive_member_fingerprint(
@@ -659,6 +696,156 @@ mod tests {
                 &claimed[..claimed.len().min(16)]
             );
         }
+    }
+
+    fn copies(ir: &ArtifactIr) -> usize {
+        ir.symbols
+            .iter()
+            .filter(|symbol| symbol.content_fingerprint.is_some())
+            .count()
+    }
+
+    fn assert_unique_fingerprints(ir: &ArtifactIr) {
+        let distinct: BTreeSet<_> = ir.symbols.iter().map(|symbol| symbol.fingerprint).collect();
+        assert_eq!(distinct.len(), ir.symbols.len(), "{ir:#?}");
+    }
+
+    /// Two `[] -> []` functions: a start function calling a second one that
+    /// an element segment places in a table.
+    fn wasm_member_with_calls_and_roots() -> Vec<u8> {
+        let mut bytes = vec![0, b'a', b's', b'm', 1, 0, 0, 0];
+        for (id, payload) in [
+            (1_u8, &[1_u8, 0x60, 0, 0][..]),
+            (3, &[2, 0, 0]),
+            (4, &[1, 0x70, 0, 1]),
+            (8, &[0]),
+            (9, &[1, 0, 0x41, 0, 0x0b, 1, 1]),
+            (10, &[2, 4, 0, 0x10, 1, 0x0b, 3, 0, 0x01, 0x0b]),
+        ] {
+            bytes.push(id);
+            bytes.push(u8::try_from(payload.len()).unwrap());
+            bytes.extend(payload);
+        }
+        bytes
+    }
+
+    /// One ELF object holding two local functions of one name and body.
+    fn elf_member_with_copies() -> Vec<u8> {
+        let mut object =
+            WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let text = object.section_id(StandardSection::Text);
+        for scope in [
+            SymbolScope::Linkage,
+            SymbolScope::Compilation,
+            SymbolScope::Compilation,
+        ] {
+            let offset = object.append_section_data(text, &[0x90, 0xc3], 1);
+            let name: &[u8] = if scope == SymbolScope::Linkage {
+                b"entry"
+            } else {
+                b"copy"
+            };
+            object.add_symbol(Symbol {
+                name: name.to_vec(),
+                value: offset,
+                size: 2,
+                kind: SymbolKind::Text,
+                scope,
+                weak: false,
+                section: SymbolSection::Section(text),
+                flags: SymbolFlags::None,
+            });
+        }
+        object.write().expect("write ELF member")
+    }
+
+    #[test]
+    fn identical_members_get_unique_symbol_fingerprints() {
+        let member = coff_member(b"same");
+        let mut archive = b"!<arch>\n".to_vec();
+        archive.extend(archive_member("left.obj", &member));
+        archive.extend(archive_member("right.obj", &member));
+
+        let ir = ArchiveBackend.parse(&archive).expect("parse archive");
+
+        assert_eq!(ir.symbols.len(), 2, "{ir:#?}");
+        assert!(copies(&ir) >= 2, "{ir:#?}");
+        assert_eq!(
+            ir.symbols[0].content_fingerprint,
+            ir.symbols[1].content_fingerprint
+        );
+        assert_unique_fingerprints(&ir);
+        assert!(
+            ir.symbols.iter().all(|symbol| symbol.identity_by_order),
+            "{ir:#?}"
+        );
+    }
+
+    #[test]
+    fn a_member_level_copy_keeps_its_content_in_the_archive_key_space() {
+        let member = elf_member_with_copies();
+        let alone = ElfBackend.parse(&member).expect("parse the object alone");
+        let mut archive = b"!<arch>\n".to_vec();
+        archive.extend(archive_member("copies.o", &member));
+
+        let ir = ArchiveBackend.parse(&archive).expect("parse archive");
+
+        assert!(copies(&alone) >= 2, "{alone:#?}");
+        let member_fingerprint = ir.archive_members[0].fingerprint;
+        assert_eq!(ir.symbols.len(), alone.symbols.len(), "{ir:#?}");
+        for (merged, original) in ir.symbols.iter().zip(&alone.symbols) {
+            let wrap =
+                |child| archive_member_fingerprint("archive-symbol", member_fingerprint, child);
+            assert_eq!(merged.fingerprint, wrap(original.fingerprint));
+            assert_eq!(
+                merged.content_fingerprint,
+                original.content_fingerprint.map(wrap)
+            );
+            assert_eq!(merged.identity_by_order, original.identity_by_order);
+        }
+        assert_unique_fingerprints(&ir);
+    }
+
+    #[test]
+    fn calls_and_roots_of_identical_members_land_on_merged_symbols() {
+        let member = wasm_member_with_calls_and_roots();
+        let alone = WasmBackend.parse(&member).expect("parse the module alone");
+        assert_eq!(alone.calls.len(), 1, "{alone:#?}");
+        assert_eq!(alone.entry_points.len(), 1, "{alone:#?}");
+        assert_eq!(alone.indirect_references.len(), 1, "{alone:#?}");
+        let mut archive = b"!<arch>\n".to_vec();
+        archive.extend(archive_member("left.wasm", &member));
+        archive.extend(archive_member("right.wasm", &member));
+
+        let ir = ArchiveBackend.parse(&archive).expect("parse archive");
+
+        assert_eq!(ir.symbols.len(), 4, "{ir:#?}");
+        assert!(copies(&ir) >= 2, "{ir:#?}");
+        assert_unique_fingerprints(&ir);
+        let symbols: BTreeSet<_> = ir.symbols.iter().map(|symbol| symbol.fingerprint).collect();
+        assert_eq!(ir.calls.len(), 2, "{ir:#?}");
+        assert!(ir.calls.iter().all(|call| {
+            symbols.contains(&call.caller)
+                && call.target.is_some_and(|target| symbols.contains(&target))
+                && call.unresolved.is_none()
+        }));
+        assert_eq!(ir.entry_points.len(), 2, "{ir:#?}");
+        assert_eq!(ir.indirect_references.len(), 2, "{ir:#?}");
+        assert!(
+            ir.entry_points
+                .iter()
+                .chain(&ir.indirect_references)
+                .all(|root| symbols.contains(root))
+        );
+        let dead = crate::metrics::CallGraph::from_ir(&ir)
+            .dead_code_candidates()
+            .expect("the start functions establish roots");
+        assert!(
+            !dead.assumptions.iter().any(|assumption| {
+                assumption.contains("matches no symbol") || assumption.contains("share one")
+            }),
+            "{dead:#?}"
+        );
     }
 
     /// Changed member bytes still travel member iteration and delegation.
