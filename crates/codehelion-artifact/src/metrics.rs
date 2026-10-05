@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::ArtifactIr;
 
 pub use callgraph::{
-    CallGraph, DeadCodeReport, LocalDispatch, RetainedSize, dead_code_candidates, local_dispatch,
-    retained_sizes,
+    CallGraph, DeadCodeReport, HeldHead, LocalDispatch, RetainedSize, SharedToolchain,
+    ToolchainHolding, ToolchainHoldings, dead_code_candidates, local_dispatch, retained_sizes,
 };
 pub use duplicates::{
     DEFAULT_MIN_DUPLICATE_DATA_BYTES, DuplicateGroup, DuplicateMember, DuplicateReport,

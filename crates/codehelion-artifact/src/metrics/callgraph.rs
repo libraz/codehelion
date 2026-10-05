@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use super::duplicates::{DuplicateGroup, DuplicateReport};
 use super::{EvidenceConfidence, SizeClassification};
+use crate::ownership::{
+    GLOBAL_KEY, OwnDeclaration, Ownership, is_main_spelling, is_static_initializer_spelling,
+    owner_of, strips_platform_underscore,
+};
 use crate::{ArtifactFingerprint, ArtifactFormat, ArtifactIr, UnresolvedCall};
 
 /// Maximum independent root closures considered for shared-dependency bytes.
@@ -19,6 +23,13 @@ use crate::{ArtifactFingerprint, ArtifactFormat, ArtifactIr, UnresolvedCall};
 /// limit withdraws that one value: retained sizes are a single traversal from
 /// the joined root set and do not depend on how many roots there are.
 const MAX_SHARED_DEPENDENCY_ROOTS: usize = 1024;
+
+/// Stated with every holdings answer, because absorption moves code that is
+/// not named as toolchain code into the held totals.
+const ABSORPTION_ASSUMPTION: &str = "unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers";
+
+/// Stated when indirect dispatch is bounded by the recorded references.
+const RECORDED_ROOTS_ASSUMPTION: &str = "toolchain holders treat every recorded function reference as a root, so code reached through a function table is reported as shared";
 
 /// Reachability result derived only from resolved local call edges.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +50,68 @@ pub struct RetainedSize {
     pub symbol: ArtifactFingerprint,
     /// Sum of observed code sizes in its dominated region.
     pub retained_bytes: u64,
+}
+
+/// Toolchain code attributed to the non-toolchain functions that hold it.
+///
+/// Held bytes lie inside the holder's dominator region, so they are retained
+/// bytes, never a guaranteed reduction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolchainHoldings {
+    /// Holders with at least one held symbol, by held bytes descending.
+    pub holdings: Vec<ToolchainHolding>,
+    /// Toolchain entries no single non-toolchain function dominates.
+    pub shared: Vec<SharedToolchain>,
+    /// Bytes of every shared toolchain symbol.
+    pub shared_bytes: u64,
+    /// Number of shared toolchain symbols.
+    pub shared_symbols: usize,
+    /// Part of `shared_bytes` counted as toolchain only by absorption.
+    pub shared_absorbed_bytes: u64,
+    /// Part of `shared_symbols` counted as toolchain only by absorption.
+    pub shared_absorbed_symbols: usize,
+    /// How the attribution was made.
+    pub assumptions: Vec<String>,
+}
+
+/// Toolchain code whose nearest non-toolchain dominator is one function.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolchainHolding {
+    /// The non-toolchain function holding the code.
+    pub holder: ArtifactFingerprint,
+    /// Bytes of the held toolchain symbols.
+    pub held_bytes: u64,
+    /// Number of held toolchain symbols.
+    pub held_symbols: usize,
+    /// Part of `held_bytes` counted as toolchain only by absorption.
+    pub absorbed_bytes: u64,
+    /// Part of `held_symbols` counted as toolchain only by absorption.
+    pub absorbed_symbols: usize,
+    /// Toolchain entries the holder immediately dominates, by held bytes
+    /// descending.
+    pub heads: Vec<HeldHead>,
+}
+
+/// One toolchain entry directly below a holder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldHead {
+    /// The entry symbol.
+    pub symbol: ArtifactFingerprint,
+    /// Bytes of the held symbols entered through it.
+    pub held_bytes: u64,
+}
+
+/// One toolchain entry dominated only by the joined root set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedToolchain {
+    /// The entry symbol.
+    pub head: ArtifactFingerprint,
+    /// Bytes of the shared symbols entered through it.
+    pub held_bytes: u64,
+    /// Whether the entry is itself a root.
+    pub root: bool,
+    /// Reachable symbols calling the entry directly, ascending.
+    pub callers: Vec<ArtifactFingerprint>,
 }
 
 /// Find symbols not reachable from parser-established exports.
@@ -175,6 +248,49 @@ impl GraphObservation {
                 "retained and shared dependency sizes need every call endpoint to match a symbol",
             ),
         }
+    }
+}
+
+/// Immediate dominators of the reachable symbols below a virtual root.
+struct DominatorTree {
+    /// Reachable symbols; vertex `index + 1` is `symbols[index]` and vertex 0
+    /// is the virtual root.
+    symbols: Vec<ArtifactFingerprint>,
+    /// Vertices in DFS preorder, starting with the virtual root.
+    dfs_vertices: Vec<usize>,
+    /// Immediate dominator of each DFS position, as a DFS position. A
+    /// dominator always precedes the positions it dominates.
+    immediate: Vec<Option<usize>>,
+}
+
+impl DominatorTree {
+    /// The symbol at DFS position `position`, which must not be the root.
+    fn symbol_at(&self, position: usize) -> ArtifactFingerprint {
+        self.symbols[self.dfs_vertices[position] - 1]
+    }
+}
+
+/// Toolchain symbols attributed to one holder or to the shared set.
+#[derive(Default)]
+struct HeldTally {
+    bytes: u64,
+    symbols: usize,
+    absorbed_bytes: u64,
+    absorbed_symbols: usize,
+    /// Held bytes per head DFS position.
+    heads: BTreeMap<usize, u64>,
+}
+
+impl HeldTally {
+    fn add(&mut self, head: usize, bytes: u64, absorbed: bool) {
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.symbols += 1;
+        if absorbed {
+            self.absorbed_bytes = self.absorbed_bytes.saturating_add(bytes);
+            self.absorbed_symbols += 1;
+        }
+        let entry = self.heads.entry(head).or_default();
+        *entry = entry.saturating_add(bytes);
     }
 }
 
@@ -481,6 +597,181 @@ impl<'a> CallGraph<'a> {
     /// not apply: this is one traversal from the joined root set.
     #[must_use]
     pub fn retained_sizes(&self) -> Option<Vec<RetainedSize>> {
+        let tree = self.dominator_tree()?;
+        let mut retained = tree
+            .dfs_vertices
+            .iter()
+            .map(|vertex| {
+                if *vertex == 0 {
+                    0
+                } else {
+                    self.sizes[&tree.symbols[*vertex - 1]]
+                }
+            })
+            .collect::<Vec<_>>();
+        for node in (1..retained.len()).rev() {
+            if let Some(parent) = tree.immediate[node] {
+                retained[parent] = retained[parent].saturating_add(retained[node]);
+            }
+        }
+        let mut result: Vec<_> = (1..tree.dfs_vertices.len())
+            .map(|position| RetainedSize {
+                symbol: tree.symbol_at(position),
+                retained_bytes: retained[position],
+            })
+            .collect();
+        result.sort_by(|left, right| {
+            right
+                .retained_bytes
+                .cmp(&left.retained_bytes)
+                .then_with(|| left.symbol.cmp(&right.symbol))
+        });
+        Some(result)
+    }
+
+    /// Attribute toolchain code to the non-toolchain functions holding it.
+    ///
+    /// A symbol is toolchain code when its name says so, or when it is an
+    /// unqualified function other than an entry or static-initializer spelling
+    /// whose immediate dominator is toolchain code. Its holder is the nearest
+    /// non-toolchain immediate dominator; with none below the virtual root it
+    /// is shared. Available exactly when [`Self::retained_sizes`] is.
+    #[must_use]
+    pub fn toolchain_holdings(&self) -> Option<ToolchainHoldings> {
+        let tree = self.dominator_tree()?;
+        // Identities are unique whenever the tree exists.
+        let names: BTreeMap<_, _> = self
+            .artifact
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.fingerprint, symbol.name.as_deref()))
+            .collect();
+        let strip = strips_platform_underscore(self.artifact);
+        let own = OwnDeclaration::default();
+        let count = tree.dfs_vertices.len();
+        let mut toolchain = vec![false; count];
+        let mut holder = vec![None; count];
+        let mut head = vec![0; count];
+        let mut holders: BTreeMap<usize, HeldTally> = BTreeMap::new();
+        let mut shared = HeldTally::default();
+        // Preorder visits every immediate dominator before what it dominates.
+        for position in 1..count {
+            let symbol = tree.symbol_at(position);
+            let name = names.get(&symbol).copied().flatten();
+            let parent = tree.immediate[position].unwrap_or(0);
+            let owner = owner_of(name, strip, &own);
+            let named_toolchain = owner.ownership == Ownership::Toolchain;
+            let absorbed = !named_toolchain
+                && parent != 0
+                && toolchain[parent]
+                && owner.key == GLOBAL_KEY
+                && name.is_some_and(|name| !is_entry_spelling(name, strip));
+            if !named_toolchain && !absorbed {
+                holder[position] = Some(position);
+                continue;
+            }
+            toolchain[position] = true;
+            holder[position] = if parent == 0 { None } else { holder[parent] };
+            head[position] = if parent == 0 || !toolchain[parent] {
+                position
+            } else {
+                head[parent]
+            };
+            let bytes = self.sizes.get(&symbol).copied().unwrap_or_default();
+            match holder[position] {
+                Some(holding) => {
+                    holders
+                        .entry(holding)
+                        .or_default()
+                        .add(head[position], bytes, absorbed);
+                }
+                None => shared.add(head[position], bytes, absorbed),
+            }
+        }
+
+        let mut holdings: Vec<_> = holders
+            .into_iter()
+            .map(|(position, tally)| ToolchainHolding {
+                holder: tree.symbol_at(position),
+                held_bytes: tally.bytes,
+                held_symbols: tally.symbols,
+                absorbed_bytes: tally.absorbed_bytes,
+                absorbed_symbols: tally.absorbed_symbols,
+                heads: sorted_by_bytes(
+                    tally
+                        .heads
+                        .into_iter()
+                        .map(|(head, held_bytes)| HeldHead {
+                            symbol: tree.symbol_at(head),
+                            held_bytes,
+                        })
+                        .collect(),
+                    |head| (head.held_bytes, head.symbol),
+                ),
+            })
+            .collect();
+        holdings = sorted_by_bytes(holdings, |holding| (holding.held_bytes, holding.holder));
+
+        let mut assumptions = vec![ABSORPTION_ASSUMPTION.to_owned()];
+        if self
+            .observations
+            .contains(&GraphObservation::DispatchThroughRecordedRoots)
+        {
+            assumptions.push(RECORDED_ROOTS_ASSUMPTION.to_owned());
+        }
+        Some(ToolchainHoldings {
+            holdings,
+            shared: self.shared_toolchain(&tree, &shared.heads),
+            shared_bytes: shared.bytes,
+            shared_symbols: shared.symbols,
+            shared_absorbed_bytes: shared.absorbed_bytes,
+            shared_absorbed_symbols: shared.absorbed_symbols,
+            assumptions,
+        })
+    }
+
+    /// Shared toolchain entries from held bytes per head DFS position.
+    fn shared_toolchain(
+        &self,
+        tree: &DominatorTree,
+        heads: &BTreeMap<usize, u64>,
+    ) -> Vec<SharedToolchain> {
+        let mut callers: BTreeMap<ArtifactFingerprint, BTreeSet<ArtifactFingerprint>> =
+            BTreeMap::new();
+        for (caller, targets) in &self.successors {
+            if self.reachable.contains(caller) {
+                // A recursive call does not reach the entry from outside.
+                for target in targets.iter().filter(|target| *target != caller) {
+                    callers.entry(*target).or_default().insert(*caller);
+                }
+            }
+        }
+        sorted_by_bytes(
+            heads
+                .iter()
+                .map(|(head, held_bytes)| {
+                    let symbol = tree.symbol_at(*head);
+                    SharedToolchain {
+                        head: symbol,
+                        held_bytes: *held_bytes,
+                        root: self.roots.contains(&symbol),
+                        callers: callers
+                            .remove(&symbol)
+                            .map(|callers| callers.into_iter().collect())
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect(),
+            |entry| (entry.held_bytes, entry.head),
+        )
+    }
+
+    /// Immediate dominators of every reachable symbol, or `None` when the
+    /// graph cannot carry reachability-derived sizes.
+    ///
+    /// The tree is derived with Lengauer--Tarjan below a virtual root that
+    /// joins the parser-established roots.
+    fn dominator_tree(&self) -> Option<DominatorTree> {
         if !self.size_unavailability().is_empty() {
             return None;
         }
@@ -521,38 +812,35 @@ impl<'a> CallGraph<'a> {
             }
         }
         let immediate = lengauer_tarjan(&predecessors, &parents);
-        let mut retained = dfs_vertices
-            .iter()
-            .map(|vertex| {
-                if *vertex == 0 {
-                    0
-                } else {
-                    graph.sizes[&symbols[*vertex - 1]]
-                }
-            })
-            .collect::<Vec<_>>();
-        for node in (1..retained.len()).rev() {
-            if let Some(parent) = immediate[node] {
-                retained[parent] = retained[parent].saturating_add(retained[node]);
-            }
-        }
-        let mut result: Vec<_> = dfs_vertices
-            .iter()
-            .enumerate()
-            .skip(1)
-            .map(|(position, vertex)| RetainedSize {
-                symbol: symbols[*vertex - 1],
-                retained_bytes: retained[position],
-            })
-            .collect();
-        result.sort_by(|left, right| {
-            right
-                .retained_bytes
-                .cmp(&left.retained_bytes)
-                .then_with(|| left.symbol.cmp(&right.symbol))
-        });
-        Some(result)
+        Some(DominatorTree {
+            symbols,
+            dfs_vertices,
+            immediate,
+        })
     }
+}
+
+/// Whether `name` is an entry or static-initializer spelling, judged after
+/// the platform underscore is removed.
+fn is_entry_spelling(name: &str, strip_platform_underscore: bool) -> bool {
+    let name = if strip_platform_underscore {
+        name.strip_prefix('_').unwrap_or(name)
+    } else {
+        name
+    };
+    is_main_spelling(name) || is_static_initializer_spelling(name)
+}
+
+/// `items` ordered by bytes descending, then fingerprint ascending.
+fn sorted_by_bytes<T>(mut items: Vec<T>, key: impl Fn(&T) -> (u64, ArtifactFingerprint)) -> Vec<T> {
+    items.sort_by(|left, right| {
+        let (left_bytes, left_symbol) = key(left);
+        let (right_bytes, right_symbol) = key(right);
+        right_bytes
+            .cmp(&left_bytes)
+            .then_with(|| left_symbol.cmp(&right_symbol))
+    });
+    items
 }
 
 /// Iterative DFS ordering and its parent relation, both in DFS indexes.
@@ -1154,5 +1442,650 @@ mod tests {
             "{:?}",
             sizes.assumptions
         );
+    }
+
+    /// A named code symbol of `size` bytes at `offset`.
+    fn named(offset: u64, size: usize, name: Option<&str>) -> crate::ArtifactSymbol {
+        let mut named = symbol(offset, &vec![0; size], None);
+        named.name = name.map(str::to_owned);
+        named
+    }
+
+    fn call(caller: &crate::ArtifactSymbol, target: &crate::ArtifactSymbol) -> crate::ArtifactCall {
+        crate::ArtifactCall {
+            caller: caller.fingerprint,
+            target: Some(target.fingerprint),
+            unresolved: None,
+        }
+    }
+
+    /// A WASM artifact over `symbols` with the first one exported.
+    fn graph_of(symbols: &[&crate::ArtifactSymbol], calls: Vec<crate::ArtifactCall>) -> ArtifactIr {
+        let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+        artifact.symbols = symbols.iter().map(|symbol| (*symbol).clone()).collect();
+        artifact.symbols[0].exported = true;
+        artifact.capabilities.call_graph = true;
+        artifact.calls = calls;
+        artifact
+    }
+
+    fn holdings_of(artifact: &ArtifactIr) -> ToolchainHoldings {
+        CallGraph::from_ir(artifact).toolchain_holdings().unwrap()
+    }
+
+    #[test]
+    fn a_toolchain_chain_is_held_by_its_nearest_non_toolchain_dominator() {
+        let parse = named(1, 1, Some("my::parse"));
+        let strtof = named(2, 2, Some("strtof"));
+        let addtf3 = named(3, 4, Some("__addtf3"));
+        let artifact = graph_of(
+            &[&parse, &strtof, &addtf3],
+            vec![call(&parse, &strtof), call(&strtof, &addtf3)],
+        );
+
+        let holdings = holdings_of(&artifact);
+
+        assert_eq!(
+            holdings.holdings,
+            vec![ToolchainHolding {
+                holder: parse.fingerprint,
+                held_bytes: 6,
+                held_symbols: 2,
+                absorbed_bytes: 0,
+                absorbed_symbols: 0,
+                heads: vec![HeldHead {
+                    symbol: strtof.fingerprint,
+                    held_bytes: 6,
+                }],
+            }]
+        );
+        assert!(holdings.shared.is_empty(), "{:?}", holdings.shared);
+        assert_eq!(holdings.shared_bytes, 0);
+        assert_eq!(
+            holdings.assumptions,
+            vec![
+                "unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers"
+                    .to_owned()
+            ]
+        );
+    }
+
+    /// A function without a name may be the real holder, so the search stops
+    /// there instead of passing through it.
+    #[test]
+    fn an_unnamed_function_stops_the_search_for_a_holder() {
+        let entry = named(1, 1, Some("my::entry"));
+        let strtof = named(2, 2, Some("strtof"));
+        let unnamed = named(3, 3, None);
+        let addtf3 = named(4, 4, Some("__addtf3"));
+        let artifact = graph_of(
+            &[&entry, &strtof, &unnamed, &addtf3],
+            vec![
+                call(&entry, &strtof),
+                call(&strtof, &unnamed),
+                call(&unnamed, &addtf3),
+            ],
+        );
+
+        let holdings = holdings_of(&artifact);
+
+        let holders: Vec<_> = holdings
+            .holdings
+            .iter()
+            .map(|holding| (holding.holder, holding.held_bytes, holding.held_symbols))
+            .collect();
+        assert_eq!(
+            holders,
+            vec![(unnamed.fingerprint, 4, 1), (entry.fingerprint, 2, 1)]
+        );
+    }
+
+    #[test]
+    fn toolchain_code_reached_from_two_callers_is_shared_with_both_callers() {
+        let left = named(1, 1, Some("my::left"));
+        let right = named(2, 1, Some("my::right"));
+        let strtof = named(3, 2, Some("strtof"));
+        let scanexp = named(4, 3, Some("scanexp"));
+        let mut artifact = graph_of(
+            &[&left, &right, &strtof, &scanexp],
+            vec![
+                call(&left, &strtof),
+                call(&right, &strtof),
+                call(&strtof, &scanexp),
+            ],
+        );
+        artifact.symbols[1].exported = true;
+
+        let holdings = holdings_of(&artifact);
+
+        assert!(holdings.holdings.is_empty(), "{:?}", holdings.holdings);
+        let mut callers = vec![left.fingerprint, right.fingerprint];
+        callers.sort();
+        assert_eq!(
+            holdings.shared,
+            vec![SharedToolchain {
+                head: strtof.fingerprint,
+                held_bytes: 5,
+                root: false,
+                callers,
+            }]
+        );
+        assert_eq!(holdings.shared_bytes, 5);
+        assert_eq!(holdings.shared_symbols, 2);
+        assert_eq!(holdings.shared_absorbed_bytes, 3);
+        assert_eq!(holdings.shared_absorbed_symbols, 1);
+    }
+
+    #[test]
+    fn an_exported_toolchain_function_is_a_shared_root() {
+        let strtof = named(1, 2, Some("strtof"));
+        let addtf3 = named(2, 4, Some("__addtf3"));
+        let artifact = graph_of(&[&strtof, &addtf3], vec![call(&strtof, &addtf3)]);
+
+        let holdings = holdings_of(&artifact);
+
+        assert!(holdings.holdings.is_empty(), "{:?}", holdings.holdings);
+        assert_eq!(
+            holdings.shared,
+            vec![SharedToolchain {
+                head: strtof.fingerprint,
+                held_bytes: 6,
+                root: true,
+                callers: Vec::new(),
+            }]
+        );
+        assert_eq!((holdings.shared_bytes, holdings.shared_symbols), (6, 2));
+    }
+
+    /// A recursive call is not a caller from outside the entry.
+    #[test]
+    fn a_self_recursive_shared_head_is_not_its_own_caller() {
+        let left = named(1, 1, Some("my::left"));
+        let right = named(2, 1, Some("my::right"));
+        let strtof = named(3, 2, Some("strtof"));
+        let mut artifact = graph_of(
+            &[&left, &right, &strtof],
+            vec![
+                call(&left, &strtof),
+                call(&right, &strtof),
+                call(&strtof, &strtof),
+            ],
+        );
+        artifact.symbols[1].exported = true;
+
+        let holdings = holdings_of(&artifact);
+
+        let mut callers = vec![left.fingerprint, right.fingerprint];
+        callers.sort();
+        assert_eq!(holdings.shared.len(), 1);
+        assert_eq!(holdings.shared[0].head, strtof.fingerprint);
+        assert_eq!(holdings.shared[0].callers, callers);
+    }
+
+    /// A qualified function is never absorbed, so it holds what it dominates
+    /// even when toolchain code calls it.
+    #[test]
+    fn a_named_function_between_toolchain_calls_holds_what_it_dominates() {
+        let entry = named(1, 1, Some("my::entry"));
+        let qsort = named(2, 2, Some("qsort"));
+        let compare = named(3, 3, Some("my::compare"));
+        let memcmp = named(4, 4, Some("memcmp"));
+        let artifact = graph_of(
+            &[&entry, &qsort, &compare, &memcmp],
+            vec![
+                call(&entry, &qsort),
+                call(&qsort, &compare),
+                call(&compare, &memcmp),
+            ],
+        );
+
+        let holdings = holdings_of(&artifact);
+
+        let holders: Vec<_> = holdings
+            .holdings
+            .iter()
+            .map(|holding| (holding.holder, holding.held_bytes, holding.absorbed_symbols))
+            .collect();
+        assert_eq!(
+            holders,
+            vec![(compare.fingerprint, 4, 0), (entry.fingerprint, 2, 0)]
+        );
+    }
+
+    /// Entry and static-initializer spellings are always called from runtime
+    /// code, so absorbing them would hide every program's own entry.
+    #[test]
+    fn entry_and_static_initializer_spellings_are_never_absorbed() {
+        for spelling in [
+            "main",
+            "__original_main",
+            "__main_argc_argv",
+            "_GLOBAL__I_a",
+        ] {
+            let start = named(1, 1, Some("_start"));
+            let entry = named(2, 2, Some(spelling));
+            let printf = named(3, 3, Some("iprintf"));
+            let artifact = graph_of(
+                &[&start, &entry, &printf],
+                vec![call(&start, &entry), call(&entry, &printf)],
+            );
+
+            let holdings = holdings_of(&artifact);
+
+            assert_eq!(
+                holdings.holdings,
+                vec![ToolchainHolding {
+                    holder: entry.fingerprint,
+                    held_bytes: 3,
+                    held_symbols: 1,
+                    absorbed_bytes: 0,
+                    absorbed_symbols: 0,
+                    heads: vec![HeldHead {
+                        symbol: printf.fingerprint,
+                        held_bytes: 3,
+                    }],
+                }],
+                "{spelling}"
+            );
+            assert_eq!(holdings.shared_bytes, 1, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_holder_without_toolchain_code_is_omitted() {
+        let entry = named(1, 1, Some("my::entry"));
+        let helper = named(2, 2, Some("helper"));
+        let artifact = graph_of(&[&entry, &helper], vec![call(&entry, &helper)]);
+
+        let holdings = holdings_of(&artifact);
+
+        assert!(holdings.holdings.is_empty(), "{:?}", holdings.holdings);
+        assert!(holdings.shared.is_empty(), "{:?}", holdings.shared);
+    }
+
+    #[test]
+    fn recorded_function_references_add_the_shared_root_note() {
+        let entry = named(1, 1, Some("my::entry"));
+        let dispatched = named(2, 2, Some("strtof"));
+        let mut artifact = graph_of(&[&entry, &dispatched], Vec::new());
+        artifact.indirect_references = vec![dispatched.fingerprint];
+        artifact.calls = vec![crate::ArtifactCall {
+            caller: entry.fingerprint,
+            target: None,
+            unresolved: Some(UnresolvedCall::IndirectTable),
+        }];
+
+        let holdings = holdings_of(&artifact);
+
+        assert_eq!(
+            holdings.assumptions,
+            vec![
+                "unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers"
+                    .to_owned(),
+                "toolchain holders treat every recorded function reference as a root, so code reached through a function table is reported as shared"
+                    .to_owned(),
+            ]
+        );
+        assert_eq!(holdings.shared.len(), 1);
+        assert!(holdings.shared[0].root);
+    }
+
+    #[test]
+    fn toolchain_holdings_are_unavailable_exactly_when_retained_sizes_are() {
+        let reasons = [
+            None,
+            Some(UnresolvedCall::IndirectTable),
+            Some(UnresolvedCall::ExternalImport),
+            Some(UnresolvedCall::NativeIndirect),
+            Some(UnresolvedCall::MissingRelocation),
+        ];
+        for format in [ArtifactFormat::Wasm, ArtifactFormat::Elf] {
+            for reason in reasons {
+                let mut artifact = ArtifactIr::empty(format, b"input");
+                let entry = named(1, 1, Some("my::entry"));
+                artifact.symbols = vec![entry.clone(), named(2, 2, Some("strtof"))];
+                artifact.symbols[0].exported = true;
+                artifact.capabilities.call_graph = true;
+                artifact.calls = vec![crate::ArtifactCall {
+                    caller: entry.fingerprint,
+                    target: None,
+                    unresolved: reason,
+                }];
+                let graph = CallGraph::from_ir(&artifact);
+
+                assert_eq!(
+                    graph.toolchain_holdings().is_some(),
+                    graph.retained_sizes().is_some(),
+                    "{format} {reason:?}"
+                );
+            }
+        }
+        let mut artifact = graph_of(&[&named(1, 1, Some("strtof"))], Vec::new());
+        artifact.capabilities.call_graph = false;
+        assert!(CallGraph::from_ir(&artifact).toolchain_holdings().is_none());
+    }
+
+    /// The bytes a parsed module records flow through to the holder: an
+    /// unqualified libc static reached only through `strtof` is absorbed, and
+    /// the compiler-rt call under it stays with the same holder and head.
+    #[test]
+    fn a_parsed_wasm_toolchain_chain_is_held_by_its_caller() {
+        use crate::ArtifactBackend;
+        let mut module = vec![0, 97, 115, 109, 1, 0, 0, 0];
+        module.extend([1, 4, 1, 0x60, 0, 0]);
+        module.extend([3, 5, 4, 0, 0, 0, 0]);
+        module.extend([7, 9, 1, 5, b'p', b'a', b'r', b's', b'e', 0, 0]);
+        module.extend([
+            10, 19, 4, 4, 0, 0x10, 1, 0x0b, 4, 0, 0x10, 2, 0x0b, 4, 0, 0x10, 3, 0x0b, 2, 0, 0x0b,
+        ]);
+        let mut names = vec![4, 0, 5];
+        names.extend(b"parse");
+        names.extend([1, 6]);
+        names.extend(b"strtof");
+        names.extend([2, 6]);
+        names.extend(b"strtox");
+        names.extend([3, 8]);
+        names.extend(b"__addtf3");
+        let mut custom = vec![4];
+        custom.extend(b"name");
+        custom.extend([1, u8::try_from(names.len()).unwrap()]);
+        custom.extend(names);
+        module.extend([0, u8::try_from(custom.len()).unwrap()]);
+        module.extend(custom);
+        let artifact = crate::wasm::WasmBackend.parse(&module).unwrap();
+        let by_name = |name: &str| {
+            artifact
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name.as_deref() == Some(name))
+                .unwrap()
+        };
+        let size = |name: &str| by_name(name).size;
+        let held = size("strtof") + size("strtox") + size("__addtf3");
+
+        let holdings = holdings_of(&artifact);
+
+        assert_eq!(
+            holdings.holdings,
+            vec![ToolchainHolding {
+                holder: by_name("parse").fingerprint,
+                held_bytes: held,
+                held_symbols: 3,
+                absorbed_bytes: size("strtox"),
+                absorbed_symbols: 1,
+                heads: vec![HeldHead {
+                    symbol: by_name("strtof").fingerprint,
+                    held_bytes: held,
+                }],
+            }]
+        );
+        assert_eq!(holdings.shared_bytes, 0);
+        assert!(holdings.shared.is_empty(), "{:?}", holdings.shared);
+    }
+
+    /// Deterministic linear congruential generator, so a failure replays.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, bound: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 33) % bound
+        }
+    }
+
+    /// Holdings recomputed from set-based dominance: `Dom(v)` is iterated to
+    /// a fixpoint over the reachable predecessors, and holder, head and
+    /// absorption are read off the immediate-dominator chain.
+    #[allow(clippy::too_many_lines)] // One self-contained reference computation.
+    fn holdings_from_dominator_sets(artifact: &ArtifactIr) -> ToolchainHoldings {
+        use crate::ownership::{
+            GLOBAL_KEY, OwnDeclaration, Ownership, is_main_spelling,
+            is_static_initializer_spelling, owner_of,
+        };
+        let count = artifact.symbols.len() + 1;
+        let mut successors = vec![Vec::new(); count];
+        for (position, symbol) in artifact.symbols.iter().enumerate() {
+            if symbol.exported {
+                successors[0].push(position + 1);
+            }
+        }
+        let position_of = |fingerprint: ArtifactFingerprint| {
+            artifact
+                .symbols
+                .iter()
+                .position(|symbol| symbol.fingerprint == fingerprint)
+                .unwrap()
+                + 1
+        };
+        for call in &artifact.calls {
+            successors[position_of(call.caller)].push(position_of(call.target.unwrap()));
+        }
+        let mut reachable = vec![false; count];
+        reachable[0] = true;
+        let mut pending = vec![0];
+        while let Some(vertex) = pending.pop() {
+            for target in &successors[vertex] {
+                if !reachable[*target] {
+                    reachable[*target] = true;
+                    pending.push(*target);
+                }
+            }
+        }
+        let mut predecessors = vec![BTreeSet::new(); count];
+        for (vertex, targets) in successors.iter().enumerate() {
+            if reachable[vertex] {
+                for target in targets {
+                    predecessors[*target].insert(vertex);
+                }
+            }
+        }
+        let live: Vec<_> = (0..count).filter(|vertex| reachable[*vertex]).collect();
+        let every: BTreeSet<_> = live.iter().copied().collect();
+        let mut dominators = vec![every; count];
+        dominators[0] = BTreeSet::from([0]);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for vertex in live.iter().copied().skip(1) {
+                let mut next = predecessors[vertex]
+                    .iter()
+                    .map(|predecessor| dominators[*predecessor].clone())
+                    .reduce(|left, right| &left & &right)
+                    .unwrap();
+                next.insert(vertex);
+                if next != dominators[vertex] {
+                    dominators[vertex] = next;
+                    changed = true;
+                }
+            }
+        }
+        let immediate = |vertex: usize| {
+            dominators[vertex]
+                .iter()
+                .copied()
+                .filter(|dominator| *dominator != vertex)
+                .max_by_key(|dominator| dominators[*dominator].len())
+                .unwrap()
+        };
+        let mut by_depth: Vec<_> = live.iter().copied().skip(1).collect();
+        by_depth.sort_by_key(|vertex| dominators[*vertex].len());
+        let mut toolchain = vec![false; count];
+        let mut absorbed = vec![false; count];
+        for vertex in by_depth.iter().copied() {
+            let name = artifact.symbols[vertex - 1].name.as_deref();
+            let owner = owner_of(name, false, &OwnDeclaration::default());
+            let parent = immediate(vertex);
+            if owner.ownership == Ownership::Toolchain {
+                toolchain[vertex] = true;
+            } else if owner.key == GLOBAL_KEY
+                && name.is_some_and(|name| {
+                    !is_main_spelling(name) && !is_static_initializer_spelling(name)
+                })
+                && parent != 0
+                && toolchain[parent]
+            {
+                toolchain[vertex] = true;
+                absorbed[vertex] = true;
+            }
+        }
+        let fingerprint = |vertex: usize| artifact.symbols[vertex - 1].fingerprint;
+        let size = |vertex: usize| artifact.symbols[vertex - 1].size;
+        let mut holdings: BTreeMap<usize, ToolchainHolding> = BTreeMap::new();
+        let mut shared: BTreeMap<usize, u64> = BTreeMap::new();
+        let mut result = ToolchainHoldings {
+            holdings: Vec::new(),
+            shared: Vec::new(),
+            shared_bytes: 0,
+            shared_symbols: 0,
+            shared_absorbed_bytes: 0,
+            shared_absorbed_symbols: 0,
+            assumptions: vec![
+                "unqualified functions reached only through toolchain code are counted as toolchain code, except main and static initializers"
+                    .to_owned(),
+            ],
+        };
+        for vertex in by_depth.iter().copied().filter(|vertex| toolchain[*vertex]) {
+            let mut head = vertex;
+            while immediate(head) != 0 && toolchain[immediate(head)] {
+                head = immediate(head);
+            }
+            let holder = immediate(head);
+            if holder == 0 {
+                *shared.entry(head).or_default() += size(vertex);
+                result.shared_bytes += size(vertex);
+                result.shared_symbols += 1;
+                if absorbed[vertex] {
+                    result.shared_absorbed_bytes += size(vertex);
+                    result.shared_absorbed_symbols += 1;
+                }
+                continue;
+            }
+            let holding = holdings.entry(holder).or_insert_with(|| ToolchainHolding {
+                holder: fingerprint(holder),
+                held_bytes: 0,
+                held_symbols: 0,
+                absorbed_bytes: 0,
+                absorbed_symbols: 0,
+                heads: Vec::new(),
+            });
+            holding.held_bytes += size(vertex);
+            holding.held_symbols += 1;
+            if absorbed[vertex] {
+                holding.absorbed_bytes += size(vertex);
+                holding.absorbed_symbols += 1;
+            }
+            match holding
+                .heads
+                .iter_mut()
+                .find(|entry| entry.symbol == fingerprint(head))
+            {
+                Some(entry) => entry.held_bytes += size(vertex),
+                None => holding.heads.push(HeldHead {
+                    symbol: fingerprint(head),
+                    held_bytes: size(vertex),
+                }),
+            }
+        }
+        result.holdings = holdings.into_values().collect();
+        for holding in &mut result.holdings {
+            holding.heads.sort_by(|left, right| {
+                (right.held_bytes, left.symbol).cmp(&(left.held_bytes, right.symbol))
+            });
+        }
+        result.holdings.sort_by(|left, right| {
+            (right.held_bytes, left.holder).cmp(&(left.held_bytes, right.holder))
+        });
+        result.shared = shared
+            .into_iter()
+            .map(|(head, held_bytes)| {
+                let mut callers: Vec<_> = live
+                    .iter()
+                    .copied()
+                    .skip(1)
+                    .filter(|caller| *caller != head && successors[*caller].contains(&head))
+                    .map(fingerprint)
+                    .collect();
+                callers.sort();
+                callers.dedup();
+                SharedToolchain {
+                    head: fingerprint(head),
+                    held_bytes,
+                    root: artifact.symbols[head - 1].exported,
+                    callers,
+                }
+            })
+            .collect();
+        result.shared.sort_by(|left, right| {
+            (right.held_bytes, left.head).cmp(&(left.held_bytes, right.head))
+        });
+        result
+    }
+
+    #[test]
+    fn holders_match_set_based_dominance_on_random_graphs() {
+        const GRAPHS: usize = 200;
+        let labels: [&[Option<&str>]; 5] = [
+            &[Some("strtof"), Some("__addtf3"), Some("memcpy")],
+            &[Some("scanexp"), Some("helper")],
+            &[Some("main"), Some("__original_main"), Some("_GLOBAL__I_a")],
+            &[Some("my::parse"), Some("my::Widget::draw")],
+            &[None],
+        ];
+        let mut random = Lcg(0x5eed_c0de);
+        let mut label_uses = [0usize; 5];
+        let mut absorbed = 0;
+        for graph in 0..GRAPHS {
+            let nodes = 1 + random.below(12);
+            let mut artifact = ArtifactIr::empty(ArtifactFormat::Wasm, b"input");
+            artifact.capabilities.call_graph = true;
+            for offset in 0..nodes {
+                let label = usize::try_from(random.below(5)).unwrap();
+                label_uses[label] += 1;
+                let spellings = labels[label];
+                let spelling =
+                    spellings[usize::try_from(random.below(spellings.len() as u64)).unwrap()];
+                let size = usize::try_from(1 + random.below(4)).unwrap();
+                let mut symbol = named(offset, size, spelling);
+                symbol.exported = offset == 0 || random.below(4) == 0;
+                artifact.symbols.push(symbol);
+            }
+            for caller in 0..artifact.symbols.len() {
+                for target in 0..artifact.symbols.len() {
+                    if random.below(4) == 0 {
+                        artifact
+                            .calls
+                            .push(call(&artifact.symbols[caller], &artifact.symbols[target]));
+                    }
+                }
+            }
+
+            let actual = CallGraph::from_ir(&artifact)
+                .toolchain_holdings()
+                .unwrap_or_else(|| panic!("graph {graph} has no holdings"));
+
+            assert_eq!(
+                actual,
+                holdings_from_dominator_sets(&artifact),
+                "graph {graph}"
+            );
+            for holding in &actual.holdings {
+                let heads: u64 = holding.heads.iter().map(|head| head.held_bytes).sum();
+                assert_eq!(holding.held_bytes, heads, "graph {graph}");
+                assert!(holding.held_symbols > 0, "graph {graph}");
+            }
+            let shared: u64 = actual.shared.iter().map(|head| head.held_bytes).sum();
+            assert_eq!(actual.shared_bytes, shared, "graph {graph}");
+            absorbed += actual.shared_absorbed_symbols
+                + actual
+                    .holdings
+                    .iter()
+                    .map(|holding| holding.absorbed_symbols)
+                    .sum::<usize>();
+        }
+        assert!(label_uses.iter().all(|uses| *uses > 0), "{label_uses:?}");
+        assert!(absorbed > 0);
     }
 }

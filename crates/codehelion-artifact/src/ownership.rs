@@ -25,7 +25,7 @@ mod toolchain;
 /// Key of a symbol that has no name.
 const UNNAMED_KEY: &str = "<unnamed>";
 /// Key of an unqualified or function-local name outside the toolchain.
-const GLOBAL_KEY: &str = "<global>";
+pub const GLOBAL_KEY: &str = "<global>";
 /// Key of a Rust inherent impl on a non-path type such as `[u8]` or `str`.
 const PRIMITIVE_IMPL_KEY: &str = "<primitive-impl>";
 /// Key of the C++ standard library and its global allocation operators.
