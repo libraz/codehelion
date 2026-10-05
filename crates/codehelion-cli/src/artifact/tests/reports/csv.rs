@@ -134,13 +134,13 @@ fn report_of_every_record_kind() -> ArtifactReport {
             locations: Vec::new(),
         },
     }];
-    report.dead_code = Some(metrics::DeadCodeReport {
-        symbols: vec![artifact.symbols[0].fingerprint],
+    report.dead_code = Some(DeadCodeReport {
+        symbols: vec![artifact.symbols[0].fingerprint.to_hex()],
         definitive: true,
         assumptions: Vec::new(),
     });
-    report.retained_sizes = Some(vec![metrics::RetainedSize {
-        symbol: artifact.symbols[0].fingerprint,
+    report.retained_sizes = Some(vec![RetainedSizeReport {
+        symbol: artifact.symbols[0].fingerprint.to_hex(),
         retained_bytes: 4,
     }]);
     report

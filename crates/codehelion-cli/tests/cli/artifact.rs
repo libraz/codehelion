@@ -196,7 +196,7 @@ fn artifact_reports_a_minimal_wasm_without_executing_it() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("artifact-report-v2"))
+        .stdout(predicate::str::contains("artifact-report-v3"))
         .stdout(predicate::str::contains("\"format\": \"wasm\""))
         .stdout(predicate::str::contains("\"analysis_id\": 1"));
     assert!(db.is_file());
@@ -352,7 +352,7 @@ fn artifact_report_rerenders_a_saved_analysis_after_its_input_is_removed() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("artifact-report-v2"))
+        .stdout(predicate::str::contains("artifact-report-v3"))
         .stdout(predicate::str::contains("\"analysis_id\": 1"))
         .stdout(predicate::str::contains("\"format\": \"wasm\""));
 }
@@ -489,7 +489,7 @@ fn artifact_accepts_an_enforced_linux_memory_ceiling() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("artifact-report-v2"));
+        .stdout(predicate::str::contains("artifact-report-v3"));
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -12,7 +12,7 @@ mod ownership;
 
 pub(super) use assumption::{
     AssumptionScope, ReportAssumption, comparison_assumptions, dead_code_unavailability,
-    qualify_sizes, report_assumptions, retained_size_unavailability,
+    qualify_sizes, report_assumptions, retained_size_unavailability, symbol_assumptions,
 };
 use codehelion_artifact::ownership::{OwnDeclaration, Ownership};
 pub(super) use columns::{ARTIFACT_CSV_HEADER, COMPARE_CSV_HEADER, column, compare_column};
@@ -49,6 +49,7 @@ pub(super) struct ArtifactReport {
     pub(super) imports: usize,
     pub(super) import_details: Vec<ImportReport>,
     pub(super) symbols: Vec<SymbolReport>,
+    pub(super) symbol_assumptions: Vec<String>,
     pub(super) entry_points: usize,
     pub(super) calls: usize,
     pub(super) relocations: usize,
@@ -60,8 +61,8 @@ pub(super) struct ArtifactReport {
     pub(super) data_segment_details: Vec<DataSegmentReport>,
     pub(super) capabilities: codehelion_artifact::ArtifactCapabilities,
     pub(super) sizes: metrics::SizeClassification,
-    pub(super) dead_code: Option<metrics::DeadCodeReport>,
-    pub(super) retained_sizes: Option<Vec<metrics::RetainedSize>>,
+    pub(super) dead_code: Option<DeadCodeReport>,
+    pub(super) retained_sizes: Option<Vec<RetainedSizeReport>>,
     pub(super) ownership: OwnershipReport,
     /// Absent under the same conditions as `retained_sizes`.
     pub(super) toolchain_holdings: Option<ToolchainHoldingsReport>,
@@ -215,6 +216,10 @@ impl ArtifactReport {
                 .zip(&owners)
                 .map(|(symbol, owner)| SymbolReport {
                     fingerprint: symbol.fingerprint.to_hex(),
+                    content_fingerprint: symbol
+                        .content_fingerprint
+                        .map(codehelion_artifact::ArtifactFingerprint::to_hex),
+                    identity_by_order: symbol.identity_by_order,
                     name: symbol.name.clone(),
                     exported: symbol.exported,
                     offset: symbol.offset,
@@ -224,6 +229,7 @@ impl ArtifactReport {
                     ownership: owner.ownership,
                 })
                 .collect(),
+            symbol_assumptions: symbol_assumptions(artifact),
             entry_points: artifact.entry_points.len(),
             calls: artifact.calls.len(),
             relocations: artifact.relocations.len(),
@@ -247,8 +253,10 @@ impl ArtifactReport {
             data_segment_details: data_segment_reports(artifact),
             capabilities: artifact.capabilities,
             sizes,
-            dead_code: graph.dead_code_candidates(),
-            retained_sizes: graph.retained_sizes(),
+            dead_code: graph.dead_code_candidates().map(DeadCodeReport::from),
+            retained_sizes: graph
+                .retained_sizes()
+                .map(|sizes| sizes.into_iter().map(RetainedSizeReport::from).collect()),
             ownership,
             toolchain_holdings,
             duplicates: DuplicateSummary {
@@ -265,11 +273,7 @@ impl ArtifactReport {
                     .map(|group| group.duplicated_bytes)
                     .sum(),
             },
-            duplicate_groups: DuplicateGroups {
-                exact: duplicates.exact,
-                normalized: duplicates.normalized,
-                data,
-            },
+            duplicate_groups: DuplicateGroups::new(&duplicates, &data),
         }
     }
 
@@ -368,6 +372,11 @@ pub(super) fn data_segment_reports(artifact: &ArtifactIr) -> Vec<DataSegmentRepo
 #[derive(Debug, Serialize)]
 pub(super) struct SymbolReport {
     pub(super) fingerprint: String,
+    /// Shared by every copy of one body; absent unless `fingerprint` had to
+    /// be made unique among them.
+    pub(super) content_fingerprint: Option<String>,
+    /// Whether `fingerprint` needed the symbol's position in the file.
+    pub(super) identity_by_order: bool,
     pub(super) name: Option<String>,
     pub(super) exported: bool,
     pub(super) offset: u64,
@@ -390,9 +399,94 @@ pub(super) struct DuplicateSummary {
 /// normalized similarity for byte-for-byte equality.
 #[derive(Debug, Serialize)]
 pub(super) struct DuplicateGroups {
-    pub(super) exact: Vec<metrics::DuplicateGroup>,
-    pub(super) normalized: Vec<metrics::DuplicateGroup>,
-    pub(super) data: Vec<metrics::DuplicateGroup>,
+    pub(super) exact: Vec<DuplicateGroupReport>,
+    pub(super) normalized: Vec<DuplicateGroupReport>,
+    pub(super) data: Vec<DuplicateGroupReport>,
+}
+
+impl DuplicateGroups {
+    fn new(duplicates: &metrics::DuplicateReport, data: &[metrics::DuplicateGroup]) -> Self {
+        let reports = |groups: &[metrics::DuplicateGroup]| {
+            groups.iter().map(DuplicateGroupReport::from).collect()
+        };
+        Self {
+            exact: reports(&duplicates.exact),
+            normalized: reports(&duplicates.normalized),
+            data: reports(data),
+        }
+    }
+}
+
+/// The reachability verdict with symbols spelled as hex fingerprints.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub(super) struct DeadCodeReport {
+    pub(super) symbols: Vec<String>,
+    pub(super) definitive: bool,
+    pub(super) assumptions: Vec<String>,
+}
+
+impl From<metrics::DeadCodeReport> for DeadCodeReport {
+    fn from(report: metrics::DeadCodeReport) -> Self {
+        Self {
+            symbols: report
+                .symbols
+                .iter()
+                .map(|symbol| symbol.to_hex())
+                .collect(),
+            definitive: report.definitive,
+            assumptions: report.assumptions,
+        }
+    }
+}
+
+/// One retained size with the symbol spelled as a hex fingerprint.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub(super) struct RetainedSizeReport {
+    pub(super) symbol: String,
+    pub(super) retained_bytes: u64,
+}
+
+impl From<metrics::RetainedSize> for RetainedSizeReport {
+    fn from(size: metrics::RetainedSize) -> Self {
+        Self {
+            symbol: size.symbol.to_hex(),
+            retained_bytes: size.retained_bytes,
+        }
+    }
+}
+
+/// One duplicate equality class with fingerprints spelled as hex.
+#[derive(Debug, Serialize)]
+pub(super) struct DuplicateGroupReport {
+    pub(super) fingerprint: String,
+    pub(super) duplicated_bytes: u64,
+    pub(super) members: Vec<DuplicateMemberReport>,
+}
+
+/// One occurrence in a [`DuplicateGroupReport`].
+#[derive(Debug, Serialize)]
+pub(super) struct DuplicateMemberReport {
+    pub(super) symbol: String,
+    pub(super) offset: u64,
+    pub(super) size: u64,
+}
+
+impl From<&metrics::DuplicateGroup> for DuplicateGroupReport {
+    fn from(group: &metrics::DuplicateGroup) -> Self {
+        Self {
+            fingerprint: group.fingerprint.to_hex(),
+            duplicated_bytes: group.duplicated_bytes,
+            members: group
+                .members
+                .iter()
+                .map(|member| DuplicateMemberReport {
+                    symbol: member.symbol.to_hex(),
+                    offset: member.offset,
+                    size: member.size,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]

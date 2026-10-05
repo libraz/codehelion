@@ -140,14 +140,14 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
         for group in groups {
             let mut row = artifact_csv_row("duplicate-group", report);
             kind.clone_into(&mut row[column::KIND]);
-            row[column::FINGERPRINT] = group.fingerprint.to_string();
+            row[column::FINGERPRINT].clone_from(&group.fingerprint);
             row[column::DUPLICATED_BYTES] = group.duplicated_bytes.to_string();
             row[column::MEMBERS] = group.members.len().to_string();
             write_artifact_csv_row(out, &row)?;
             for member in &group.members {
                 let mut row = artifact_csv_row("duplicate-member", report);
                 kind.clone_into(&mut row[column::KIND]);
-                row[column::FINGERPRINT] = member.symbol.to_string();
+                row[column::FINGERPRINT].clone_from(&member.symbol);
                 row[column::OFFSET] = member.offset.to_string();
                 row[column::SIZE] = member.size.to_string();
                 write_artifact_csv_row(out, &row)?;
@@ -162,7 +162,7 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
         };
         for symbol in &dead_code.symbols {
             let mut row = artifact_csv_row("dead-code", report);
-            row[column::FINGERPRINT] = symbol.to_string();
+            row[column::FINGERPRINT].clone_from(symbol);
             status.clone_into(&mut row[column::DEAD_CODE_STATUS]);
             write_artifact_csv_row(out, &row)?;
         }
@@ -170,7 +170,7 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
     if let Some(retained) = &report.retained_sizes {
         for item in retained {
             let mut row = artifact_csv_row("retained-size", report);
-            row[column::FINGERPRINT] = item.symbol.to_string();
+            row[column::FINGERPRINT].clone_from(&item.symbol);
             row[column::RETAINED_BYTES] = item.retained_bytes.to_string();
             write_artifact_csv_row(out, &row)?;
         }

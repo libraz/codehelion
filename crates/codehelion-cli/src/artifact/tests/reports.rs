@@ -536,8 +536,15 @@ fn one_call_graph_walk_answers_what_three_separate_walks_answered() {
                 report.sizes.assumptions
             );
         }
-        assert_eq!(report.dead_code, metrics::dead_code_candidates(&artifact));
-        assert_eq!(report.retained_sizes, metrics::retained_sizes(&artifact));
+        assert_eq!(
+            report.dead_code,
+            metrics::dead_code_candidates(&artifact).map(DeadCodeReport::from)
+        );
+        assert_eq!(
+            report.retained_sizes,
+            metrics::retained_sizes(&artifact)
+                .map(|sizes| sizes.into_iter().map(RetainedSizeReport::from).collect())
+        );
     }
 }
 

@@ -177,7 +177,7 @@ fn a_toolchain_chain_is_held_by_its_caller() {
         "{holdings}"
     );
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v3.schema.json",
         ARTIFACT_REPORT_JSON_SCHEMA,
         &json,
     );
@@ -212,7 +212,7 @@ fn a_toolchain_chain_is_held_by_its_caller() {
     assert_eq!(holding["held_symbols"], 3);
     assert_eq!(holding["absorbed_symbols"], 1);
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v3.schema.json",
         ARTIFACT_REPORT_JSON_SCHEMA,
         &json,
     );

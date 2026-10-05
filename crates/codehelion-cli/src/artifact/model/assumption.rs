@@ -1,7 +1,7 @@
 //! Statements qualifying the sizes one report and one comparison state.
 
 use super::{ArtifactComparisonReport, ArtifactReport};
-use crate::artifact::{BTreeSet, metrics};
+use crate::artifact::{ArtifactIr, BTreeSet, metrics};
 
 /// Where in a report one qualifying statement belongs.
 ///
@@ -19,6 +19,8 @@ pub(in crate::artifact) enum AssumptionScope {
     DeadCode,
     /// Qualifies the owner labels.
     Ownership,
+    /// Qualifies the symbol identities.
+    Symbols,
     /// Qualifies the toolchain holders.
     ToolchainHoldings,
     /// The build-condition warning, which the report also exposes as its own
@@ -36,6 +38,7 @@ impl AssumptionScope {
             Self::RetainedSizes => "retained_sizes",
             Self::DeadCode => "dead_code",
             Self::Ownership => "ownership",
+            Self::Symbols => "symbols",
             Self::ToolchainHoldings => "toolchain_holdings",
             Self::BuildVariant => "build_variant",
             Self::Comparison => "comparison",
@@ -57,6 +60,21 @@ pub(in crate::artifact) struct ReportAssumption<'a> {
 /// Those reasons name the condition that actually held for one artifact, so a
 /// report states them instead of asserting a single canned cause.
 const WITHDRAWN_SIZE_PREFIX: &str = "retained and shared dependency sizes need";
+
+/// What a fingerprint assigned by file order costs the reader.
+const SYMBOLS_BY_ORDER: &str = "symbols that match another symbol in content, callers and callees are told apart by their order in the file, so which copy is which can change between builds";
+
+/// The statements qualifying symbol identities, for the report's
+/// `symbol_assumptions`.
+pub(in crate::artifact) fn symbol_assumptions(artifact: &ArtifactIr) -> Vec<String> {
+    artifact
+        .symbols
+        .iter()
+        .any(|symbol| symbol.identity_by_order)
+        .then(|| SYMBOLS_BY_ORDER.to_owned())
+        .into_iter()
+        .collect()
+}
 
 /// What the upper bound leaves out, said in the categories it actually leaves
 /// out.
@@ -144,6 +162,15 @@ pub(in crate::artifact) fn report_assumptions(
             text: text.as_str(),
         }));
     }
+    assumptions.extend(
+        report
+            .symbol_assumptions
+            .iter()
+            .map(|text| ReportAssumption {
+                scope: AssumptionScope::Symbols,
+                text: text.as_str(),
+            }),
+    );
     stated_once(assumptions)
 }
 

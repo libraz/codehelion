@@ -292,3 +292,58 @@ fn a_build_variant_warning_is_stated_once_per_comparison() {
         "{csv:?}"
     );
 }
+
+/// Symbols told apart only by their order in the file make the report say so,
+/// in every rendering, and a report without such symbols says nothing of it.
+#[test]
+fn the_symbols_statement_appears_only_when_a_symbol_is_identified_by_order() {
+    const SENTENCE: &str = "symbols that match another symbol in content, callers and callees are told apart by their order in the file, so which copy is which can change between builds";
+
+    let plain = ArtifactReport::from_ir(
+        FilePath::new("fixture.wasm"),
+        &resolved_call_graph_artifact(),
+        None,
+        None,
+    );
+    assert!(
+        !report_assumptions(&plain)
+            .iter()
+            .any(|assumption| assumption.scope == AssumptionScope::Symbols)
+    );
+    assert!(!rendered_text(&plain, false).contains(SENTENCE));
+    assert_eq!(
+        serde_json::to_value(&plain).unwrap()["symbol_assumptions"],
+        serde_json::json!([])
+    );
+    assert!(
+        !artifact_csv_assumptions(&plain)
+            .iter()
+            .any(|value| value == SENTENCE)
+    );
+
+    let mut artifact = resolved_call_graph_artifact();
+    artifact.symbols[1].identity_by_order = true;
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None);
+    let stated = report_assumptions(&report);
+    assert_eq!(
+        stated
+            .iter()
+            .filter(|assumption| assumption.scope == AssumptionScope::Symbols)
+            .map(|assumption| assumption.text)
+            .collect::<Vec<_>>(),
+        [SENTENCE]
+    );
+    assert_eq!(AssumptionScope::Symbols.field(), "symbols");
+    assert_eq!(rendered_text(&report, false).matches(SENTENCE).count(), 1);
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["symbol_assumptions"], serde_json::json!([SENTENCE]));
+    assert_eq!(json["symbols"][1]["identity_by_order"], true);
+    assert_eq!(json["symbols"][0]["identity_by_order"], false);
+    assert_eq!(
+        artifact_csv_assumptions(&report)
+            .iter()
+            .filter(|value| *value == SENTENCE)
+            .count(),
+        1
+    );
+}

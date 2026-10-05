@@ -10,7 +10,7 @@ fn artifact_and_calibration_json_reports_validate_against_shipped_schemas() {
     let artifact_report =
         ArtifactReport::from_ir(std::path::Path::new("fixture.wasm"), &artifact, None, None);
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v3.schema.json",
         ARTIFACT_REPORT_JSON_SCHEMA,
         &serde_json::to_value(artifact_report).unwrap(),
     );
@@ -160,8 +160,8 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
         },
     ])
     .with_correlation(Some(populated_correlation()));
-    report.retained_sizes = Some(vec![metrics::RetainedSize {
-        symbol: artifact.symbols[0].fingerprint,
+    report.retained_sizes = Some(vec![RetainedSizeReport {
+        symbol: artifact.symbols[0].fingerprint.to_hex(),
         retained_bytes: 2,
     }]);
 
@@ -286,10 +286,68 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
         }
     }
     assert_valid_schema(
-        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v3.schema.json",
         ARTIFACT_REPORT_JSON_SCHEMA,
         &value,
     );
+}
+
+fn walk(value: &serde_json::Value, is_hex: &dyn Fn(&serde_json::Value) -> bool) {
+    match value {
+        serde_json::Value::Object(members) => {
+            for (key, member) in members {
+                if matches!(key.as_str(), "fingerprint" | "content_fingerprint") {
+                    assert!(member.is_null() || is_hex(member), "{key}: {member}");
+                }
+                walk(member, is_hex);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, is_hex)),
+        _ => {}
+    }
+}
+
+/// Every fingerprint in a report is written the same way, as 32 hex digits.
+///
+/// The metric records nested in the report used to serialize their
+/// fingerprints as byte arrays, which made one identity read two ways.
+#[test]
+fn the_schema_spells_every_fingerprint_as_hex() {
+    assert!(!ARTIFACT_REPORT_JSON_SCHEMA.contains("fingerprint_bytes"));
+
+    let mut artifact = resolved_call_graph_artifact();
+    artifact
+        .symbols
+        .push(normalizable_symbol(30, &[1, 2], &[9]));
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None);
+    let value = serde_json::to_value(&report).unwrap();
+
+    let is_hex = |value: &serde_json::Value| {
+        value.as_str().is_some_and(|text| {
+            text.len() == 32
+                && text
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    };
+    let dead = value["dead_code"]["symbols"].as_array().unwrap();
+    assert_ne!(dead.len(), 0);
+    assert!(dead.iter().all(is_hex), "{dead:?}");
+    let retained = value["retained_sizes"].as_array().unwrap();
+    assert_ne!(retained.len(), 0);
+    assert!(retained.iter().all(|item| is_hex(&item["symbol"])));
+    let groups = value["duplicate_groups"]["exact"].as_array().unwrap();
+    assert_ne!(groups.len(), 0);
+    for group in groups {
+        assert!(is_hex(&group["fingerprint"]), "{group}");
+        let members = group["members"].as_array().unwrap();
+        assert_ne!(members.len(), 0);
+        assert!(members.iter().all(|member| is_hex(&member["symbol"])));
+    }
+
+    // No fingerprint-named field anywhere in the report is anything but a
+    // hex string, or null where the schema allows it.
+    walk(&value, &is_hex);
 }
 
 /// Every field the comparison report writes is declared where it is written.

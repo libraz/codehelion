@@ -8,11 +8,11 @@ use super::{
     refactor_savings_assumption_text, stated_bytes,
 };
 use crate::artifact::model::{
-    ArtifactReport, AssumptionScope, OwnershipReport, ReportAssumption, SourceMapResolutionStatus,
-    ToolchainHoldingsReport, dead_code_unavailability, family_label, ownership_label,
-    report_assumptions, retained_size_unavailability,
+    ArtifactReport, AssumptionScope, DuplicateGroupReport, OwnershipReport, ReportAssumption,
+    SourceMapResolutionStatus, ToolchainHoldingsReport, dead_code_unavailability, family_label,
+    ownership_label, report_assumptions, retained_size_unavailability,
 };
-use crate::artifact::{Result, Write, metrics};
+use crate::artifact::{Result, Write};
 
 #[allow(clippy::too_many_lines)] // The report order is its public text contract.
 pub(in crate::artifact) fn render_text(
@@ -73,7 +73,11 @@ pub(in crate::artifact) fn render_text(
         }
     }
     writeln!(out, "imports: {}", report.imports)?;
+    // Every rendering takes its qualifying statements from one description of
+    // the report, so a reader of any one format sees the same set.
+    let assumptions = report_assumptions(report);
     writeln!(out, "symbols: {}", report.symbols.len())?;
+    render_assumptions(&assumptions, AssumptionScope::Symbols, out)?;
     writeln!(out, "entry points: {}", report.entry_points)?;
     writeln!(out, "calls: {}", report.calls)?;
     writeln!(out, "relocations: {}", report.relocations)?;
@@ -331,9 +335,6 @@ pub(in crate::artifact) fn render_text(
         "  savings_confidence: {:?}",
         report.sizes.savings_confidence
     )?;
-    // Every rendering takes its qualifying statements from one description of
-    // the report, so a reader of any one format sees the same set.
-    let assumptions = report_assumptions(report);
     render_assumptions(&assumptions, AssumptionScope::Sizes, out)?;
     if let Some(dead_code) = &report.dead_code {
         let verdict = if dead_code.definitive {
@@ -627,11 +628,7 @@ fn render_omitted(
     Ok(())
 }
 
-fn render_groups(
-    kind: &str,
-    groups: &[metrics::DuplicateGroup],
-    out: &mut impl Write,
-) -> Result<()> {
+fn render_groups(kind: &str, groups: &[DuplicateGroupReport], out: &mut impl Write) -> Result<()> {
     if groups.is_empty() {
         return Ok(());
     }

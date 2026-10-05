@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
+  "$id": "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v3.schema.json",
   "title": "codehelion artifact report",
   "description": "Machine-readable analysis of one locally read compiled artifact.",
   "type": "object",
@@ -12,6 +12,7 @@
     "architecture",
     "skipped_architectures",
     "sizes",
+    "symbol_assumptions",
     "sections",
     "section_details",
     "imports",
@@ -22,7 +23,7 @@
     "data_segment_details"
   ],
   "properties": {
-    "schema_version": { "const": "artifact-report-v2" },
+    "schema_version": { "const": "artifact-report-v3" },
     "path": { "type": "string" },
     "format": { "type": "string", "enum": ["wasm", "elf", "macho", "pe-coff", "archive"] },
     "architecture": { "type": ["string", "null"] },
@@ -42,6 +43,11 @@
     "symbols": {
       "type": "array",
       "items": { "$ref": "#/$defs/symbol" }
+    },
+    "symbol_assumptions": {
+      "type": "array",
+      "description": "Statements qualifying symbol identities; empty unless some symbol is told apart from a match only by its order in the file.",
+      "items": { "type": "string" }
     },
     "entry_points": {
       "type": "integer", "minimum": 0,
@@ -98,13 +104,6 @@
   },
   "$defs": {
     "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
-    "fingerprint_bytes": {
-      "type": "array",
-      "description": "The same content identity written as its raw bytes, which is how the metric records nested inside this report spell it.",
-      "minItems": 16,
-      "maxItems": 16,
-      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
-    },
     "build_variant": {
       "type": ["object", "null"],
       "required": ["manifest_path", "fingerprint"],
@@ -171,10 +170,20 @@
     "symbol": {
       "type": "object",
       "required": [
-        "fingerprint", "name", "exported", "offset", "size", "size_inferred", "owner", "ownership"
+        "fingerprint", "content_fingerprint", "identity_by_order", "name", "exported", "offset", "size",
+        "size_inferred", "owner", "ownership"
       ],
       "properties": {
         "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "content_fingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "Content identity shared with the other copies of one body; present only when fingerprint had to be made unique among them."
+        },
+        "identity_by_order": {
+          "type": "boolean",
+          "description": "Whether fingerprint needed this symbol's position in the file because its content, callers and callees match another symbol's."
+        },
         "name": { "type": ["string", "null"] },
         "exported": { "type": "boolean" },
         "offset": { "type": "integer", "minimum": 0 },
@@ -350,10 +359,10 @@
       "description": "Symbols not reached from a parser-established root set, or null when no trustworthy root set exists.",
       "required": ["symbols", "definitive", "assumptions"],
       "properties": {
-        "symbols": { "type": "array", "items": { "$ref": "#/$defs/fingerprint_bytes" } },
+        "symbols": { "type": "array", "items": { "$ref": "#/$defs/fingerprint" } },
         "definitive": {
           "type": "boolean",
-          "description": "True only when every call endpoint resolved and every symbol carries a distinct content fingerprint. Shared identities or a missing endpoint leave a candidate list and an assumption naming the reason."
+          "description": "True only when every call endpoint resolved and every symbol fingerprint is unique. Shared identities or a missing endpoint leave a candidate list and an assumption naming the reason."
         },
         "assumptions": { "type": "array", "items": { "type": "string" } }
       }
@@ -362,7 +371,7 @@
       "type": "object",
       "required": ["symbol", "retained_bytes"],
       "properties": {
-        "symbol": { "$ref": "#/$defs/fingerprint_bytes" },
+        "symbol": { "$ref": "#/$defs/fingerprint" },
         "retained_bytes": { "type": "integer", "minimum": 0 }
       }
     },
@@ -396,7 +405,7 @@
       "type": "object",
       "required": ["fingerprint", "duplicated_bytes", "members"],
       "properties": {
-        "fingerprint": { "$ref": "#/$defs/fingerprint_bytes" },
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
         "duplicated_bytes": {
           "type": "integer", "minimum": 0,
           "description": "Observed excess bytes in this group, not a claimed size saving."
@@ -407,7 +416,7 @@
             "type": "object",
             "required": ["symbol", "offset", "size"],
             "properties": {
-              "symbol": { "$ref": "#/$defs/fingerprint_bytes" },
+              "symbol": { "$ref": "#/$defs/fingerprint" },
               "offset": { "type": "integer", "minimum": 0 },
               "size": { "type": "integer", "minimum": 0 }
             }
