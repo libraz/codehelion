@@ -16,6 +16,7 @@ lcov.info
 /.codex/
 /.cursor/
 /.aider*
+/.serena/
 /.github/copilot-instructions.md
 
 # Local-only working area (design docs, plans, scratch)
