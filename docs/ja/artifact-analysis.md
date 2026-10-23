@@ -135,7 +135,7 @@ codehelion artifact compare before/binary after/binary
 - `--max-memory-bytes <bytes>` は Linux で worker の仮想メモリ上限を強制します。ほかの OS ではこのオプションを黙って無視せず、エラーとして返します。
 - `--untrusted` はこの 3 つをまとめて締めるため Linux 限定です。ほかの OS では、強制できないメモリ上限のまま素性の分からない成果物を読む代わりにエラーで停止します。
 
-`artifact report` と `artifact calibration` はローカルデータベースにあるものを読み直すだけで、worker を挟まずプロセス内で動くため、これらのオプションは対象外です。`artifact report` 用に保存する versioned IR には別途 64 MiB の上限があり、保存対象の詳細がこれを超える分析は partial なデータベースレコードを残さずに失敗します。
+`artifact report` と `artifact calibration` はローカルデータベースにあるものを読み直すだけで、worker を挟まずプロセス内で動くため、これらのオプションは対象外です。`artifact report` 用に保存する versioned IR には別途 64 MiB の上限があります。IR には code と data の生のバイトが含まれるため、入力上限を大きく下回るバイナリでもこれを超えることがあります。その場合 `artifact analyze` は analysis id なしでレポートを出力し、分析を保存しなかった旨を警告し、データベースにはレコードを書きません。
 
 ## 結果の読み方
 

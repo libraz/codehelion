@@ -126,7 +126,7 @@ impl MachOBackend {
             });
         }
         if let Some(requested) = architecture
-            && !architecture_selector_matches(architecture_name(file.architecture()), requested)
+            && !architecture_selector_matches(&architecture_name(file.architecture()), requested)
         {
             return Err(malformed(format!(
                 "Mach-O architecture is {}, not requested {requested}",
@@ -150,12 +150,12 @@ impl MachOBackend {
             })
             .transpose()?;
         let selected_architecture = if selection.architecture == "unknown" {
-            architecture_name(file.architecture()).to_owned()
+            crate::architecture_label(file.architecture())
         } else {
-            selection.architecture
+            Some(selection.architecture)
         };
         let mut ir = ArtifactIr::empty(ArtifactFormat::MachO, bytes);
-        ir.architecture = Some(selected_architecture);
+        ir.architecture = selected_architecture;
         ir.skipped_architectures = selection.skipped_architectures;
         collect_sections(&file, &mut ir).map_err(|error| malformed(error.to_string()))?;
         collect_undefined_imports(file.symbols(), &mut ir);
@@ -293,7 +293,7 @@ fn fat_architecture_labels<Fat: FatArch>(arches: &[Fat]) -> Vec<String> {
         .zip(&bases)
         .map(|(arch, base)| {
             if bases.iter().filter(|other| *other == base).count() == 1 {
-                (*base).to_owned()
+                base.clone()
             } else {
                 format!("{base}:{}", arch.cpusubtype())
             }
@@ -301,16 +301,9 @@ fn fat_architecture_labels<Fat: FatArch>(arches: &[Fat]) -> Vec<String> {
         .collect()
 }
 
-const fn architecture_name(architecture: object::Architecture) -> &'static str {
-    match architecture {
-        object::Architecture::Aarch64 => "aarch64",
-        object::Architecture::Arm => "arm",
-        object::Architecture::I386 => "i386",
-        object::Architecture::X86_64 => "x86_64",
-        object::Architecture::PowerPc => "powerpc",
-        object::Architecture::PowerPc64 => "powerpc64",
-        _ => "unknown",
-    }
+/// The architecture label used in slice lists, selector matching and messages.
+fn architecture_name(architecture: object::Architecture) -> String {
+    crate::architecture_label(architecture).unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn shift_file_offsets(ir: &mut ArtifactIr, offset: u64) {

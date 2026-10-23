@@ -102,6 +102,7 @@ impl PeCoffBackend {
             });
         }
         let mut ir = ArtifactIr::empty(ArtifactFormat::PeCoff, bytes);
+        ir.architecture = crate::architecture_label(file.architecture());
         collect_sections(&file, &mut ir).map_err(|error| malformed(error.to_string()))?;
         collect_undefined_imports(file.symbols(), &mut ir);
         let named = collect_symbols(&file, &mut ir)?;
@@ -606,6 +607,7 @@ mod tests {
             .parse(&coff_fixture())
             .expect("parse COFF fixture");
         assert_eq!(ir.format, ArtifactFormat::PeCoff);
+        assert_eq!(ir.architecture.as_deref(), Some("x86_64"));
         assert_eq!(ir.symbols.len(), 1, "{ir:#?}");
         assert!(ir.capabilities.symbols);
         assert_eq!(ir.symbols[0].name.as_deref(), Some("render"));

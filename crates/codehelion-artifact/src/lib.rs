@@ -691,6 +691,27 @@ pub(crate) fn is_coff_machine(bytes: &[u8]) -> bool {
     matches!(bytes.get(..2), Some([0x4c, 0x01] | [0x64, 0x86 | 0xaa]))
 }
 
+/// The label an IR records for an instruction architecture the object parser
+/// observed, or `None` when the parser could not name one.
+///
+/// Common architectures keep their conventional toolchain names; any other
+/// takes the parser's own variant name, so two distinct architectures never
+/// share a label.
+#[cfg(any(feature = "elf", feature = "macho", feature = "pe"))]
+pub(crate) fn architecture_label(architecture: object::Architecture) -> Option<String> {
+    let label = match architecture {
+        object::Architecture::Unknown => return None,
+        object::Architecture::Aarch64 => "aarch64",
+        object::Architecture::Arm => "arm",
+        object::Architecture::I386 => "i386",
+        object::Architecture::X86_64 => "x86_64",
+        object::Architecture::PowerPc => "powerpc",
+        object::Architecture::PowerPc64 => "powerpc64",
+        other => return Some(format!("{other:?}").to_ascii_lowercase()),
+    };
+    Some(label.to_owned())
+}
+
 /// One format's reader, an input it parses, and the magic that makes an
 /// arbitrary byte string look like one of its own.
 ///

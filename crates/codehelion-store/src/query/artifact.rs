@@ -418,7 +418,10 @@ impl Store {
         rows.into_iter()
             .map(|(source_kind, source_fingerprint, source_instance_fingerprint, reason, source_build_variant_fingerprint)| {
                 Ok(StoredArtifactUnmappedSource {
-                    source_kind: ArtifactAnalysisSourceKind::from_sql(&source_kind)?,
+                    source_kind: ArtifactAnalysisSourceKind::from_sql(
+                        "artifact_analysis_unmapped_source.source_kind",
+                        &source_kind,
+                    )?,
                     source_fingerprint: fingerprint_from_blob(
                         "artifact_analysis_unmapped_source.source_fingerprint",
                         source_fingerprint,
@@ -896,11 +899,16 @@ impl CloneGroupSavingsSqlRow {
             )?,
             estimated_refactor_savings_bytes: self.estimated_refactor_savings_bytes,
             mapping_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
+                "artifact_analysis_clone_group_savings.mapping_confidence",
                 &self.mapping_confidence,
             )?,
             clone_confidence: self.clone_confidence,
-            model_confidence: ArtifactAnalysisSavingsConfidence::from_sql(&self.model_confidence)?,
+            model_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
+                "artifact_analysis_clone_group_savings.model_confidence",
+                &self.model_confidence,
+            )?,
             savings_confidence: ArtifactAnalysisSavingsConfidence::from_sql(
+                "artifact_analysis_clone_group_savings.savings_confidence",
                 &self.savings_confidence,
             )?,
             model_schema_version: self.model_schema_version,

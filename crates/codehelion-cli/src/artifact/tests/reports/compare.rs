@@ -910,51 +910,49 @@ fn comparison_text_splits_the_code_delta_by_owner_class() {
 }
 
 /// Published schema versions continue to describe reports written by that release.
+///
+/// The documents are what `codehelion 0.7.0`, the last release writing v2,
+/// printed for a Mach-O object holding two identical functions and for its
+/// comparison with the same object holding one of them.
 #[test]
 fn published_comparison_schema_keeps_accepting_legacy_reports() {
     const LEGACY_SCHEMA: &str =
         include_str!("../../../../schema/artifact-comparison-report-v2.schema.json");
-    let report = symbol_comparison(
-        vec![comparison_symbol(Some("app::run"), b"removed", 2)],
-        Vec::new(),
+    let recorded: serde_json::Value =
+        serde_json::from_str(include_str!("recorded-v2/artifact-comparison-report.json")).unwrap();
+    assert_eq!(recorded["schema_version"], "artifact-comparison-report-v2");
+    assert_eq!(recorded["symbol_deltas"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        recorded["duplicate_group_deltas"].as_array().unwrap().len(),
+        1
     );
-    let mut legacy = serde_json::to_value(&report).unwrap();
-    let legacy = legacy.as_object_mut().unwrap();
-    legacy.insert(
-        "schema_version".to_owned(),
-        "artifact-comparison-report-v2".into(),
-    );
-    legacy.remove("ownership_deltas");
-    for delta in legacy["symbol_deltas"].as_array_mut().unwrap() {
-        let delta = delta.as_object_mut().unwrap();
-        delta.remove("owner");
-        delta.remove("ownership");
-    }
     assert_valid_schema(
         "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v2.schema.json",
         LEGACY_SCHEMA,
-        &serde_json::Value::Object(legacy.clone()),
+        &recorded,
     );
-    assert_eq!(report.schema_version, "artifact-comparison-report-v3");
 }
 
 #[test]
-fn published_artifact_schema_remains_available() {
+fn published_artifact_schema_keeps_accepting_legacy_reports() {
     let path =
         FilePath::new(env!("CARGO_MANIFEST_DIR")).join("schema/artifact-report-v2.schema.json");
     let schema = fs::read_to_string(path).expect("published artifact v2 schema remains shipped");
-    let artifact = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
-    let report = ArtifactReport::from_ir(FilePath::new("legacy.wasm"), &artifact, None, None);
-    let mut legacy = serde_json::to_value(&report).unwrap();
-    let legacy = legacy.as_object_mut().unwrap();
-    legacy.insert("schema_version".to_owned(), "artifact-report-v2".into());
-    for field in ["symbol_assumptions", "ownership", "toolchain_holdings"] {
-        legacy.remove(field);
-    }
+    let recorded: serde_json::Value =
+        serde_json::from_str(include_str!("recorded-v2/artifact-report.json")).unwrap();
+    assert_eq!(recorded["schema_version"], "artifact-report-v2");
+    assert_eq!(recorded["symbols"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        recorded["duplicate_groups"]["exact"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert_valid_schema(
         "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-report-v2.schema.json",
         &schema,
-        &serde_json::Value::Object(legacy.clone()),
+        &recorded,
     );
 }
 

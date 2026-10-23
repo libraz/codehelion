@@ -173,7 +173,7 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
     let report = ArtifactReport::from_ir(
         &args.path,
         &artifact,
-        Some(analysis_id),
+        analysis_id,
         build_variant.as_ref().map(BuildVariantEvidence::for_report),
     )
     .with_containment(containment)

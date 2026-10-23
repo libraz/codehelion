@@ -606,3 +606,327 @@ fn artifact_compare_calibrates_against_the_configured_database_without_a_databas
             "calibration found no saved estimate",
         ));
 }
+
+#[test]
+fn a_bare_calibration_summarizes_every_partition_of_the_newest_invocation() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let tree = directory.path().join("tree");
+    std::fs::create_dir(&tree).expect("tree directory");
+    let body = "    let mut total = 0;\n    for value in values {\n        if *value > limit {\n            total += value * 2;\n        } else {\n            total -= value;\n        }\n    }\n    total\n}\n";
+    std::fs::write(
+        tree.join("lib.rs"),
+        format!(
+            "pub fn first(values: &[i64], limit: i64) -> i64 {{\n{body}\npub fn second(values: &[i64], limit: i64) -> i64 {{\n{body}"
+        ),
+    )
+    .expect("source");
+    let database = directory.path().join("audit.db");
+    let database_arg = database.to_str().expect("database path");
+    cmd()
+        .args([
+            "scan",
+            tree.to_str().expect("tree path"),
+            "--db",
+            database_arg,
+        ])
+        .assert()
+        .success();
+    let artifact = directory.path().join("fixture.o");
+    std::fs::write(&artifact, macho_fixture()).expect("artifact");
+    cmd()
+        .args([
+            "artifact",
+            "analyze",
+            artifact.to_str().expect("artifact path"),
+            "--db",
+            database_arg,
+        ])
+        .assert()
+        .success();
+    // A second partition of the same invocation shares the first one's start.
+    let connection = rusqlite::Connection::open(&database).expect("open database");
+    connection
+        .execute(
+            "INSERT INTO scan_run (build_variant_id, root_path, tool_version, config_hash,
+                                   config_source, config_path, analysis_mode, started_at,
+                                   finished_at, status, min_clone_tokens)
+             SELECT build_variant_id, root_path, tool_version, config_hash, config_source,
+                    config_path, analysis_mode, started_at, finished_at, status,
+                    min_clone_tokens
+             FROM scan_run WHERE id = 1",
+            [],
+        )
+        .expect("record a sibling partition");
+    drop(connection);
+    let mut store = codehelion_store::Store::open_existing(&database).expect("open store");
+    let group = store
+        .ids_starting_with("")
+        .expect("list ids")
+        .into_iter()
+        .find(|found| found.kind == codehelion_store::query::IdKind::CloneGroup)
+        .expect("the tree records one clone group")
+        .id;
+    let mut clone_group_fingerprint = [0; 16];
+    for (index, byte) in clone_group_fingerprint.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&group[index * 2..index * 2 + 2], 16).expect("hex id");
+    }
+    store
+        .record_artifact_savings_calibration(
+            &codehelion_store::artifact::ArtifactAnalysisSavingsCalibration {
+                schema_version:
+                    codehelion_store::artifact::ARTIFACT_ANALYSIS_SAVINGS_CALIBRATION_SCHEMA_VERSION
+                        .to_owned(),
+                artifact_analysis_id: 1,
+                source_scan_run_id: 1,
+                clone_group_fingerprint,
+                source_build_variant_fingerprint:
+                    codehelion_store::BuildVariantFingerprint::from_bytes([9; 16]),
+                before_artifact_build_variant_fingerprint:
+                    codehelion_store::BuildVariantFingerprint::from_bytes([5; 16]),
+                after_artifact_fingerprint: [13; 16],
+                after_artifact_build_variant_fingerprint:
+                    codehelion_store::BuildVariantFingerprint::from_bytes([5; 16]),
+                estimated_refactor_savings_bytes: 4,
+                verified_savings_bytes: 6,
+                absolute_error_bytes: 2,
+                relative_error: Some(2.0 / 6.0),
+                recorded_at: "2026-07-30T00:01:00Z".to_owned(),
+            },
+        )
+        .expect("record a measurement against the lower partition");
+    drop(store);
+
+    let output = cmd()
+        .args([
+            "artifact",
+            "calibration",
+            "--db",
+            database_arg,
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run calibration");
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    assert_eq!(report["source_run"], 2, "{report}");
+    assert_eq!(report["statistics"]["samples"], 1, "{report}");
+}
+
+/// A Mach-O object holding one `render` function with `code` as its body.
+fn macho_with_render(code: &[u8]) -> Vec<u8> {
+    let mut object = WriteObject::new(
+        BinaryFormat::MachO,
+        Architecture::X86_64,
+        Endianness::Little,
+    );
+    let text = object.section_id(StandardSection::Text);
+    let offset = object.append_section_data(text, code, 1);
+    object.add_symbol(Symbol {
+        name: b"render".to_vec(),
+        value: offset,
+        size: code.len() as u64,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Dynamic,
+        weak: false,
+        section: SymbolSection::Section(text),
+        flags: SymbolFlags::None,
+    });
+    object.write().expect("write Mach-O fixture")
+}
+
+const NO_OWN_DECLARED: &str = "no own owners are declared";
+
+/// Run one artifact command from `directory` and return its standard output.
+fn artifact_output(directory: &std::path::Path, args: &[&str]) -> String {
+    let output = cmd()
+        .current_dir(directory)
+        .arg("artifact")
+        .args(args)
+        .output()
+        .expect("run artifact command");
+    assert!(output.status.success(), "{args:?}: {output:?}");
+    String::from_utf8(output.stdout).expect("utf-8 output")
+}
+
+/// The CSV records of one record type, as raw lines.
+fn csv_records<'a>(csv: &'a str, record_type: &str) -> Vec<&'a str> {
+    let prefix = format!("{record_type},");
+    csv.lines()
+        .filter(|line| line.starts_with(&prefix))
+        .collect()
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the three commands and both configurations stay visible side by side"
+)]
+fn a_configured_own_declaration_reaches_analyze_report_and_compare() {
+    let declared = tempfile::tempdir().expect("declared directory");
+    let undeclared = tempfile::tempdir().expect("undeclared directory");
+    std::fs::write(
+        declared.path().join("codehelion.toml"),
+        "[artifact]\nown = [\"<global>\"]\n",
+    )
+    .expect("write configuration");
+    let before = declared.path().join("before.o");
+    let after = declared.path().join("after.o");
+    std::fs::write(&before, macho_with_render(&[0x90, 0xc3])).expect("before artifact");
+    std::fs::write(&after, macho_with_render(&[0x90, 0x90, 0x90, 0xc3])).expect("after artifact");
+    let before = before.to_str().expect("before path");
+    let after = after.to_str().expect("after path");
+    let database = declared.path().join("audit.db");
+    let database = database.to_str().expect("database path");
+
+    // Ownership as analyze and report state it.
+    let single_artifact = |json: &str, csv: &str, declared_own: bool| {
+        let json: serde_json::Value = serde_json::from_str(json).expect("report JSON");
+        let ownership = &json["ownership"];
+        let own_class = ownership["classes"]
+            .as_array()
+            .expect("classes")
+            .iter()
+            .find(|class| class["ownership"] == "own")
+            .expect("own class");
+        let assumes_none = ownership["assumptions"]
+            .as_array()
+            .expect("assumptions")
+            .iter()
+            .any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|text| text.starts_with(NO_OWN_DECLARED))
+            });
+        let owner_kinds: Vec<_> = csv_records(csv, "owner")
+            .iter()
+            .map(|line| line.split(',').nth(3).unwrap_or_default().to_owned())
+            .collect();
+        if declared_own {
+            assert_eq!(ownership["declared_own"], serde_json::json!(["<global>"]));
+            assert_eq!(own_class["symbols"], 1, "{ownership}");
+            assert!(!assumes_none, "{ownership}");
+            assert_eq!(owner_kinds, ["own"], "{csv}");
+            assert!(!csv.contains(NO_OWN_DECLARED), "{csv}");
+        } else {
+            assert_eq!(own_class["symbols"], 0, "{ownership}");
+            assert!(assumes_none, "{ownership}");
+            assert_eq!(owner_kinds, ["other"], "{csv}");
+            assert!(csv.contains(NO_OWN_DECLARED), "{csv}");
+        }
+    };
+    for (directory, declared_own) in [(declared.path(), true), (undeclared.path(), false)] {
+        single_artifact(
+            &artifact_output(directory, &["analyze", before, "--format", "json"]),
+            &artifact_output(directory, &["analyze", before, "--format", "csv"]),
+            declared_own,
+        );
+    }
+
+    artifact_output(declared.path(), &["analyze", before, "--db", database]);
+    for (directory, declared_own) in [(declared.path(), true), (undeclared.path(), false)] {
+        let report = |format| {
+            artifact_output(
+                directory,
+                &[
+                    "report",
+                    "--analysis",
+                    "1",
+                    "--db",
+                    database,
+                    "--format",
+                    format,
+                ],
+            )
+        };
+        single_artifact(&report("json"), &report("csv"), declared_own);
+    }
+
+    for (directory, declared_own) in [(declared.path(), true), (undeclared.path(), false)] {
+        let compare =
+            |format| artifact_output(directory, &["compare", before, after, "--format", format]);
+        let json: serde_json::Value =
+            serde_json::from_str(&compare("json")).expect("comparison JSON");
+        let csv = compare("csv");
+        let own_delta = json["ownership_deltas"]["classes"]
+            .as_array()
+            .expect("ownership classes")
+            .iter()
+            .find(|class| class["ownership"] == "own")
+            .expect("own class")["delta_bytes"]
+            .clone();
+        let assumes_none = json["assumptions"]
+            .as_array()
+            .expect("assumptions")
+            .iter()
+            .any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|text| text.starts_with(NO_OWN_DECLARED))
+            });
+        let owner_deltas = csv_records(&csv, "owner-delta");
+        assert_eq!(owner_deltas.len(), 1, "{csv}");
+        if declared_own {
+            assert_eq!(own_delta, 2, "{json}");
+            assert!(!assumes_none, "{json}");
+            assert!(owner_deltas[0].contains(",own,<global>,"), "{csv}");
+            assert!(!csv.contains(NO_OWN_DECLARED), "{csv}");
+        } else {
+            assert_eq!(own_delta, 0, "{json}");
+            assert!(assumes_none, "{json}");
+            assert!(owner_deltas[0].contains(",other,<global>,"), "{csv}");
+            assert!(csv.contains(NO_OWN_DECLARED), "{csv}");
+        }
+    }
+}
+
+#[test]
+fn an_analysis_whose_ir_exceeds_its_storage_limit_is_reported_without_being_saved() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    // Data bytes are stored base64-encoded, so 52 MiB of them outgrow the
+    // 64 MiB IR limit while the input stays far below the input ceiling.
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let text = object.section_id(StandardSection::Text);
+    let offset = object.append_section_data(text, &[0x90, 0xc3], 1);
+    object.add_symbol(Symbol {
+        name: b"render".to_vec(),
+        value: offset,
+        size: 2,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Dynamic,
+        weak: false,
+        section: SymbolSection::Section(text),
+        flags: SymbolFlags::None,
+    });
+    let data = object.section_id(StandardSection::ReadOnlyData);
+    object.append_section_data(data, &vec![0x5a; 52 * 1024 * 1024], 1);
+    let artifact = directory.path().join("large.o");
+    std::fs::write(&artifact, object.write().expect("write ELF")).expect("artifact");
+    let database = directory.path().join("audit.db");
+    let database = database.to_str().expect("database path");
+
+    let output = cmd()
+        .args([
+            "artifact",
+            "analyze",
+            artifact.to_str().expect("artifact path"),
+            "--db",
+            database,
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run analyze");
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    assert!(report["analysis_id"].is_null(), "{}", report["analysis_id"]);
+    assert_eq!(report["format"], "elf");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("so this analysis was not saved"),
+        "{stderr}"
+    );
+    let store =
+        codehelion_store::Store::open_existing(std::path::Path::new(database)).expect("open store");
+    assert_eq!(store.latest_artifact_analysis_id().expect("query"), None);
+}

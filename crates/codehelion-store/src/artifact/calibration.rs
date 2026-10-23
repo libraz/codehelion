@@ -64,14 +64,15 @@ impl ArtifactAnalysisSavingsConfidence {
         }
     }
 
-    pub(crate) fn from_sql(value: &str) -> Result<Self, StoreError> {
+    /// Decode a stored confidence, naming `field` as the column it came from.
+    pub(crate) fn from_sql(field: &'static str, value: &str) -> Result<Self, StoreError> {
         match value {
             "high" => Ok(Self::High),
             "medium" => Ok(Self::Medium),
             "low" => Ok(Self::Low),
             "unavailable" => Ok(Self::Unavailable),
             _ => Err(StoreError::UnknownVocabulary {
-                field: "artifact_analysis_clone_group_savings.savings_confidence",
+                field,
                 value: value.to_owned(),
             }),
         }

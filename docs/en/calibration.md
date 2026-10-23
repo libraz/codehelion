@@ -46,8 +46,9 @@ codehelion artifact compare before/app.wasm after/app.wasm \
 The `verified_savings_bytes` that comes out of a calibrated comparison is the
 whole observed size difference between the two artifacts, assigned to the one
 clone group named by `--clone-group`. What the comparison establishes is that
-both artifacts are the same format and were built under the same declared build
-variant, and nothing beyond that: a pair of builds that also picked up a
+both artifacts are the same format and architecture, that neither is one slice
+chosen from a universal binary, and that both were built under the same
+declared build variant, and nothing beyond that: a pair of builds that also picked up a
 dependency update or a toolchain change reports that difference too, as the
 measured saving of the refactoring. The number means what it says only for a pair
 that differs in nothing else.
@@ -61,6 +62,11 @@ codehelion artifact calibration --source-run 1  # summarize a particular source 
 
 `artifact calibration` reads measurements rather than taking them, so it
 summarizes nothing until some exist.
+
+Without `--source-run`, it summarizes the measurements recorded against every
+completed partition of the newest scan invocation in the database, and
+`source_run` names that invocation's newest partition. `--source-run` reads
+the measurements of that one run only.
 
 ## Comparing two summaries
 

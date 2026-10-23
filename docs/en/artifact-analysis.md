@@ -244,9 +244,10 @@ progress, and timeout diagnostics name the phase that was running.
 
 `artifact report` and `artifact calibration` re-read what is already in the local
 database and run in process, so none of these options apply to them. The versioned
-IR retained for `artifact report` is separately capped at 64 MiB, and an analysis
-whose persisted details exceed that limit fails without writing a partial database
-record.
+IR retained for `artifact report` is separately capped at 64 MiB. Raw code and
+data bytes are part of it, so a binary well below the input ceiling can exceed it;
+`artifact analyze` then prints its report without an analysis id, warns that the
+analysis was not saved, and writes no database record for it.
 
 ## Reading the result
 

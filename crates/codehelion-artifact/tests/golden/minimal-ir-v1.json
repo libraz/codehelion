@@ -30,7 +30,7 @@
     49
   ],
   "observed_bytes": 576,
-  "architecture": null,
+  "architecture": "x86_64",
   "skipped_architectures": [],
   "sections": [
     {

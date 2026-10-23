@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Seek, Write};
 use std::path::Path as FilePath;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use codehelion_artifact::ArtifactIr;
 use codehelion_store::artifact::MAX_ARTIFACT_IR_JSON_BYTES;
 
@@ -88,17 +88,20 @@ impl Drop for OutputReservation {
 
 /// Serialize a persisted artifact IR without allowing its temporary buffer to
 /// exceed the same storage budget the database enforces.
-pub(super) fn serialize_artifact_ir(artifact: &ArtifactIr) -> Result<String> {
+///
+/// Returns `None` when the IR does not fit that budget, so the caller can
+/// report the analysis without saving it.
+pub(super) fn serialize_artifact_ir(artifact: &ArtifactIr) -> Result<Option<String>> {
     let mut output = CappedArtifactIrBuffer::new(MAX_ARTIFACT_IR_JSON_BYTES);
     if let Err(error) = serde_json::to_writer(&mut output, artifact) {
         if output.exceeded {
-            bail!(
-                "artifact analysis IR exceeds the storage limit of {MAX_ARTIFACT_IR_JSON_BYTES} bytes"
-            );
+            return Ok(None);
         }
         return Err(error).context("serializing artifact IR for SQLite");
     }
-    String::from_utf8(output.bytes).context("encoding artifact IR for SQLite")
+    String::from_utf8(output.bytes)
+        .map(Some)
+        .context("encoding artifact IR for SQLite")
 }
 
 /// A growable JSON buffer that stops immediately at its explicit storage cap.

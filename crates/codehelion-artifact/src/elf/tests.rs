@@ -428,6 +428,20 @@ fn dead_symbol_names(artifact: &ArtifactIr) -> (Vec<String>, bool) {
 }
 
 #[test]
+fn the_architecture_the_header_names_is_recorded() {
+    let parse = |architecture| {
+        let mut object = WriteObject::new(BinaryFormat::Elf, architecture, Endianness::Little);
+        let text = object.section_id(StandardSection::Text);
+        object.append_section_data(text, &[0; 4], 4);
+        let bytes = object.write().expect("write ELF");
+        ElfBackend.parse(&bytes).expect("parse ELF").architecture
+    };
+    assert_eq!(parse(Architecture::X86_64).as_deref(), Some("x86_64"));
+    assert_eq!(parse(Architecture::Aarch64).as_deref(), Some("aarch64"));
+    assert_eq!(parse(Architecture::Riscv64).as_deref(), Some("riscv64"));
+}
+
+#[test]
 fn a_tail_jump_to_another_function_is_a_call_edge() {
     let artifact = ElfBackend
         .parse(&functions_fixture(

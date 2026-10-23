@@ -34,17 +34,22 @@ pub fn calibration(args: &ArtifactCalibrationArgs, out: &mut impl Write) -> Resu
         false,
     )?;
     let store = crate::scan::open_recorded_store(&db)?;
-    let source_run = args.source_run.map_or_else(
-        || {
-            store
-                .latest_completed_run_any_root()?
-                .map(|run| run.id)
-                .context("no completed scan in this database; run `codehelion scan` first")
-        },
-        Ok,
-    )?;
-    store.ensure_completed_run(source_run)?;
-    let measurements = store.artifact_savings_calibrations_for_run(source_run)?;
+    let source_runs = match args.source_run {
+        Some(source_run) => vec![source_run],
+        None => crate::report_command::invocation_partitions(&store, None)?
+            .into_iter()
+            .map(|origin| origin.id)
+            .collect(),
+    };
+    // The newest partition names the invocation; measurements come from all of them.
+    let source_run = *source_runs
+        .last()
+        .context("no completed scan in this database; run `codehelion scan` first")?;
+    let mut measurements = Vec::new();
+    for run in &source_runs {
+        store.ensure_completed_run(*run)?;
+        measurements.extend(store.artifact_savings_calibrations_for_run(*run)?);
+    }
     let mut report = CalibrationSummaryReport {
         schema_version: ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION,
         source_run,
@@ -431,8 +436,9 @@ fn render_calibration_delta_text(
     .map_err(Into::into)
 }
 
+/// One CSV field, with a leading formula trigger neutralized before quoting.
 pub(super) fn csv(value: &str) -> String {
-    let guarded = if value.starts_with(['=', '+', '-', '@', '\t']) {
+    let guarded = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
         format!("'{value}")
     } else {
         value.to_owned()
@@ -458,4 +464,14 @@ pub(super) fn optional_f64(value: Option<f64>) -> String {
 
 fn signed_optional_f64(value: Option<f64>) -> String {
     value.map_or_else(|| "unavailable".to_owned(), |value| format!("{value:+.4}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::csv;
+
+    #[test]
+    fn a_field_opening_with_a_carriage_return_is_guarded_before_quoting() {
+        assert_eq!(csv("\r=HYPERLINK(1)"), "\"'\r=HYPERLINK(1)\"");
+    }
 }

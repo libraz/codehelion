@@ -661,3 +661,121 @@ fn standalone_analysis_and_symbols_commit_together() {
         ArtifactAnalysisUnmappedSourceReason::NoArtifactEvidence
     );
 }
+
+#[test]
+fn an_undecodable_savings_confidence_names_its_own_column() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO build_variant
+                     (variant_fingerprint, canonical, analysis_mode, normalization_version)
+                 VALUES (?1, ?2, 'structural', 1)",
+            ["0123456789abcdef0123456789abcdef", "fixture-variant"],
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO scan_run
+                     (build_variant_id, root_path, tool_version, config_hash, config_source,
+                      analysis_mode, started_at, finished_at, min_clone_tokens, status)
+                 VALUES (1, 'fixture', 'test', 'config', 'defaults', 'structural',
+                         '2026-07-30T00:00:00Z', '2026-07-30T00:00:01Z', 20, 'completed')",
+            [],
+        )
+        .unwrap();
+    let savings = [ArtifactAnalysisCloneGroupSavings {
+        schema_version: ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION.to_owned(),
+        source_scan_run_id: 1,
+        clone_group_fingerprint: [12; 16],
+        source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([9; 16]),
+        artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([5; 16]),
+        duplicated_bytes: 8,
+        estimated_refactor_savings_bytes: 4,
+        mapping_confidence: ArtifactAnalysisSavingsConfidence::High,
+        clone_confidence: 1.0,
+        model_confidence: ArtifactAnalysisSavingsConfidence::Low,
+        savings_confidence: ArtifactAnalysisSavingsConfidence::Low,
+        model_schema_version: "refactor-savings-model-v1".to_owned(),
+        assumptions_json: "[]".to_owned(),
+    }];
+    let id = store
+        .record_artifact_analysis(&ArtifactAnalysisSnapshot {
+            schema_version: ARTIFACT_IR_SCHEMA,
+            path: "fixture.wasm",
+            format: "wasm",
+            content_fingerprint: [1; 16],
+            observed_bytes: 8,
+            ir_json: r#"{"schema_version":"artifact-ir-v1"}"#,
+            build_variant_manifest_path: None,
+            build_variant_fingerprint: None,
+            started_at: "2026-07-30T00:00:00Z",
+            finished_at: "2026-07-30T00:00:01Z",
+            symbols: &[],
+            source_maps: &[],
+            containment: None,
+            mappings: &[],
+            unmapped_symbols: &[],
+            unmapped_sources: &[ArtifactAnalysisUnmappedSource {
+                source_kind: ArtifactAnalysisSourceKind::Unit,
+                source_fingerprint: [8; 16],
+                source_instance_fingerprint: [8; 16],
+                source_build_variant_fingerprint: BuildVariantFingerprint::from_bytes([9; 16]),
+                reason: ArtifactAnalysisUnmappedSourceReason::InlinedAway,
+            }],
+            correlation: None,
+            clone_group_savings: &savings,
+        })
+        .unwrap();
+    store
+        .conn
+        .execute_batch("PRAGMA ignore_check_constraints = ON")
+        .unwrap();
+    for column in [
+        "mapping_confidence",
+        "model_confidence",
+        "savings_confidence",
+    ] {
+        store
+            .conn
+            .execute(
+                &format!("UPDATE artifact_analysis_clone_group_savings SET {column} = 'bogus'"),
+                [],
+            )
+            .unwrap();
+        let error = store.artifact_clone_group_savings(id).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                StoreError::UnknownVocabulary { field, value }
+                    if *field == format!("artifact_analysis_clone_group_savings.{column}")
+                        && value == "bogus"
+            ),
+            "{error:?}"
+        );
+        store
+            .conn
+            .execute(
+                &format!("UPDATE artifact_analysis_clone_group_savings SET {column} = 'low'"),
+                [],
+            )
+            .unwrap();
+    }
+    store
+        .conn
+        .execute(
+            "UPDATE artifact_analysis_unmapped_source SET source_kind = 'bogus'",
+            [],
+        )
+        .unwrap();
+    let error = store.artifact_unmapped_sources(id).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            StoreError::UnknownVocabulary { field, .. }
+                if *field == "artifact_analysis_unmapped_source.source_kind"
+        ),
+        "{error:?}"
+    );
+}

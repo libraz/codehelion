@@ -541,7 +541,10 @@ pub(super) fn decode_artifact_mapping(
             "artifact_analysis_source_mapping.artifact_symbol_fingerprint",
             artifact_symbol_fingerprint,
         )?,
-        source_kind: ArtifactAnalysisSourceKind::from_sql(&source_kind)?,
+        source_kind: ArtifactAnalysisSourceKind::from_sql(
+            "artifact_analysis_source_mapping.source_kind",
+            &source_kind,
+        )?,
         source_fingerprint: fingerprint_from_blob(
             "artifact_analysis_source_mapping.source_fingerprint",
             source_fingerprint,

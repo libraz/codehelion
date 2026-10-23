@@ -28,6 +28,10 @@ use crate::schema::{Axes, CloneType, DetectionResult, Finding, Fragment, Sibling
 /// a change to the document's structure lands here.
 pub const SUPPORTED_REPORT_SCHEMA: u32 = 2;
 
+/// Partitioned envelope schema this adapter reads a cross-language comparison
+/// from.
+pub const SUPPORTED_PARTITIONED_SCHEMA: &str = "partitioned-scan-report-v2";
+
 /// What went wrong turning a report into a scorable result.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -38,6 +42,12 @@ pub enum Error {
     Version {
         /// The version the document declared.
         found: u32,
+    },
+    /// The document is a partitioned envelope of a version this adapter does
+    /// not read.
+    EnvelopeVersion {
+        /// The version the envelope declared.
+        found: String,
     },
     /// A field guaranteed by the current report contract was omitted.
     MissingField {
@@ -64,6 +74,12 @@ impl fmt::Display for Error {
                  {SUPPORTED_REPORT_SCHEMA}): the report shape moved and this \
                  adapter has not followed it"
             ),
+            Self::EnvelopeVersion { found } => write!(
+                f,
+                "partitioned scan report schema_version {found} (expected \
+                 {SUPPORTED_PARTITIONED_SCHEMA}): the report shape moved and \
+                 this adapter has not followed it"
+            ),
             Self::MissingField { path } => {
                 write!(f, "scan report omits required field {path}")
             }
@@ -78,7 +94,10 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Parse(error) => Some(error),
-            Self::Version { .. } | Self::MissingField { .. } | Self::InvalidSibling { .. } => None,
+            Self::Version { .. }
+            | Self::EnvelopeVersion { .. }
+            | Self::MissingField { .. }
+            | Self::InvalidSibling { .. } => None,
         }
     }
 }
@@ -265,10 +284,10 @@ struct Member {
 
 /// The additive envelope emitted by `scan --compare-languages --format json`.
 ///
-/// Cross-language comparisons are deliberately outside ordinary scan history,
-/// so they have no scan-report schema version to borrow. The small dedicated
-/// adapter below reads only the explicit comparison evidence and the measured
-/// partition line counts used for a corpus rate.
+/// Cross-language comparisons are deliberately outside ordinary scan history.
+/// The small dedicated adapter below reads only the explicit comparison
+/// evidence and the measured partition line counts used for a corpus rate,
+/// after checking the envelope and partition versions.
 #[derive(Debug, Deserialize)]
 struct CrossLanguageOutput {
     partitions: Vec<CrossLanguagePartition>,
@@ -717,10 +736,14 @@ fn require_fields(value: &Value, path: &str, fields: &[&str]) -> Result<(), Erro
 ///
 /// # Errors
 ///
-/// Returns [`Error::Parse`] when the document lacks the dedicated comparison
-/// envelope or its members cannot be decoded.
+/// Returns [`Error::EnvelopeVersion`] or [`Error::Version`] when the envelope
+/// or one of its partitions is of a version this adapter does not read, and
+/// [`Error::Parse`] when the document lacks the dedicated comparison envelope
+/// or its members cannot be decoded.
 pub fn from_cross_language_comparison_json(json: &str) -> Result<(DetectionResult, u32), Error> {
-    let output: CrossLanguageOutput = serde_json::from_str(json)?;
+    let value: Value = serde_json::from_str(json)?;
+    check_envelope_versions(&value)?;
+    let output: CrossLanguageOutput = serde_json::from_value(value)?;
     let lines = output.partitions.iter().fold(0_u32, |total, partition| {
         total.saturating_add(partition.summary.lines)
     });
@@ -761,6 +784,41 @@ pub fn from_cross_language_comparison_json(json: &str) -> Result<(DetectionResul
     ))
 }
 
+/// Refuse an envelope, or a partition inside it, of a version this adapter
+/// does not read, before any other field is decoded.
+fn check_envelope_versions(value: &Value) -> Result<(), Error> {
+    match value.get("schema_version").and_then(Value::as_str) {
+        None => {
+            return Err(Error::MissingField {
+                path: "schema_version".to_owned(),
+            });
+        }
+        Some(found) if found != SUPPORTED_PARTITIONED_SCHEMA => {
+            return Err(Error::EnvelopeVersion {
+                found: found.to_owned(),
+            });
+        }
+        Some(_) => {}
+    }
+    let partitions = value
+        .get("partitions")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    for (index, partition) in partitions.iter().enumerate() {
+        let found = partition
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok())
+            .ok_or_else(|| Error::MissingField {
+                path: format!("partitions[{index}].schema_version"),
+            })?;
+        if found != SUPPORTED_REPORT_SCHEMA {
+            return Err(Error::Version { found });
+        }
+    }
+    Ok(())
+}
+
 /// The corpus language, as the file counts describe it. A corpus that mixes
 /// languages says so rather than picking whichever was counted first.
 fn language_of(files: &FileCounts) -> String {
@@ -783,7 +841,11 @@ mod tests {
     use serde_json::json;
 
     const CROSS_LANGUAGE_REPORT: &str = r#"{
-      "partitions": [{"summary":{"lines":3}}, {"summary":{"lines":5}}],
+      "schema_version": "partitioned-scan-report-v2",
+      "partitions": [
+        {"schema_version": 2, "summary":{"lines":3}},
+        {"schema_version": 2, "summary":{"lines":5}}
+      ],
       "cross_language_comparison": {
         "groups": [{
           "id":"cross-1", "rule_id":"cross-language-sequence-pipeline-v1", "semantic_confidence":0.55,
@@ -794,6 +856,41 @@ mod tests {
         }]
       }
     }"#;
+
+    #[test]
+    fn a_cross_language_comparison_of_another_version_is_refused() {
+        let envelope = CROSS_LANGUAGE_REPORT.replace(
+            "\"partitioned-scan-report-v2\"",
+            "\"partitioned-scan-report-v3\"",
+        );
+        let error = from_cross_language_comparison_json(&envelope)
+            .expect_err("a later envelope is refused");
+        assert!(
+            matches!(&error, Error::EnvelopeVersion { found } if found == "partitioned-scan-report-v3"),
+            "{error:?}"
+        );
+        for version in [1, 3] {
+            let partition = CROSS_LANGUAGE_REPORT.replacen(
+                "\"schema_version\": 2",
+                &format!("\"schema_version\": {version}"),
+                1,
+            );
+            let error = from_cross_language_comparison_json(&partition)
+                .expect_err("a partition of another version is refused");
+            assert!(
+                matches!(error, Error::Version { found } if found == version),
+                "{error:?}"
+            );
+        }
+        let unversioned = CROSS_LANGUAGE_REPORT.replacen(
+            "\"schema_version\": \"partitioned-scan-report-v2\",",
+            "",
+            1,
+        );
+        let error = from_cross_language_comparison_json(&unversioned)
+            .expect_err("an unversioned envelope is refused");
+        assert!(matches!(error, Error::MissingField { .. }), "{error:?}");
+    }
 
     #[test]
     fn a_cross_language_comparison_is_read_as_restricted_semantic() {

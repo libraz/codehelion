@@ -35,6 +35,14 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         .filter_map(|model| model.run.run_id.map(|run_id| (run_id, model)))
         .flat_map(|(run_id, model)| scan::hydrate_recorded_run(&store, run_id, churn_top, model))
         .collect::<Vec<_>>();
+    if models
+        .iter()
+        .any(|model| model.run.mode == AnalysisMode::Semantic.name())
+    {
+        eprintln!(
+            "note: cross-build-variant and cross-language comparisons belong to the scan invocation and are not replayed"
+        );
+    }
     let output = report_output(args);
     let write = if scan::artifact_guidance_holds(&failures) {
         scan::write_partitioned_reports
@@ -207,11 +215,29 @@ fn selected_runs(store: &Store, explicit: Option<i64>, root: &Path) -> Result<Ve
     if let Some(run_id) = explicit {
         return Ok(vec![run_id]);
     }
-    let invocation = store.latest_completed_invocation(&scan::path_key(root))?;
+    let invocation = invocation_partitions(store, Some(&scan::path_key(root)))?;
     if invocation.is_empty() {
         bail!("no completed scan for this path; run `codehelion scan` first");
     }
     Ok(invocation.into_iter().map(|origin| origin.id).collect())
+}
+
+/// Every completed partition of the newest scan invocation, in row-id order.
+///
+/// `root_path` narrows the invocation to one recorded root; without it the
+/// newest invocation of any root is read. An empty list means no completed
+/// scan matched.
+pub(crate) fn invocation_partitions(
+    store: &Store,
+    root_path: Option<&str>,
+) -> Result<Vec<RunOrigin>> {
+    Ok(match root_path {
+        Some(root_path) => store.latest_completed_invocation(root_path)?,
+        None => match store.latest_completed_run_any_root()? {
+            Some(run) => store.run_invocation(run.id)?,
+            None => Vec::new(),
+        },
+    })
 }
 
 mod explain;

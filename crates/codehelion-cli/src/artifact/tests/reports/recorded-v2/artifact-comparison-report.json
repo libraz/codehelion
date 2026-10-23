@@ -1,0 +1,102 @@
+{
+  "schema_version": "artifact-comparison-report-v2",
+  "before": {
+    "path": "before.o",
+    "format": "macho",
+    "fingerprint": "cba7a6b2be75672785d6d68828783626",
+    "architecture": "aarch64",
+    "skipped_architectures": [],
+    "build_variant": null,
+    "code_section_bytes": 24,
+    "data_segment_bytes": 0,
+    "sizes": {
+      "observed_bytes": 592,
+      "duplicated_bytes": 12,
+      "duplicated_bytes_normalized": null,
+      "retained_bytes": null,
+      "shared_dependency_bytes": null,
+      "duplicated_data_bytes": null,
+      "upper_bound_savings_bytes": 12,
+      "estimated_refactor_savings_bytes": null,
+      "verified_savings_bytes": null,
+      "clone_confidence": "high",
+      "savings_confidence": "unavailable",
+      "assumptions": [
+        "upper_bound_savings_bytes is not a guaranteed reduction",
+        "estimated_refactor_savings_bytes needs source-artifact mapping",
+        "duplicated_bytes counts byte-identical groups only",
+        "duplicated_bytes_normalized needs a normalizer for this architecture",
+        "duplicated_data_bytes needs independently established data regions",
+        "retained and shared dependency sizes need a backend that establishes call edges",
+        "upper_bound_savings_bytes counts duplicate code only and excludes duplicated_bytes_normalized and duplicated_data_bytes"
+      ]
+    }
+  },
+  "after": {
+    "path": "after.o",
+    "format": "macho",
+    "fingerprint": "9c800643fe85135eb2254abfe54bd38d",
+    "architecture": "aarch64",
+    "skipped_architectures": [],
+    "build_variant": null,
+    "code_section_bytes": 12,
+    "data_segment_bytes": 0,
+    "sizes": {
+      "observed_bytes": 520,
+      "duplicated_bytes": 0,
+      "duplicated_bytes_normalized": null,
+      "retained_bytes": null,
+      "shared_dependency_bytes": null,
+      "duplicated_data_bytes": null,
+      "upper_bound_savings_bytes": 0,
+      "estimated_refactor_savings_bytes": null,
+      "verified_savings_bytes": null,
+      "clone_confidence": "high",
+      "savings_confidence": "unavailable",
+      "assumptions": [
+        "upper_bound_savings_bytes is not a guaranteed reduction",
+        "estimated_refactor_savings_bytes needs source-artifact mapping",
+        "duplicated_bytes counts byte-identical groups only",
+        "duplicated_bytes_normalized needs a normalizer for this architecture",
+        "duplicated_data_bytes needs independently established data regions",
+        "retained and shared dependency sizes need a backend that establishes call edges",
+        "upper_bound_savings_bytes counts duplicate code only and excludes duplicated_bytes_normalized and duplicated_data_bytes"
+      ]
+    }
+  },
+  "containment": null,
+  "observed_size_reduction_bytes": 72,
+  "duplicated_code_delta_bytes": -12,
+  "duplicated_data_delta_bytes": null,
+  "code_section_delta_bytes": -12,
+  "data_segment_delta_bytes": 0,
+  "calibration": null,
+  "symbol_changes": {
+    "added": 0,
+    "removed": 1,
+    "modified_named_symbols": 0
+  },
+  "symbol_deltas": [
+    {
+      "kind": "removed",
+      "name": "_scale_copy",
+      "fingerprint": "a8b6c4dbbf39d6d0d1d7ede62e707ab1",
+      "size_delta_bytes": -12
+    }
+  ],
+  "duplicate_group_deltas": [
+    {
+      "kind": "exact",
+      "fingerprint": "915c52ec0600eecaa3c1a10b8b432bf7",
+      "duplicated_bytes_delta": -12,
+      "members_delta": -2
+    }
+  ],
+  "build_variant_warning": "no build variants were supplied; build-condition differences cannot be assessed",
+  "assumptions": [
+    "symbol identity is content-derived; an equal name with a changed fingerprint is reported as modified",
+    "symbol identity drops instruction immediates, so a symbol found on both sides whose bytes still differ is reported as resized or modified rather than as unchanged",
+    "observed_size_reduction_bytes is a measured artifact-byte difference, not a refactoring estimate",
+    "verified_savings_bytes attributes the whole observed artifact difference to the calibrated clone group, which holds only when the two artifacts differ in nothing else; this comparison establishes the artifact format and the build variant and nothing further"
+  ]
+}

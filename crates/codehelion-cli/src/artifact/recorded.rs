@@ -8,7 +8,7 @@ use codehelion_store::artifact::{
     ArtifactAnalysisContainment, ArtifactAnalysisMapping, ArtifactAnalysisSnapshot,
     ArtifactAnalysisSourceMap, ArtifactAnalysisSourceMapOutcome,
     ArtifactAnalysisSourceMapReason as SourceMapReason, ArtifactAnalysisSymbol,
-    ArtifactAnalysisUnmappedSource, ArtifactAnalysisUnmappedSymbol,
+    ArtifactAnalysisUnmappedSource, ArtifactAnalysisUnmappedSymbol, MAX_ARTIFACT_IR_JSON_BYTES,
 };
 use codehelion_store::{BuildVariantFingerprint, Store};
 
@@ -96,7 +96,7 @@ pub(super) fn record(
     build_variant: Option<&BuildVariantEvidence>,
     started_at: &str,
     finished_at: &str,
-) -> Result<(i64, Option<ArtifactCorrelationReport>)> {
+) -> Result<(Option<i64>, Option<ArtifactCorrelationReport>)> {
     let symbols: Vec<ArtifactAnalysisSymbol> = artifact
         .symbols
         .iter()
@@ -146,10 +146,15 @@ pub(super) fn record(
             artifact.schema_version
         );
     }
-    let ir_json = serialize_artifact_ir(artifact)?;
     let correlation_report = args
         .source_run
         .map(|source_run| ArtifactCorrelationReport::from_rows(source_run, artifact, &correlation));
+    let Some(ir_json) = serialize_artifact_ir(artifact)? else {
+        eprintln!(
+            "warning: the analysis IR exceeds the storage limit of {MAX_ARTIFACT_IR_JSON_BYTES} bytes, so this analysis was not saved and `artifact report` cannot replay it"
+        );
+        return Ok((None, correlation_report));
+    };
     let clone_group_savings = correlation_report.as_ref().map_or_else(
         || Ok(Vec::new()),
         |report| stored_clone_group_savings(report.source_run, &report.estimated_refactor_savings),
@@ -177,7 +182,7 @@ pub(super) fn record(
             .map(|report| report.snapshot(artifact)),
         clone_group_savings: &clone_group_savings,
     })?;
-    Ok((analysis_id, correlation_report))
+    Ok((Some(analysis_id), correlation_report))
 }
 
 /// The persisted form of every resolved reference, keeping the outcome the

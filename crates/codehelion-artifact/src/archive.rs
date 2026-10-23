@@ -81,6 +81,7 @@ impl ArchiveBackend {
         // archive that was actually observed.
         let mut next_header = MEMBER_REGION_START;
         let mut pending = PendingGraph::default();
+        let mut architecture = MemberArchitecture::Unseen;
         for member in archive.members() {
             let member = match member {
                 Ok(member) => member,
@@ -153,6 +154,7 @@ impl ArchiveBackend {
             } else if let Some(format) = format {
                 match parse_member(format, data, budget) {
                     Ok(member_ir) => {
+                        architecture.observe(member_ir.architecture.as_deref());
                         merge_member(&mut ir, member_ir, &provenance, offset, &mut pending);
                     }
                     Err(error) => provenance.parse_error = Some(error.to_string()),
@@ -163,6 +165,7 @@ impl ArchiveBackend {
             ir.archive_members.push(provenance);
         }
         pending.finish(&mut ir);
+        ir.architecture = architecture.common();
         ir.capabilities = ArtifactCapabilities {
             symbols: !ir.symbols.is_empty(),
             call_graph: !ir.calls.is_empty(),
@@ -179,6 +182,33 @@ impl ArchiveBackend {
             data_segments: !ir.data_segments.is_empty(),
         };
         Ok(ir)
+    }
+}
+
+/// The architecture the parsed members agree on, if they all name the same one.
+enum MemberArchitecture {
+    /// No member has been parsed yet.
+    Unseen,
+    /// Every parsed member named this architecture.
+    Common(String),
+    /// Two parsed members disagreed, or one could not name its architecture.
+    Mixed,
+}
+
+impl MemberArchitecture {
+    fn observe(&mut self, member: Option<&str>) {
+        *self = match (std::mem::replace(self, Self::Mixed), member) {
+            (Self::Unseen, Some(member)) => Self::Common(member.to_owned()),
+            (Self::Common(common), Some(member)) if common == member => Self::Common(common),
+            _ => Self::Mixed,
+        };
+    }
+
+    fn common(self) -> Option<String> {
+        match self {
+            Self::Common(common) => Some(common),
+            Self::Unseen | Self::Mixed => None,
+        }
     }
 }
 
@@ -464,6 +494,31 @@ mod tests {
         assert_eq!(ir.symbols.len(), 2, "{ir:#?}");
         assert_ne!(ir.symbols[0].fingerprint, ir.symbols[1].fingerprint);
         assert!(ir.capabilities.symbols);
+    }
+
+    #[test]
+    fn the_architecture_is_recorded_only_when_every_parsed_member_shares_it() {
+        let ir = ArchiveBackend
+            .parse(&archive_fixture())
+            .expect("parse archive fixture");
+        assert_eq!(ir.architecture.as_deref(), Some("x86_64"));
+
+        let mut object =
+            WriteObject::new(BinaryFormat::Elf, Architecture::Aarch64, Endianness::Little);
+        let text = object.section_id(StandardSection::Text);
+        object.append_section_data(text, &[0; 4], 4);
+        let arm = object.write().expect("write AArch64 ELF member");
+        let mut mixed = b"!<arch>\n".to_vec();
+        mixed.extend(archive_member("arm.o", &arm));
+        mixed.extend(archive_member("x86.obj", &coff_member(b"x86")));
+        let ir = ArchiveBackend.parse(&mixed).expect("parse mixed archive");
+        assert!(
+            ir.archive_members
+                .iter()
+                .all(|member| member.parse_error.is_none()),
+            "{ir:#?}"
+        );
+        assert_eq!(ir.architecture, None);
     }
 
     #[test]

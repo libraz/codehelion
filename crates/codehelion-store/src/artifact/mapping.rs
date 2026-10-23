@@ -266,12 +266,13 @@ impl ArtifactAnalysisSourceKind {
         }
     }
 
-    pub(crate) fn from_sql(value: &str) -> Result<Self, StoreError> {
+    /// Decode a stored source kind, naming `field` as the column it came from.
+    pub(crate) fn from_sql(field: &'static str, value: &str) -> Result<Self, StoreError> {
         match value {
             "unit" => Ok(Self::Unit),
             "fragment" => Ok(Self::Fragment),
             _ => Err(StoreError::UnknownVocabulary {
-                field: "artifact_analysis_source_mapping.source_kind",
+                field,
                 value: value.to_owned(),
             }),
         }

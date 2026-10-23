@@ -1,0 +1,185 @@
+{
+  "schema_version": "artifact-report-v2",
+  "path": "before.o",
+  "analysis_id": 1,
+  "build_variant": null,
+  "correlation": null,
+  "containment": null,
+  "format": "macho",
+  "fingerprint": "cba7a6b2be75672785d6d68828783626",
+  "observed_bytes": 592,
+  "architecture": "aarch64",
+  "skipped_architectures": [],
+  "code_section_bytes": 24,
+  "data_segment_bytes": 0,
+  "sections": 2,
+  "section_details": [
+    {
+      "name": "__text",
+      "offset": 392,
+      "size": 24,
+      "executable": true
+    },
+    {
+      "name": "__compact_unwind",
+      "offset": 416,
+      "size": 64,
+      "executable": false
+    }
+  ],
+  "imports": 0,
+  "import_details": [],
+  "symbols": [
+    {
+      "fingerprint": "fddffb98c7ceddd168cb89374602779b",
+      "name": "_scale",
+      "exported": true,
+      "offset": 392,
+      "size": 12,
+      "size_inferred": true
+    },
+    {
+      "fingerprint": "a8b6c4dbbf39d6d0d1d7ede62e707ab1",
+      "name": "_scale_copy",
+      "exported": true,
+      "offset": 404,
+      "size": 12,
+      "size_inferred": true
+    }
+  ],
+  "entry_points": 0,
+  "calls": 0,
+  "relocations": 2,
+  "relocation_details": [
+    {
+      "section": 2,
+      "offset": 448,
+      "kind": "Absolute",
+      "target": null
+    },
+    {
+      "section": 2,
+      "offset": 416,
+      "kind": "Absolute",
+      "target": null
+    }
+  ],
+  "source_mappings": 0,
+  "source_maps": [],
+  "archive_members": [],
+  "data_segments": 0,
+  "data_segment_details": [],
+  "capabilities": {
+    "symbols": true,
+    "call_graph": false,
+    "source_mapping": false,
+    "debug_info_unreadable": false,
+    "normalized_duplicates": false,
+    "independent_data_segments": false,
+    "relocations": true,
+    "data_segments": false
+  },
+  "sizes": {
+    "observed_bytes": 592,
+    "duplicated_bytes": 12,
+    "duplicated_bytes_normalized": null,
+    "retained_bytes": null,
+    "shared_dependency_bytes": null,
+    "duplicated_data_bytes": null,
+    "upper_bound_savings_bytes": 12,
+    "estimated_refactor_savings_bytes": null,
+    "verified_savings_bytes": null,
+    "clone_confidence": "high",
+    "savings_confidence": "unavailable",
+    "assumptions": [
+      "upper_bound_savings_bytes is not a guaranteed reduction",
+      "estimated_refactor_savings_bytes needs source-artifact mapping",
+      "duplicated_bytes counts byte-identical groups only",
+      "duplicated_bytes_normalized needs a normalizer for this architecture",
+      "duplicated_data_bytes needs independently established data regions",
+      "retained and shared dependency sizes need a backend that establishes call edges",
+      "upper_bound_savings_bytes counts duplicate code only and excludes duplicated_bytes_normalized and duplicated_data_bytes"
+    ]
+  },
+  "dead_code": null,
+  "retained_sizes": null,
+  "duplicates": {
+    "exact_groups": 1,
+    "exact_duplicated_bytes": 12,
+    "normalized_groups": 0,
+    "normalized_duplicated_bytes": 0
+  },
+  "duplicate_groups": {
+    "exact": [
+      {
+        "fingerprint": [
+          145,
+          92,
+          82,
+          236,
+          6,
+          0,
+          238,
+          202,
+          163,
+          193,
+          161,
+          11,
+          139,
+          67,
+          43,
+          247
+        ],
+        "duplicated_bytes": 12,
+        "members": [
+          {
+            "symbol": [
+              253,
+              223,
+              251,
+              152,
+              199,
+              206,
+              221,
+              209,
+              104,
+              203,
+              137,
+              55,
+              70,
+              2,
+              119,
+              155
+            ],
+            "offset": 392,
+            "size": 12
+          },
+          {
+            "symbol": [
+              168,
+              182,
+              196,
+              219,
+              191,
+              57,
+              214,
+              208,
+              209,
+              215,
+              237,
+              230,
+              46,
+              112,
+              122,
+              177
+            ],
+            "offset": 404,
+            "size": 12
+          }
+        ]
+      }
+    ],
+    "normalized": [],
+    "data": []
+  }
+}

@@ -100,6 +100,11 @@ they are for `scan`. A replay shows the suppressions the run applied when it was
 recorded, not the policy in force now, and does not reproduce the originating
 scan's baseline status; it notes that.
 
+The `--compare-build-variants` and `--compare-languages` comparisons, and the
+reason one did not run, belong to the scan invocation and are not recorded with
+its partitions, so a replay does not reproduce them; a replay of a Semantic run
+notes that.
+
 ## `explain`
 
 Shows one group or one occurrence from the local database, by stable id or an

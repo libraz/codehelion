@@ -110,6 +110,7 @@ impl ElfBackend {
             })
             .transpose()?;
         let mut ir = ArtifactIr::empty(ArtifactFormat::Elf, bytes);
+        ir.architecture = crate::architecture_label(file.architecture());
         collect_sections(&file, &mut ir).map_err(|error| malformed(error.to_string()))?;
         collect_undefined_imports(file.symbols().chain(file.dynamic_symbols()), &mut ir);
         // Joins resolve to symbol positions, so copies sharing a fingerprint
