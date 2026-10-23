@@ -59,18 +59,18 @@ codehelion scan · structural mode · ~/src/codehelion
      └─   corpus/synthetic/rust/type1.rs:35-54                  values_equal
 
  #2  0.54  type-1 run ×2  106 tokens  53c92308
-     ├─ ◆ crates/codehelion-cli/src/scan/structural.rs:160-172  run_with
+     ├─ ◆ crates/codehelion-cli/src/scan/structural.rs:159-171  run_with
      └─   crates/codehelion-cli/src/scan.rs:61-73               run
 
-... and 1233 more groups (--limit 0 lists every one)
+... and 1305 more groups (--limit 0 lists every one)
 
 seams: frontend-c-cpp 12 asymmetric changes, 7 breaches (last 6e014d86), 394 findings
        readme-en-ja 1 asymmetric change, 1 breach (last 634aa5c9)
        artifact-fixture-scripts 3 asymmetric changes, 1 breach (last 6f5d63c3)
 
-1,602 groups (type-1 83, type-2 198, type-3 1321) · 367 suppressed · sorted by priority
-supplemental: 503 siblings (--show-siblings; 103 dropped by search ceilings), 1,000 near misses (--show-near-misses; 5,986 dropped by the retention cap)
-560 files, 206,818 lines, 1,083,595 tokens · run 11 (replay: codehelion report --run 11)
+1,702 groups (type-1 85, type-2 204, type-3 1413) · 395 suppressed · sorted by priority
+supplemental: 556 siblings (--show-siblings; 116 dropped by search ceilings), 1,000 near misses (--show-near-misses; 6,746 dropped by the retention cap)
+569 files, 220,783 lines, 1,167,009 tokens · run 12 (replay: codehelion report --run 12)
 ◆ the occurrence a group is measured against · "run" a repeated stretch of statements, not a whole unit · ×N the number of occurrences
 open one: codehelion explain 64f5bc34 · list every group: --limit 0
 ```
