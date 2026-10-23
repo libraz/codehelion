@@ -39,12 +39,24 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// `configured` carries operator authority: [`config::helper_paths`](crate::config::helper_paths) is the
 /// only way a location reaches this, and it is what keeps a path written by the
 /// tree under analysis from naming the program that gets started here.
+///
+/// `None` only when nothing was configured and nothing was found. A configured
+/// location is never replaced by a search, so one that holds no program is
+/// reported at that location as unusable rather than as missing.
 pub(crate) fn interrogate(
     name: &str,
     configured: Option<&Path>,
     sandbox: codehelion_helper::SandboxRequest,
 ) -> Option<doctor::HelperFacts> {
-    let path = codehelion_helper::locate(name, configured.map(ConfiguredHelper::operator))?;
+    let Some(path) = codehelion_helper::locate(name, configured.map(ConfiguredHelper::operator))
+    else {
+        return configured.map(|path| doctor::HelperFacts {
+            path: path.to_path_buf(),
+            state: doctor::HelperState::Silent(
+                "no program is at this configured location".to_string(),
+            ),
+        });
+    };
     let state =
         match codehelion_helper::Helper::start_with_sandbox(&path, &[], HANDSHAKE_TIMEOUT, sandbox)
         {

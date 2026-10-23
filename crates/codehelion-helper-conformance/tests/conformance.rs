@@ -208,6 +208,23 @@ fn a_helper_that_cannot_resolve_names_is_refused_rather_than_degraded() {
     );
 }
 
+/// A helper that acknowledges shutdown and then stays is given the same short
+/// grace the acknowledgement had and is then stopped, so it cannot hold a run
+/// open after its answers are in.
+#[test]
+fn a_helper_that_acknowledges_shutdown_and_lingers_is_stopped_within_a_bound() {
+    let helper = start("lingers", DEADLINE).expect("it shakes hands");
+    let started = Instant::now();
+    helper
+        .shutdown()
+        .expect("an acknowledged shutdown is not an error");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "shutdown waited {:?} on a helper that would never leave",
+        started.elapsed()
+    );
+}
+
 #[test]
 fn a_busy_helper_shutdown_does_not_spend_another_analysis_timeout() {
     let analysis_timeout = Duration::from_secs(2);
@@ -424,6 +441,29 @@ fn an_answer_in_a_schema_nobody_reads_is_not_read() {
     // helper works and needs updating, which is a different thing to tell
     // someone.
     assert_eq!(outcome, Analysis::Missing(Unavailability::UnreadableSchema));
+}
+
+/// A helper that fails its first start and starts on the retry is the helper
+/// for the rest of the run: the failed start is neither remembered against
+/// later units nor counted as a restart of a helper that never ran.
+#[test]
+fn a_helper_that_starts_on_the_retry_answers_every_later_unit() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let marker = directory.path().join("started-once");
+    let mut supervisor = Supervisor::new(
+        PathBuf::from(MOCK),
+        vec!["dies-once".to_owned(), marker.display().to_string()],
+        DEADLINE,
+    );
+    for file in ["src/first.rs", "src/second.rs", "src/third.rs"] {
+        let analysis = supervisor.analyze(&unit(file), &[Capability::Types]);
+        assert!(
+            matches!(analysis, Analysis::Done(_)),
+            "{file}: {analysis:?}"
+        );
+    }
+    assert_eq!(supervisor.restarts(), 0, "no helper that ran was restarted");
+    supervisor.shutdown();
 }
 
 #[test]

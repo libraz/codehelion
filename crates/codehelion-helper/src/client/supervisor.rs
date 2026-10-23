@@ -69,11 +69,11 @@ pub struct Supervisor {
     /// next. This survives that reset, so give-up carries what was actually
     /// said rather than the empty span the next call started with.
     last_failure: Vec<String>,
-    /// Whether a helper has ever been started, which is what tells a first
-    /// start apart from a restart.
+    /// Whether a helper has ever started and answered its handshake, which is
+    /// what tells a first start apart from a restart.
     started: bool,
-    /// Set once the run stops starting helpers, under the condition that
-    /// stopped it.
+    /// Set while no helper can be started, under the condition that stopped
+    /// it, and cleared by the next start that succeeds.
     given_up: Option<Explained>,
 }
 
@@ -319,7 +319,6 @@ impl Supervisor {
                 self.restarts = self.restarts.saturating_add(1);
                 self.consecutive_restarts = self.consecutive_restarts.saturating_add(1);
             }
-            self.started = true;
             let arguments: Vec<&str> = self.args.iter().map(String::as_str).collect();
             let started =
                 Helper::start_with_sandbox(&self.program, &arguments, self.timeout, self.sandbox);
@@ -338,6 +337,10 @@ impl Supervisor {
                     return Err(error);
                 }
             };
+            // A helper is running, so whatever stopped an earlier start no
+            // longer speaks for the units after this one.
+            self.started = true;
+            self.given_up = None;
             self.spoke_with = Some(helper.identity().clone());
             self.helper = Some(helper);
         }

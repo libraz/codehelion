@@ -10,6 +10,7 @@
 
 use std::env;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 #[allow(clippy::disallowed_types)]
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
@@ -21,10 +22,21 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 /// before serving their protocol.
 pub const MEMORY_LIMIT_ENV: &str = "CODEHELION_HELPER_MAX_MEMORY_BYTES";
 
-/// A memory ceiling requested for a helper process.
+/// Environment variable carrying the byte ceiling for files a helper reads out
+/// of the scanned tree.
+///
+/// Set or removed by [`spawn`] like [`MEMORY_LIMIT_ENV`], and read back through
+/// [`tree_file_ceiling`].
+pub const MAX_FILE_BYTES_ENV: &str = "CODEHELION_HELPER_MAX_FILE_BYTES";
+
+/// How often a bounded reap looks again for a helper that has not exited yet.
+const REAP_POLL: Duration = Duration::from_millis(5);
+
+/// The containment requested for a helper process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SandboxRequest {
     max_memory_bytes: Option<u64>,
+    max_file_bytes: Option<u64>,
 }
 
 impl SandboxRequest {
@@ -33,6 +45,7 @@ impl SandboxRequest {
     pub const fn unrestricted() -> Self {
         Self {
             max_memory_bytes: None,
+            max_file_bytes: None,
         }
     }
 
@@ -41,7 +54,24 @@ impl SandboxRequest {
     pub const fn require_memory_limit(max_memory_bytes: u64) -> Self {
         Self {
             max_memory_bytes: Some(max_memory_bytes),
+            max_file_bytes: None,
         }
+    }
+
+    /// Also bound every file the helper reads out of the scanned tree to
+    /// `max_file_bytes`, the ceiling the scanner applies to the same tree.
+    #[must_use]
+    pub const fn with_file_ceiling(self, max_file_bytes: u64) -> Self {
+        Self {
+            max_file_bytes: Some(max_file_bytes),
+            ..self
+        }
+    }
+
+    /// The byte ceiling for tree-supplied files, if one was requested.
+    #[must_use]
+    pub const fn max_file_bytes(self) -> Option<u64> {
+        self.max_file_bytes
     }
 
     /// The requested memory ceiling, if one is required.
@@ -104,6 +134,12 @@ pub enum SandboxError {
     /// The parent supplied an invalid ceiling to a helper child.
     #[error("the requested helper memory limit is not a valid byte count: {value}")]
     InvalidMemoryLimit {
+        /// The invalid environment value.
+        value: String,
+    },
+    /// The parent supplied an invalid file-size ceiling to a helper child.
+    #[error("the requested helper file-size limit is not a valid byte count: {value}")]
+    InvalidFileCeiling {
         /// The invalid environment value.
         value: String,
     },
@@ -180,12 +216,15 @@ pub const fn enforce_current_process_memory_limit(
     })
 }
 
-/// Apply the parent-requested memory ceiling, if any, before serving a helper.
+/// Apply the parent-requested memory ceiling, if any, before serving a helper,
+/// and check the file-size ceiling it was given.
 ///
 /// # Errors
 ///
-/// Returns an error if the value cannot be parsed or cannot be enforced.
+/// Returns an error if either value cannot be parsed, or the memory ceiling
+/// cannot be enforced.
 pub fn enforce_current_process_limit_from_environment() -> Result<(), SandboxError> {
+    requested_file_ceiling()?;
     let Some(value) = env::var_os(MEMORY_LIMIT_ENV) else {
         return Ok(());
     };
@@ -196,6 +235,28 @@ pub fn enforce_current_process_limit_from_environment() -> Result<(), SandboxErr
             value: value.clone(),
         })?;
     enforce_current_process_memory_limit(max_memory_bytes)
+}
+
+/// The byte ceiling for files this helper reads out of the scanned tree.
+///
+/// Unbounded when the parent requested none. A malformed value is refused at
+/// startup by [`enforce_current_process_limit_from_environment`], so it is
+/// read here as no ceiling only in a process that skipped that check.
+#[must_use]
+pub fn tree_file_ceiling() -> u64 {
+    requested_file_ceiling().ok().flatten().unwrap_or(u64::MAX)
+}
+
+/// The file-size ceiling in this process's environment, if one was set.
+fn requested_file_ceiling() -> Result<Option<u64>, SandboxError> {
+    let Some(value) = env::var_os(MAX_FILE_BYTES_ENV) else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy().into_owned();
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| SandboxError::InvalidFileCeiling { value })
 }
 
 /// Start a helper after enforcing the requested containment policy.
@@ -218,6 +279,7 @@ pub fn spawn(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_child_memory_limit(&mut command, request);
+    configure_child_file_ceiling(&mut command, request);
     configure_child_process_group(&mut command);
     command
         .spawn()
@@ -299,6 +361,23 @@ impl HelperProcess {
         self.reaped = true;
     }
 
+    /// Give the helper up to `grace` to exit on its own, then terminate it, and
+    /// reap it either way.
+    ///
+    /// Bounded on every path: a helper that acknowledged a shutdown and then
+    /// lingers costs `grace` and no more.
+    pub fn reap_within(&mut self, grace: Duration) {
+        let deadline = Instant::now() + grace;
+        while !self.has_exited() {
+            if Instant::now() >= deadline {
+                self.terminate();
+                self.wait();
+                return;
+            }
+            std::thread::sleep(REAP_POLL);
+        }
+    }
+
     /// Whether the helper has already exited.
     ///
     /// Asking reaps a child that has, so this also ends the life of its
@@ -366,6 +445,17 @@ fn configure_child_memory_limit(command: &mut Command, request: SandboxRequest) 
         command.env(MEMORY_LIMIT_ENV, max_memory_bytes.to_string());
     } else {
         command.env_remove(MEMORY_LIMIT_ENV);
+    }
+}
+
+/// Put the requested file-size ceiling in the child environment, never
+/// inheriting an unrelated value from the scanner's own environment.
+#[allow(clippy::disallowed_types)]
+fn configure_child_file_ceiling(command: &mut Command, request: SandboxRequest) {
+    if let Some(max_file_bytes) = request.max_file_bytes() {
+        command.env(MAX_FILE_BYTES_ENV, max_file_bytes.to_string());
+    } else {
+        command.env_remove(MAX_FILE_BYTES_ENV);
     }
 }
 
@@ -568,6 +658,31 @@ mod tests {
         let value = unrestricted
             .get_envs()
             .find(|(name, _)| *name == MEMORY_LIMIT_ENV)
+            .expect("the inherited setting is explicitly removed")
+            .1;
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn child_environment_carries_only_the_requested_file_ceiling() {
+        let mut limited = Command::new("helper");
+        configure_child_file_ceiling(
+            &mut limited,
+            SandboxRequest::unrestricted().with_file_ceiling(512),
+        );
+        let value = limited
+            .get_envs()
+            .find(|(name, _)| *name == MAX_FILE_BYTES_ENV)
+            .and_then(|(_, value)| value)
+            .expect("requested ceiling is passed to the child");
+        assert_eq!(value, "512");
+
+        let mut unrestricted = Command::new("helper");
+        unrestricted.env(MAX_FILE_BYTES_ENV, "inherited value");
+        configure_child_file_ceiling(&mut unrestricted, SandboxRequest::unrestricted());
+        let value = unrestricted
+            .get_envs()
+            .find(|(name, _)| *name == MAX_FILE_BYTES_ENV)
             .expect("the inherited setting is explicitly removed")
             .1;
         assert_eq!(value, None);

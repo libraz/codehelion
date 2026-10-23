@@ -210,6 +210,43 @@ fn permitting_a_build_script_runs_it_and_analyses_what_it_wrote() {
     );
 }
 
+/// A permitted build script that fails leaves the code it generates unwritten,
+/// so the crate is not served as a complete analysis: the unit is a helper
+/// failure, and Cargo's error travels with it.
+#[test]
+fn a_permitted_build_script_that_fails_leaves_the_crate_unanswered() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("build-script");
+    copy_fixture(&codehelion_fixtures::rust("build-script").unwrap(), &root);
+    std::fs::write(
+        root.join("build.rs"),
+        "fn main() { panic!(\"the generated table could not be written\"); }\n",
+    )
+    .expect("replace the build script");
+    let unit = UnitRef {
+        unit: "generated_tables".to_string(),
+        file: root.join("src/lib.rs").display().to_string(),
+        variant: "host".to_string(),
+    };
+    let mut helper = helper().permitting(vec![Execution::BuildScript]);
+
+    let analysis = helper
+        .analyze(&unit, &[Capability::Types])
+        .expect("the helper should answer");
+
+    let Analysis::Missing(reason) = analysis else {
+        panic!("a crate whose build script failed must not be answered: {analysis:?}");
+    };
+    assert_eq!(reason, Unavailability::HelperDied);
+    assert!(reason.is_helper_failure());
+    let said = helper.take_answer_diagnostics();
+    assert!(
+        said.iter().any(|line| line.contains("build script")),
+        "the failure is explained: {said:?}"
+    );
+    helper.shutdown().expect("the helper should stop cleanly");
+}
+
 /// Copy a fixture's own files, and only those: a `target` directory left by an
 /// earlier run would be carried into a tree whose whole point is that nothing
 /// has been built in it yet.

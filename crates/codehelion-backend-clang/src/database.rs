@@ -23,6 +23,7 @@ use std::path::{Component, Path, PathBuf};
 
 use codehelion_helper::CompileCommandSelector;
 use codehelion_helper_protocol::compile_commands::RecordedCommand;
+use codehelion_helper_protocol::tree_file::{Links, read_text_bounded};
 
 /// Where a database can sit relative to the directory a project is rooted at.
 ///
@@ -517,7 +518,8 @@ fn search(start: &Path) -> Option<Location> {
 impl Database {
     /// Read the database at `path`, spelling its answers against `root`.
     fn read(path: &Path, root: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
+        // Followed through a link, the usual way a database is put at the root.
+        let text = read_text_bounded(path, Links::Follow, codehelion_helper::tree_file_ceiling())
             .map_err(|error| format!("reading {}: {error}", path.display()))?;
         let raw: Vec<RecordedCommand> = serde_json::from_str(&text)
             .map_err(|error| format!("parsing {}: {error}", path.display()))?;

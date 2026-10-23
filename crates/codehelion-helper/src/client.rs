@@ -30,7 +30,7 @@ mod supervisor;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::ir::{Unavailability, UnitRef};
 use crate::protocol::{
@@ -257,41 +257,39 @@ impl Helper {
         self.poisoned_after_timeout
     }
 
-    /// Ask the helper to finish and wait for it to go.
+    /// Ask the helper to finish and wait, for a bounded time, for it to go.
     ///
     /// A helper that will not leave is killed: a scan that has its answers must
-    /// not be held open by a process that has stopped listening.
+    /// not be held open by a process that has stopped listening. That includes
+    /// one that acknowledges and then lingers, which is given the same short
+    /// grace the acknowledgement was.
     ///
     /// # Errors
     ///
-    /// Fails if the request cannot be written. A helper that dies rather than
-    /// acknowledging is not an error — it left, which is what was asked.
+    /// Fails if the helper answered the request with something unreadable or
+    /// unexpected; it has been stopped either way. A helper that dies or times
+    /// out rather than acknowledging is not an error — it left, or was made
+    /// to, which is what was asked.
     pub fn shutdown(mut self) -> Result<(), HelperError> {
+        let ack = self.timeout.min(SHUTDOWN_ACK_TIMEOUT);
         if self.poisoned_after_timeout {
-            self.child.terminate();
-            self.child.wait();
+            self.child.reap_within(Duration::ZERO);
             return Ok(());
         }
-        let ack = self.timeout.min(SHUTDOWN_ACK_TIMEOUT);
-        let id = match self.send_within(RequestBody::Shutdown, ack) {
-            Ok(id) => id,
-            Err(HelperError::TimedOut { .. }) => {
-                // It has stopped reading, so asking is over. It leaves the way
-                // a helper that will not leave always does.
-                self.child.terminate();
-                self.child.wait();
-                return Ok(());
-            }
-            Err(error) => return Err(error),
+        let outcome = match self.exchange_bounded(RequestBody::Shutdown, ack) {
+            Ok(ResponseBody::Shutdown)
+            | Err(HelperError::Died { .. } | HelperError::TimedOut { .. }) => Ok(()),
+            Ok(_) => Err(HelperError::Died {
+                stderr: vec!["the helper answered a shutdown with something else".into()],
+            }),
+            Err(error) => Err(error),
         };
-        match self.receive_with_timeout(id, ack) {
-            Ok(ResponseBody::Shutdown) | Err(HelperError::Died { .. }) => {}
-            Ok(_) | Err(_) => {
-                self.child.terminate();
-            }
+        if outcome.is_err() {
+            self.child.reap_within(Duration::ZERO);
+        } else {
+            self.child.reap_within(ack);
         }
-        self.child.wait();
-        Ok(())
+        outcome
     }
 
     /// Ask for one unit's compiler IR.
@@ -353,7 +351,7 @@ impl Helper {
             .copied()
             .filter(|capability| self.offers(*capability))
             .collect();
-        let id = self.send(RequestBody::Analyze(Analyze {
+        let answer = self.exchange(RequestBody::Analyze(Analyze {
             unit: unit.clone(),
             compile_command: compile_command.cloned(),
             read_boundary: read_boundary.map(|boundary| boundary.display().to_string()),
@@ -364,7 +362,7 @@ impl Helper {
             // impossible.
             permitted: self.permitted.clone(),
         }))?;
-        match self.receive(id)? {
+        match answer {
             ResponseBody::Analyzed(ir) => {
                 if ir.is_readable() {
                     Ok(Analysis::Done(ir))
@@ -399,10 +397,10 @@ impl Helper {
     /// reported as having refused: conditions nobody could name are not
     /// conditions a run may record its answers under.
     pub fn describe(&mut self, root: &Path) -> Result<BuildDescription, HelperError> {
-        let id = self.send(RequestBody::DescribeBuild(DescribeBuild {
+        let answer = self.exchange(RequestBody::DescribeBuild(DescribeBuild {
             root: root.display().to_string(),
         }))?;
-        match self.receive(id)? {
+        match answer {
             ResponseBody::Build(build) => Ok(*build),
             _ => Err(HelperError::Died {
                 stderr: vec!["the helper answered a build description with something else".into()],
@@ -412,12 +410,12 @@ impl Helper {
 
     /// Send the handshake and take what comes back.
     fn shake_hands(&mut self) -> Result<(), HelperError> {
-        let id = self.send(RequestBody::Handshake(ClientIdentity {
+        let answer = self.exchange(RequestBody::Handshake(ClientIdentity {
             client: env!("CARGO_PKG_NAME").into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
             protocol: PROTOCOL_VERSION,
         }))?;
-        let ResponseBody::Handshake(identity) = self.receive(id)? else {
+        let ResponseBody::Handshake(identity) = answer else {
             return Err(HelperError::Died {
                 stderr: vec!["the helper answered the handshake with something else".into()],
             });
@@ -442,9 +440,34 @@ impl Helper {
         Ok(())
     }
 
-    /// Write a request and return the id it was given.
-    fn send(&mut self, body: RequestBody) -> Result<u64, HelperError> {
-        self.send_within(body, self.timeout)
+    /// Send `body` and take its answer within the configured timeout.
+    fn exchange(&mut self, body: RequestBody) -> Result<ResponseBody, HelperError> {
+        self.exchange_bounded(body, self.timeout)
+    }
+
+    /// Send `body` and take its answer, the whole exchange bounded by
+    /// `timeout`.
+    ///
+    /// Every conversation with the helper goes through here. On expiry the
+    /// helper is terminated and reaped at once: a frame may be half-written
+    /// or an answer still on its way, and neither can be paired with a later
+    /// request, so nothing is gained by keeping the process.
+    fn exchange_bounded(
+        &mut self,
+        body: RequestBody,
+        timeout: Duration,
+    ) -> Result<ResponseBody, HelperError> {
+        let started = Instant::now();
+        let outcome = self.send_within(body, timeout).and_then(|id| {
+            self.receive_with_timeout(id, timeout.saturating_sub(started.elapsed()))
+        });
+        match outcome {
+            Err(HelperError::TimedOut { .. }) => {
+                self.child.reap_within(Duration::ZERO);
+                Err(HelperError::TimedOut { timeout })
+            }
+            outcome => outcome,
+        }
     }
 
     /// Write a request subject to one operation's deadline.
@@ -474,11 +497,6 @@ impl Helper {
             }
             Err(Delivery::Failed(error)) => Err(self.explain(error)),
         }
-    }
-
-    /// Wait for the answer to `expected`, or for the deadline.
-    fn receive(&mut self, expected: u64) -> Result<ResponseBody, HelperError> {
-        self.receive_with_timeout(expected, self.timeout)
     }
 
     /// Wait for the answer to `expected`, subject to one operation's deadline.
@@ -550,9 +568,8 @@ impl Drop for Helper {
         // A helper outliving the run would hold a compiler process open for as
         // long as the scan lives. Whatever state the conversation is in, the
         // process goes — unless it has already gone, in which case both of
-        // these are the no-ops that keep its number out of a signal.
-        self.child.terminate();
-        self.child.wait();
+        // this is the no-op that keeps its number out of a signal.
+        self.child.reap_within(Duration::ZERO);
     }
 }
 

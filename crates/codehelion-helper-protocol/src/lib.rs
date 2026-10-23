@@ -1,8 +1,9 @@
 //! Versioned messages exchanged with compiler helper processes.
 //!
 //! This crate contains only the serializable compiler IR, the framed wire
-//! protocol, and the reading of the compilation-database entry both sides of
-//! that protocol name a translation unit by. Process supervision, sandboxing,
+//! protocol, the reading of the compilation-database entry both sides of
+//! that protocol name a translation unit by, and the one bounded reader every
+//! side uses for a file the scanned tree supplies. Process supervision, sandboxing,
 //! and backend execution live in
 //! `codehelion-helper`, so storage and other protocol consumers do not acquire
 //! process-management dependencies.
@@ -12,6 +13,7 @@
 pub mod compile_commands;
 pub mod ir;
 pub mod protocol;
+pub mod tree_file;
 
 pub use compile_commands::{RecordedCommand, split_command};
 pub use ir::{COMPILER_IR_SCHEMA_VERSION, CompilerIr, Unavailability, UnitRef};

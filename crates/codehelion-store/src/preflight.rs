@@ -22,10 +22,11 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use codehelion_helper_protocol::tree_file::{Links, TreeFileError, read_regular_bounded};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::{StoreError, schema};
@@ -78,7 +79,11 @@ struct FileStamp {
 }
 
 /// Validate an existing database without writing to it.
+///
+/// Every member is first checked to be a regular file: opening a planted FIFO,
+/// whether here or inside `SQLite`, would wait for a writer that never comes.
 pub(super) fn validate_existing(path: &Path) -> Result<(), StoreError> {
+    ensure_members_are_regular(path)?;
     match validate_in_place(path) {
         // A schema this build does not support is a complete answer, and
         // reaching it read-only is the whole point: nothing was recovered,
@@ -175,6 +180,42 @@ fn sidecar_paths(path: &Path) -> [PathBuf; 3] {
     ]
 }
 
+/// How a member of the database is allowed to be a link.
+///
+/// The main file may be one, because where the operator put the database is
+/// theirs to decide; a sidecar may not, because it is opened by a name derived
+/// from the main file and a link there would reach wherever the tree pointed.
+const fn links_for(suffix: Option<&str>) -> Links {
+    if suffix.is_some() {
+        Links::Refuse
+    } else {
+        Links::Follow
+    }
+}
+
+/// Refuse the database when its main file or any sidecar exists and is not a
+/// regular file.
+fn ensure_members_are_regular(path: &Path) -> Result<(), StoreError> {
+    let members = std::iter::once((path.to_path_buf(), links_for(None))).chain(
+        ["-wal", "-journal", "-shm"]
+            .into_iter()
+            .map(|suffix| (sidecar_path(path, suffix), links_for(Some(suffix)))),
+    );
+    for (member, links) in members {
+        let metadata = match links {
+            Links::Refuse => fs::symlink_metadata(&member),
+            Links::Follow => fs::metadata(&member),
+        };
+        match metadata {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Err(not_regular(&member)),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(&error)),
+        }
+    }
+    Ok(())
+}
+
 fn snapshot_path(directory: &Path, original: &Path) -> PathBuf {
     let name = original
         .file_name()
@@ -184,70 +225,54 @@ fn snapshot_path(directory: &Path, original: &Path) -> PathBuf {
 
 fn stamp_members(path: &Path) -> Result<Vec<(String, FileStamp)>, StoreError> {
     let mut members = Vec::with_capacity(1 + SNAPSHOT_SIDECARS.len());
-    members.push(("main".to_string(), stamp(path)?));
+    members.push(("main".to_string(), stamp(path, links_for(None))?));
     for suffix in SNAPSHOT_SIDECARS {
-        members.push(((*suffix).to_string(), stamp(&sidecar_path(path, suffix))?));
+        members.push((
+            (*suffix).to_string(),
+            stamp(&sidecar_path(path, suffix), links_for(Some(suffix)))?,
+        ));
     }
     Ok(members)
 }
 
-fn stamp(path: &Path) -> Result<FileStamp, StoreError> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(FileStamp {
-                exists: false,
-                len: 0,
-                digest: [0; 32],
-            });
-        }
-        Err(error) => return Err(io_error(&error)),
-    };
+fn stamp(path: &Path, links: Links) -> Result<FileStamp, StoreError> {
     let mut hasher = blake3::Hasher::new();
-    let mut len = 0_u64;
-    let mut buffer = [0_u8; 16 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| io_error(&error))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        len = len
-            .checked_add(u64::try_from(read).map_err(|_| StoreError::PreflightIo {
-                message: "file length exceeded u64::MAX during preflight".to_string(),
-            })?)
-            .ok_or_else(|| StoreError::PreflightIo {
-                message: "file length exceeded u64::MAX during preflight".to_string(),
-            })?;
+    match read_regular_bounded(path, links, u64::MAX, &mut hasher) {
+        Ok(len) => Ok(FileStamp {
+            exists: true,
+            len,
+            digest: *hasher.finalize().as_bytes(),
+        }),
+        Err(error) if error.is_not_found() => Ok(FileStamp {
+            exists: false,
+            len: 0,
+            digest: [0; 32],
+        }),
+        Err(error) => Err(member_error(path, error)),
     }
-    Ok(FileStamp {
-        exists: true,
-        len,
-        digest: *hasher.finalize().as_bytes(),
-    })
 }
 
 fn copy_snapshot_members(original: &Path, snapshot: &Path) -> Result<(), StoreError> {
-    copy_one(original, snapshot)?;
+    copy_one(original, snapshot, links_for(None))?;
     for suffix in SNAPSHOT_SIDECARS {
         let source = sidecar_path(original, suffix);
-        if stamp(&source)?.exists {
-            copy_one(&source, &sidecar_path(snapshot, suffix))?;
+        let links = links_for(Some(suffix));
+        if stamp(&source, links)?.exists {
+            copy_one(&source, &sidecar_path(snapshot, suffix), links)?;
         }
     }
     Ok(())
 }
 
-fn copy_one(source: &Path, destination: &Path) -> Result<(), StoreError> {
-    let mut source_file = match File::open(source) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => {
+fn copy_one(source: &Path, destination: &Path, links: Links) -> Result<(), StoreError> {
+    let mut destination_file = File::create(destination).map_err(|error| io_error(&error))?;
+    match read_regular_bounded(source, links, u64::MAX, &mut destination_file) {
+        Ok(_) => {}
+        Err(error) if error.is_not_found() => {
             return Err(StoreError::DatabaseChangedDuringPreflight);
         }
-        Err(error) => return Err(io_error(&error)),
-    };
-    let mut destination_file = File::create(destination).map_err(|error| io_error(&error))?;
-    std::io::copy(&mut source_file, &mut destination_file).map_err(|error| io_error(&error))?;
+        Err(error) => return Err(member_error(source, error)),
+    }
     destination_file.flush().map_err(|error| io_error(&error))
 }
 
@@ -259,6 +284,22 @@ fn validate_snapshot(path: &Path) -> Result<(), StoreError> {
     conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     conn.pragma_update(None, "foreign_keys", true)?;
     schema::validate_existing(&conn)
+}
+
+fn not_regular(path: &Path) -> StoreError {
+    StoreError::PreflightIo {
+        message: format!("{} is not a regular file", path.display()),
+    }
+}
+
+fn member_error(path: &Path, error: TreeFileError) -> StoreError {
+    match error {
+        TreeFileError::NotRegular => not_regular(path),
+        TreeFileError::Io(error) => io_error(&error),
+        other => StoreError::PreflightIo {
+            message: format!("{}: {other}", path.display()),
+        },
+    }
 }
 
 fn io_error(error: &std::io::Error) -> StoreError {
@@ -366,17 +407,21 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("audit.db");
         populated(&path);
-        let before = stamp(&path).unwrap();
+        let before = stamp(&path, links_for(None)).unwrap();
 
         validate_existing(&path).expect("the baseline is the one this build writes");
 
-        assert_eq!(stamp(&path).unwrap(), before, "the database was written to");
+        assert_eq!(
+            stamp(&path, links_for(None)).unwrap(),
+            before,
+            "the database was written to"
+        );
         for suffix in SNAPSHOT_SIDECARS {
             // Opening a database that was left in write-ahead mode re-creates
             // the empty write-ahead file that closing it removed. What must
             // not appear is content: a byte in either sidecar would mean
             // something was recovered or checkpointed to answer a question.
-            let sidecar = stamp(&sidecar_path(&path, suffix)).unwrap();
+            let sidecar = stamp(&sidecar_path(&path, suffix), links_for(Some(suffix))).unwrap();
             assert_eq!(sidecar.len, 0, "{suffix} carries content after validating");
         }
     }
@@ -409,5 +454,31 @@ mod tests {
 
         drop(stop);
         writer.join().expect("the writer finishes");
+    }
+
+    /// A sidecar the tree planted as a FIFO is refused before anything opens
+    /// it, including `SQLite`'s own read-only connection.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_planted_as_a_sidecar_is_refused_without_blocking() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.db");
+        populated(&path);
+        let wal = sidecar_path(&path, "-wal");
+        #[allow(clippy::disallowed_types)]
+        let made = std::process::Command::new("mkfifo")
+            .arg(&wal)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        let started = Instant::now();
+        let error = validate_existing(&path).expect_err("a FIFO sidecar is not a database member");
+
+        assert!(
+            matches!(&error, StoreError::PreflightIo { message } if message.contains("not a regular file")),
+            "{error:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

@@ -35,6 +35,8 @@
 //! mock-helper wrong-revision-after-setup # changes response protocol on analysis
 //! mock-helper wrong-revision-on-poison # changes protocol only for `poison`
 //! mock-helper allergic          # dies on any unit whose file is named `poison`
+//! mock-helper lingers           # acknowledges shutdown, then does not exit
+//! mock-helper dies-once MARKER  # exits at startup unless MARKER exists, creating it
 //! ```
 
 use std::io::{Read, Write};
@@ -66,6 +68,13 @@ fn main() {
             eprintln!("note {line}");
         }
         std::process::exit(5);
+    }
+    if behaviour == "dies-once"
+        && let Some(marker) = std::env::args().nth(2)
+        && std::fs::metadata(&marker).is_err()
+    {
+        let _ = std::fs::write(&marker, b"started once");
+        std::process::exit(4);
     }
     if behaviour == "noisy-death" {
         eprintln!("the toolchain this helper was built for is not installed");
@@ -242,6 +251,11 @@ fn main() {
                 return;
             }
             continue;
+        }
+        if shutting_down && behaviour == "lingers" {
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
         }
         if sent.is_err() || shutting_down {
             return;

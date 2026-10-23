@@ -34,10 +34,10 @@ pub use codehelion_helper_protocol::protocol::{
     Absence, BuildDescription, Capability, CompileCommandSelector, Execution, HelperIdentity,
     PROTOCOL_VERSION,
 };
-pub use codehelion_helper_protocol::{ir, protocol};
+pub use codehelion_helper_protocol::{ir, protocol, tree_file};
 pub use sandbox::{
-    MEMORY_LIMIT_ENV, SandboxAvailability, SandboxError, SandboxRequest, availability,
-    doctor_summary, enforce_current_process_limit_from_environment,
-    enforce_current_process_memory_limit,
+    MAX_FILE_BYTES_ENV, MEMORY_LIMIT_ENV, SandboxAvailability, SandboxError, SandboxRequest,
+    availability, doctor_summary, enforce_current_process_limit_from_environment,
+    enforce_current_process_memory_limit, tree_file_ceiling,
 };
 pub use server::{Answer, Backend, Description, serve};

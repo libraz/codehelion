@@ -16,10 +16,13 @@ pub(super) fn semantic_sandbox(args: &ScanArgs) -> Result<SandboxRequest> {
     if !args.untrusted {
         return Ok(SandboxRequest::unrestricted());
     }
-    let Some(bytes) = codehelion_core::execution::Limits::untrusted().max_subprocess_bytes else {
+    let limits = codehelion_core::execution::Limits::untrusted();
+    let Some(bytes) = limits.max_subprocess_bytes else {
         bail!("the untrusted profile must require a subprocess memory ceiling");
     };
-    let request = SandboxRequest::require_memory_limit(bytes);
+    // Helpers read the tree's own files too, under the ceiling the scanner uses.
+    let request =
+        SandboxRequest::require_memory_limit(bytes).with_file_ceiling(limits.max_file_bytes);
     codehelion_helper::sandbox::validate(request)?;
     Ok(request)
 }
@@ -69,9 +72,7 @@ impl Installed {
         if self.component.analyses.contains(&Language::Rust) {
             return Ok(BuildConfiguration::Rust(Box::new(RustBuild {
                 compiler_version: self.greeting.toolchains.join(", "),
-                lockfile_hash: std::fs::read_to_string(root.join("Cargo.lock"))
-                    .ok()
-                    .map(|text| content_hash(&text)),
+                lockfile_hash: self.lockfile_hash(root),
                 features: described.features,
                 cfgs: described.cfgs,
                 permitted_execution,
@@ -88,6 +89,20 @@ impl Installed {
             macros: described.cfgs,
             ..CppBuild::default()
         })))
+    }
+
+    /// The hash of the tree's `Cargo.lock`, when it is a regular file within
+    /// the ceiling this run reads the tree under.
+    ///
+    /// Absent otherwise: a planted FIFO, a link or an enormous file is not a
+    /// lockfile this run can vouch for, and hashing one would block or read
+    /// without bound.
+    fn lockfile_hash(&self, root: &Path) -> Option<String> {
+        use codehelion_helper::tree_file::{Links, read_text_bounded};
+        let ceiling = self.sandbox.max_file_bytes().unwrap_or(u64::MAX);
+        read_text_bounded(&root.join("Cargo.lock"), Links::Refuse, ceiling)
+            .ok()
+            .map(|text| content_hash(&text))
     }
 
     /// Ask one helper what the tree is read under, and let it go again.
@@ -148,30 +163,23 @@ impl Compilers {
         sandbox: SandboxRequest,
         paths: &crate::config::Helpers,
     ) -> Result<Self> {
-        let mut installed = Vec::new();
-        for component in doctor::OPTIONAL_HELPERS {
+        let discovered = doctor::OPTIONAL_HELPERS.map(|component| {
             let configured = match component.binary {
                 "codehelion-backend-rust" => paths.rust.as_deref(),
                 "codehelion-backend-clang" => paths.clang.as_deref(),
                 _ => None,
             };
-            let Some(facts) = crate::interrogate(component.binary, configured, sandbox) else {
-                continue;
-            };
-            if let Some(helper) = installed_helper(component, facts, permitted, sandbox) {
-                installed.push(helper);
-            }
-        }
-        if installed.is_empty() {
-            bail!(
-                "semantic mode needs a compiler helper, and there is none beside \
-                 this program or on PATH: {}",
-                doctor::OPTIONAL_HELPERS
-                    .iter()
-                    .map(|component| component.advice)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            );
+            let facts = crate::interrogate(component.binary, configured, sandbox);
+            (
+                component,
+                Discovered::of(component, configured, facts, permitted, sandbox),
+            )
+        });
+        let (installed, notes) = settled(discovered)?;
+        // A helper that could not be used is said even when another answers,
+        // because its languages go unanswered for that reason.
+        for note in notes {
+            eprintln!("{note}");
         }
         for class in permitted.permitted() {
             if Execution::from_name(class.name()).is_none() {
@@ -215,25 +223,146 @@ impl Compilers {
     }
 }
 
+/// What is said about a helper only when it was not found at all.
+const NOT_FOUND: &str = "there is none beside this program or on PATH";
+
+/// What looking for one helper came to.
+///
+/// Four outcomes rather than found-or-not, because each calls for a different
+/// sentence: a program to install, a program to update, and a setting that
+/// names something unusable are three different things to do about it.
+pub(super) enum Discovered {
+    /// It answered the handshake and can be asked.
+    Usable(Box<Installed>),
+    /// The operator named a location for it, and that location is unusable.
+    ConfiguredUnusable(Unusable),
+    /// It was found where helpers are looked for and could not be talked to.
+    InstalledUnusable(Unusable),
+    /// Nothing was found.
+    Absent,
+}
+
+/// A helper that was located, or named, and cannot be used.
+pub(super) struct Unusable {
+    /// Where it is, or where the operator said it would be.
+    pub(super) path: PathBuf,
+    /// Why it cannot be used.
+    pub(super) reason: String,
+}
+
+impl Discovered {
+    /// Classify what looking for `component` found, given the location the
+    /// operator configured for it, if any.
+    ///
+    /// `facts` is what [`crate::interrogate`] returned, which reports a
+    /// configured location holding no program as unusable rather than absent.
+    pub(super) fn of(
+        component: doctor::HelperComponent,
+        configured: Option<&Path>,
+        facts: Option<doctor::HelperFacts>,
+        permitted: &ExecutionPolicy,
+        sandbox: SandboxRequest,
+    ) -> Self {
+        let Some(facts) = facts else {
+            return Self::Absent;
+        };
+        match facts.state {
+            doctor::HelperState::Answered(greeting) => Self::Usable(Box::new(Installed {
+                permitted: acted_on(permitted, &greeting),
+                component,
+                program: facts.path,
+                greeting,
+                sandbox,
+            })),
+            doctor::HelperState::Silent(reason) => {
+                let unusable = Unusable {
+                    path: facts.path,
+                    reason,
+                };
+                if configured.is_some() {
+                    Self::ConfiguredUnusable(unusable)
+                } else {
+                    Self::InstalledUnusable(unusable)
+                }
+            }
+        }
+    }
+}
+
+/// The helpers a run can ask, and a note for each one that could not be used.
+///
+/// # Errors
+///
+/// Fails when no helper is usable, naming every one that was found or
+/// configured and why it is unusable; only helpers that were not found at all
+/// are described as missing.
+pub(super) fn settled(
+    discovered: impl IntoIterator<Item = (doctor::HelperComponent, Discovered)>,
+) -> Result<(Vec<Installed>, Vec<String>)> {
+    let mut installed = Vec::new();
+    let mut unusable = Vec::new();
+    let mut absent = Vec::new();
+    for (component, outcome) in discovered {
+        match outcome {
+            Discovered::Usable(helper) => installed.push(*helper),
+            Discovered::ConfiguredUnusable(found) => unusable.push(format!(
+                "{} configured at {} cannot be used: {}",
+                component.binary,
+                found.path.display(),
+                found.reason
+            )),
+            Discovered::InstalledUnusable(found) => unusable.push(format!(
+                "{} at {} cannot be used: {}",
+                component.binary,
+                found.path.display(),
+                found.reason
+            )),
+            Discovered::Absent => absent.push(component),
+        }
+    }
+    if installed.is_empty() {
+        let mut said = unusable;
+        if !absent.is_empty() {
+            said.push(format!(
+                "{}: {NOT_FOUND} ({})",
+                absent
+                    .iter()
+                    .map(|component| component.binary)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                absent
+                    .iter()
+                    .map(|component| component.advice)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        bail!(
+            "semantic mode needs a compiler helper that answers: {}",
+            said.join("; ")
+        );
+    }
+    let notes = unusable
+        .into_iter()
+        .map(|why| format!("note: {why}; its languages go unanswered in this run"))
+        .collect();
+    Ok((installed, notes))
+}
+
 /// Keep a helper only after a successful handshake. A silent optional helper
 /// is unavailable for its own languages, not a reason to discard answers from
 /// another helper that did answer.
+#[cfg(test)]
 pub(super) fn installed_helper(
     component: doctor::HelperComponent,
     facts: doctor::HelperFacts,
     permitted: &ExecutionPolicy,
     sandbox: SandboxRequest,
 ) -> Option<Installed> {
-    let doctor::HelperState::Answered(greeting) = facts.state else {
-        return None;
-    };
-    Some(Installed {
-        permitted: acted_on(permitted, &greeting),
-        component,
-        program: facts.path,
-        greeting,
-        sandbox,
-    })
+    match Discovered::of(component, None, Some(facts), permitted, sandbox) {
+        Discovered::Usable(helper) => Some(*helper),
+        _ => None,
+    }
 }
 
 /// The helpers this run will put files to, or `None` when it asks nobody.
@@ -329,4 +458,197 @@ pub(super) fn unavailable_execution_message(class: PermittedExecution) -> String
 /// The configured ceiling for every compiler-helper response.
 pub(super) const fn helper_timeout(cfg: &Config) -> std::time::Duration {
     std::time::Duration::from_millis(cfg.limits.helper_timeout_ms)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use codehelion_core::doctor::{CLANG_HELPER, Greeting, HelperFacts, HelperState, RUST_HELPER};
+
+    fn discovered(
+        component: doctor::HelperComponent,
+        configured: Option<&Path>,
+        facts: Option<HelperFacts>,
+    ) -> (doctor::HelperComponent, Discovered) {
+        (
+            component,
+            Discovered::of(
+                component,
+                configured,
+                facts,
+                &ExecutionPolicy::deny_all(),
+                SandboxRequest::unrestricted(),
+            ),
+        )
+    }
+
+    fn answering(path: &str) -> HelperFacts {
+        HelperFacts {
+            path: PathBuf::from(path),
+            state: HelperState::Answered(Greeting {
+                version: "1.0.0".to_owned(),
+                protocol: 2,
+                toolchains: vec!["rust-analyzer".to_owned()],
+                capabilities: vec!["types".to_owned()],
+                executes: Vec::new(),
+            }),
+        }
+    }
+
+    fn silent(path: &str, reason: &str) -> HelperFacts {
+        HelperFacts {
+            path: PathBuf::from(path),
+            state: HelperState::Silent(reason.to_owned()),
+        }
+    }
+
+    fn refusal(outcomes: Vec<(doctor::HelperComponent, Discovered)>) -> String {
+        match settled(outcomes) {
+            Ok(_) => panic!("no helper is usable, so discovery must fail"),
+            Err(error) => format!("{error:#}"),
+        }
+    }
+
+    #[test]
+    fn a_found_helper_that_cannot_be_used_is_named_with_its_reason_and_not_called_missing() {
+        let text = refusal(vec![
+            discovered(
+                RUST_HELPER,
+                None,
+                Some(silent("/tool/codehelion-backend-rust", "speaks protocol 3")),
+            ),
+            discovered(CLANG_HELPER, None, None),
+        ]);
+        assert!(text.contains("/tool/codehelion-backend-rust"), "{text}");
+        assert!(text.contains("speaks protocol 3"), "{text}");
+        assert!(
+            text.contains(&format!("codehelion-backend-clang: {NOT_FOUND}")),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&format!("codehelion-backend-rust: {NOT_FOUND}")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_configured_location_with_no_program_is_named_whether_or_not_another_helper_answers() {
+        let missing = Path::new("/nonexistent/codehelion-backend-rust");
+        let configured = || {
+            let facts = crate::interrogate(
+                RUST_HELPER.binary,
+                Some(missing),
+                SandboxRequest::unrestricted(),
+            );
+            assert!(facts.is_some(), "a configured location is never absent");
+            discovered(RUST_HELPER, Some(missing), facts)
+        };
+        let alone = refusal(vec![configured(), discovered(CLANG_HELPER, None, None)]);
+        assert!(
+            alone.contains("/nonexistent/codehelion-backend-rust"),
+            "{alone}"
+        );
+        assert!(alone.contains("configured"), "{alone}");
+
+        let (installed, notes) = settled(vec![
+            configured(),
+            discovered(
+                CLANG_HELPER,
+                None,
+                Some(answering("/tool/codehelion-backend-clang")),
+            ),
+        ])
+        .expect("the answering helper is usable");
+        assert_eq!(installed.len(), 1);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("/nonexistent/codehelion-backend-rust"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn an_unusable_helper_beside_an_answering_one_leaves_a_note_with_its_reason() {
+        let (installed, notes) = settled(vec![
+            discovered(
+                RUST_HELPER,
+                None,
+                Some(answering("/tool/codehelion-backend-rust")),
+            ),
+            discovered(
+                CLANG_HELPER,
+                None,
+                Some(silent("/tool/codehelion-backend-clang", "no libclang")),
+            ),
+        ])
+        .expect("the answering helper is usable");
+        assert_eq!(installed.len(), 1);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("no libclang"), "{notes:?}");
+    }
+
+    #[test]
+    fn only_helpers_that_were_not_found_are_described_as_missing() {
+        let text = refusal(vec![
+            discovered(RUST_HELPER, None, None),
+            discovered(CLANG_HELPER, None, None),
+        ]);
+        assert!(
+            text.contains(&format!(
+                "codehelion-backend-rust, codehelion-backend-clang: {NOT_FOUND}"
+            )),
+            "{text}"
+        );
+    }
+
+    fn installed_with(sandbox: SandboxRequest) -> Installed {
+        match Discovered::of(
+            RUST_HELPER,
+            None,
+            Some(answering("/tool/codehelion-backend-rust")),
+            &ExecutionPolicy::deny_all(),
+            sandbox,
+        ) {
+            Discovered::Usable(helper) => *helper,
+            _ => panic!("an answering helper is usable"),
+        }
+    }
+
+    #[test]
+    fn a_lockfile_is_hashed_only_when_it_is_a_regular_file_within_the_ceiling() {
+        let directory = tempfile::tempdir().unwrap();
+        let lock = directory.path().join("Cargo.lock");
+        std::fs::write(&lock, "version = 4\n").unwrap();
+        assert!(
+            installed_with(SandboxRequest::unrestricted())
+                .lockfile_hash(directory.path())
+                .is_some()
+        );
+        assert!(
+            installed_with(SandboxRequest::unrestricted().with_file_ceiling(4))
+                .lockfile_hash(directory.path())
+                .is_none(),
+            "a lockfile over the ceiling is not read"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lockfile_planted_as_a_link_or_a_fifo_is_not_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let lock = directory.path().join("Cargo.lock");
+        std::os::unix::fs::symlink("/dev/zero", &lock).unwrap();
+        let helper = installed_with(SandboxRequest::unrestricted());
+        assert!(helper.lockfile_hash(directory.path()).is_none());
+
+        std::fs::remove_file(&lock).unwrap();
+        #[allow(clippy::disallowed_types)]
+        let made = std::process::Command::new("mkfifo")
+            .arg(&lock)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert!(helper.lockfile_hash(directory.path()).is_none());
+    }
 }

@@ -39,7 +39,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use clang::{Clang, Entity, EntityKind, EntityVisitResult, Index};
+use clang::diagnostic::Severity;
+use clang::{Clang, Entity, EntityKind, EntityVisitResult, Index, TranslationUnit};
 use codehelion_helper::CompileCommandSelector;
 use codehelion_helper::ir::{
     Anchor, CallSite, CallTarget, CompilerIr, Instantiation, ResolvedSymbol, SemanticConstruct,
@@ -118,24 +119,14 @@ pub(crate) fn analyze(
         return Outcome::Unavailable(Unavailability::NoBuildInformation);
     }
     let index = Index::new(clang, false, false);
-    let parsed = match index
-        .parser(&entry.file)
-        .arguments(arguments.as_slice())
-        .detailed_preprocessing_record(true)
-        .skip_function_bodies(false)
-        .parse()
-    {
+    let parsed = match compiled(&index, &entry.file, arguments.as_slice()) {
         Ok(parsed) => parsed,
-        Err(error) => {
-            // The recorded command did not yield a translation unit at all. A
-            // file read with no command is a different program from the one the
-            // project builds, so it is reported as having no build information
-            // rather than analysed under whatever would parse.
-            refused(
-                unit,
-                &format!("clang read no translation unit from the recorded command: {error}"),
-            );
-            return Outcome::Unavailable(Unavailability::NoBuildInformation);
+        Err(why) => {
+            // The compiler was handed a recorded command and did not finish
+            // reading it, which is the helper failing on this unit rather than
+            // a unit nothing says how to compile.
+            refused(unit, &why);
+            return Outcome::Unavailable(Unavailability::HelperDied);
         }
     };
     let file = canonical(Path::new(&unit.file));
@@ -169,6 +160,42 @@ pub(crate) fn analyze(
     ir.types = reading.types.into_vec();
     ir.cfg = cfg;
     Outcome::Analyzed(Box::new(ir))
+}
+
+/// Read `file` under `arguments`, keeping the translation unit only when Clang
+/// read all of it.
+///
+/// Clang recovers from an error by typing what it could not resolve as `int`,
+/// so a unit read with errors would report confident facts about names the
+/// compiler never resolved. The first error stands for the unit in the reason.
+fn compiled<'c>(
+    index: &'c Index<'c>,
+    file: &Path,
+    arguments: &[String],
+) -> Result<TranslationUnit<'c>, String> {
+    let parsed = index
+        .parser(file)
+        .arguments(arguments)
+        .detailed_preprocessing_record(true)
+        .skip_function_bodies(false)
+        .parse()
+        .map_err(|error| {
+            format!("clang read no translation unit from the recorded command: {error}")
+        })?;
+    let first_error = parsed
+        .get_diagnostics()
+        .into_iter()
+        .find(|diagnostic| diagnostic.get_severity() >= Severity::Error)
+        .map(|diagnostic| diagnostic.to_string());
+    first_error.map_or_else(
+        || Ok(parsed),
+        |error| {
+            Err(format!(
+                "clang reported an error reading the recorded command, so the unit is not \
+                 analysed from a partial reading: {error}"
+            ))
+        },
+    )
 }
 
 /// What one pass over a translation unit has found so far.

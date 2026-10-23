@@ -11,6 +11,17 @@ use std::path::{Path, PathBuf};
 
 use crate::boundary::ReadBoundary;
 
+/// The text of a file the tree supplies, or nothing when it is not a regular
+/// file within the ceiling this helper was started with.
+///
+/// Nothing is what an unreadable file already meant to every caller here, and
+/// a planted FIFO or an enormous file is one more way of being unreadable. A
+/// link is followed, as Cargo follows it.
+fn tree_text(path: &Path) -> Option<String> {
+    use codehelion_helper::tree_file::{Links, read_text_bounded};
+    read_text_bounded(path, Links::Follow, codehelion_helper::tree_file_ceiling()).ok()
+}
+
 /// Whether an answer may be built from `path`.
 ///
 /// True for every path when no boundary was set, which is what a trusted scan
@@ -58,7 +69,7 @@ pub(super) fn workspace_manifest(manifest: &Path) -> PathBuf {
 }
 
 fn declares_workspace(manifest: &Path) -> bool {
-    std::fs::read_to_string(manifest).is_ok_and(|text| declares_workspace_table(&text))
+    tree_text(manifest).is_some_and(|text| declares_workspace_table(&text))
 }
 
 /// Whether a manifest's text opens a `workspace` table.
@@ -108,8 +119,8 @@ fn declares_workspace_table(manifest: &str) -> bool {
 /// complete reading; a script imagined here is a crate refused for needing a
 /// permission that would buy nothing.
 pub(super) fn has_build_script(manifest: &Path) -> bool {
-    let declared = std::fs::read_to_string(manifest)
-        .map_or(Declared::Unsaid, |text| declared_build_script(&text));
+    let declared =
+        tree_text(manifest).map_or(Declared::Unsaid, |text| declared_build_script(&text));
     match declared {
         Declared::Script => true,
         Declared::None => false,
@@ -215,7 +226,7 @@ pub(super) fn program_named_by(root: &Path) -> Option<NamedProgram> {
     let directory = root.join(".cargo");
     CARGO_CONFIGURATION_FILES.iter().find_map(|name| {
         let file = directory.join(name);
-        let key = program_naming_key(&std::fs::read_to_string(&file).ok()?)?;
+        let key = program_naming_key(&tree_text(&file)?)?;
         Some(NamedProgram { file, key })
     })
 }
@@ -326,7 +337,7 @@ fn names_a_program(path: &[String]) -> bool {
 mod tests {
     use super::{
         Declared, declared_build_script, declares_workspace_table, has_build_script,
-        program_naming_key, workspace_manifest,
+        program_named_by, program_naming_key, workspace_manifest,
     };
 
     fn package(body: &str) -> String {
@@ -544,5 +555,27 @@ mod tests {
             program_naming_key("[build]\nrustc-wrapper = \"./marker\"\n").as_deref(),
             Some("build.rustc-wrapper")
         );
+    }
+
+    /// A configuration or manifest the tree planted as a FIFO is not a file to
+    /// read: opening one would wait for a writer that never comes.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_fifo_is_passed_over_rather_than_waited_on() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join(".cargo")).unwrap();
+        for fifo in [
+            directory.path().join(".cargo/config.toml"),
+            directory.path().join("Cargo.toml"),
+        ] {
+            #[allow(clippy::disallowed_types)]
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap();
+            assert!(made.success());
+        }
+        assert!(program_named_by(directory.path()).is_none());
+        assert!(!has_build_script(&directory.path().join("Cargo.toml")));
     }
 }

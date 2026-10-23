@@ -117,7 +117,7 @@ impl Permissions {
 /// answer a permitted request from a refused reading, or the reverse.
 #[derive(Default)]
 pub(crate) struct Workspaces {
-    loaded: BTreeMap<(PathBuf, Permissions), Result<Loaded, String>>,
+    loaded: BTreeMap<(PathBuf, Permissions), Result<Loaded, (Unavailability, String)>>,
     described: BTreeMap<PathBuf, Result<BuildDescription, String>>,
 }
 
@@ -254,10 +254,9 @@ impl Workspaces {
             .entry((root.clone(), permitted))
             .or_insert_with(|| load(&root, permitted));
         match loaded {
-            Err(why) => Outcome::unavailable(
-                Unavailability::MetadataUnavailable,
-                format!("{}: {why}", root.display()),
-            ),
+            Err((reason, why)) => {
+                Outcome::unavailable(*reason, format!("{}: {why}", root.display()))
+            }
             Ok(loaded) => ra_ap_hir::attach_db(&loaded.db, || analyze_crate(loaded, unit)),
         }
     }
@@ -285,8 +284,18 @@ const fn load_cargo_config(permitted: Permissions) -> ra_ap_load_cargo::LoadCarg
     }
 }
 
-fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
-    let toolchain = helper_toolchain()?;
+/// Read the workspace at `manifest`, or say why every unit of it goes
+/// unanswered.
+///
+/// A workspace that could not be resolved is
+/// [`Unavailability::MetadataUnavailable`]. One whose permitted build scripts
+/// failed is a compiler that did not finish, so it is
+/// [`Unavailability::HelperDied`] with the failure as the reason: the code
+/// those scripts generate is missing, and there is no way to tell from outside
+/// how much of an answer that leaves.
+fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, (Unavailability, String)> {
+    let unresolved = |why: String| (Unavailability::MetadataUnavailable, why);
+    let toolchain = helper_toolchain().map_err(unresolved)?;
     let config = cargo_config_for_workspace(&toolchain, manifest, permitted);
     let load_config = load_cargo_config(permitted);
     let root = manifest
@@ -300,22 +309,48 @@ fn load(manifest: &Path, permitted: Permissions) -> Result<Loaded, String> {
     // the build scripts and handing the workspace to `load_workspace` is
     // exactly what `load_workspace_at` does internally, minus its own
     // `ProjectWorkspace::load`.
-    let mut workspace = project_workspace_with_toolchain(manifest, &toolchain, permitted)?;
+    let mut workspace =
+        project_workspace_with_toolchain(manifest, &toolchain, permitted).map_err(unresolved)?;
     if load_config.load_out_dirs_from_check {
         let build_scripts = workspace
             .run_build_scripts(&config, &|_| {})
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| unresolved(error.to_string()))?;
+        // A failed `cargo check` is recorded here while the call itself succeeds.
+        if let Some(error) = build_scripts.error() {
+            return Err((
+                Unavailability::HelperDied,
+                format!(
+                    "a permitted build script did not finish: {}",
+                    first_error_onward(error)
+                ),
+            ));
+        }
         workspace.set_build_scripts(build_scripts);
     }
     let (db, vfs, _proc_macro) =
         ra_ap_load_cargo::load_workspace(workspace, &config.extra_env, &load_config)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| unresolved(error.to_string()))?;
     Ok(Loaded {
         db,
         vfs,
         root,
         line_starts: std::sync::Mutex::default(),
     })
+}
+
+/// Cargo's failure output as one line, starting at the first `error` it
+/// printed so the progress lines ahead of it do not use up the line.
+fn first_error_onward(output: &str) -> String {
+    let from = output
+        .lines()
+        .position(|line| line.trim_start().starts_with("error"))
+        .unwrap_or(0);
+    output
+        .lines()
+        .skip(from)
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The crate called `name` whose module tree reaches `file`.

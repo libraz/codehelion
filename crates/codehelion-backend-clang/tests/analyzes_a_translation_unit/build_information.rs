@@ -116,3 +116,62 @@ fn a_refusal_is_not_carried_into_the_answer_to_a_later_request() {
     );
     helper.shutdown().expect("the helper should stop cleanly");
 }
+
+/// A recorded command the compiler cannot finish reading — here a generated
+/// header nothing wrote — is the helper failing on that unit. Clang would type
+/// the unresolved parameter as `int`, so answering from that reading would
+/// report a confident type for a name nobody resolved.
+#[test]
+fn a_unit_clang_reads_with_errors_is_a_helper_failure_carrying_the_error() {
+    let planted = plant("header-only");
+    std::fs::write(
+        planted.root.join("src/narrow.cpp"),
+        "#include \"generated_config.h\"\nint narrow(config_width_t width) { return 0; }\n",
+    )
+    .unwrap();
+    let unit = planted.unit("src/narrow.cpp", "src/narrow.cpp");
+    let mut helper = helper();
+
+    let analysis = helper
+        .analyze(&unit, &[Capability::Types])
+        .expect("the helper should answer");
+
+    let Analysis::Missing(reason) = analysis else {
+        panic!("a unit read with errors must not be answered: {analysis:?}");
+    };
+    assert_eq!(reason, Unavailability::HelperDied);
+    assert!(reason.is_helper_failure());
+    let said = helper.take_answer_diagnostics();
+    assert!(
+        said.iter().any(|line| line.contains("generated_config.h")),
+        "the compiler's error travels with the answer: {said:?}"
+    );
+    helper.shutdown().expect("the helper should stop cleanly");
+}
+
+/// A recorded command whose source is not a file Clang can read yields no
+/// complete reading either, and is filed as a helper failure rather than as a
+/// unit nothing says how to compile.
+#[test]
+fn a_recorded_command_clang_cannot_read_is_a_helper_failure() {
+    let planted = plant("header-only");
+    let source = planted.root.join("src/wide.cpp");
+    std::fs::remove_file(&source).unwrap();
+    std::fs::create_dir(&source).unwrap();
+    let unit = planted.unit("src/wide.cpp", "src/wide.cpp");
+    let mut helper = helper();
+
+    let analysis = helper
+        .analyze(&unit, &[Capability::Types])
+        .expect("the helper should answer");
+
+    assert!(
+        matches!(analysis, Analysis::Missing(Unavailability::HelperDied)),
+        "{analysis:?}"
+    );
+    assert!(
+        !helper.take_answer_diagnostics().is_empty(),
+        "the reason is explained"
+    );
+    helper.shutdown().expect("the helper should stop cleanly");
+}

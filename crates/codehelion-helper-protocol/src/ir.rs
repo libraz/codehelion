@@ -814,7 +814,8 @@ pub enum Unavailability {
     ToolchainMismatch,
     /// The helper took too long and was given up on.
     HelperTimedOut,
-    /// The helper stopped before answering.
+    /// The helper stopped before answering, or the compiler it drives did not
+    /// finish reading the unit, so no complete answer exists.
     HelperDied,
     /// The helper answered, but not in a schema this build reads.
     UnreadableSchema,
