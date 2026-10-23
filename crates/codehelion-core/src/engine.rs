@@ -326,7 +326,7 @@ fn detect_inner(
     stats.pairs = pairs.len();
     stats.pair_budget_exhausted = raw_budget.exhausted() || fragment_budget.exhausted();
 
-    let mut groups = group_pairs(&pairs, files, config);
+    let mut groups = group::group_admitted(&pairs, files, arm_paths, config);
     stats.subsumed_groups = drop_subsumed_type1_groups(&mut groups);
     EngineReport { groups, stats }
 }
@@ -457,7 +457,11 @@ impl Type2MemberIndex {
         index
     }
 
-    /// A renamed group accounting for every member of `group`, if one exists.
+    /// A renamed group accounting for every member of `group`, each by a
+    /// member of its own, if one exists.
+    ///
+    /// Two exact members inside one renamed member are a repeat that renamed
+    /// group does not state, so they keep their group.
     fn subsuming_group(
         &self,
         group: &CloneGroup,
@@ -469,18 +473,23 @@ impl Type2MemberIndex {
             // renamed group.
             return self.any_group.then_some(0);
         };
-        let mut candidates = self.groups_covering(first, comparisons);
-        for member in group.members.iter().skip(1) {
+        let mut candidates: Vec<(usize, BTreeSet<usize>)> = self
+            .groups_covering(first, comparisons)
+            .into_iter()
+            .map(|candidate| (candidate, BTreeSet::new()))
+            .collect();
+        for member in &group.members {
             if candidates.is_empty() {
                 return None;
             }
-            candidates.retain(|&candidate| {
+            candidates.retain_mut(|(candidate, claimed)| {
                 groups
-                    .get(candidate)
-                    .is_some_and(|outer| covers_member(outer, member, comparisons))
+                    .get(*candidate)
+                    .and_then(|outer| covering_member(outer, member, comparisons))
+                    .is_some_and(|covering| claimed.insert(covering))
             });
         }
-        candidates.first().copied()
+        candidates.first().map(|(candidate, _)| *candidate)
     }
 
     /// Renamed groups with a member accounting for `member`, in group order.
@@ -516,9 +525,15 @@ impl Type2MemberIndex {
     }
 }
 
-/// Whether `outer` has a member accounting for `member`.
-fn covers_member(outer: &CloneGroup, member: &Instance, comparisons: &mut usize) -> bool {
-    outer.members.iter().any(|candidate| {
+/// The member of `outer` accounting for `member`, if any.
+///
+/// Members of one group never overlap, so at most one can contain `member`.
+fn covering_member(
+    outer: &CloneGroup,
+    member: &Instance,
+    comparisons: &mut usize,
+) -> Option<usize> {
+    outer.members.iter().position(|candidate| {
         *comparisons += 1;
         candidate.file == member.file
             && ranges_subsume(candidate.token_start, candidate.token_end, member)
@@ -527,18 +542,35 @@ fn covers_member(outer: &CloneGroup, member: &Instance, comparisons: &mut usize)
 
 /// Whether a reported pair can be present in one C-family build.
 fn pair_can_coexist(paths: &[Option<&[ArmPath]>], pair: &ClonePair) -> bool {
-    let left = paths.get(pair.a.file).and_then(|paths| *paths);
-    let right = paths.get(pair.b.file).and_then(|paths| *paths);
-    match (left, right) {
-        (Some(left), Some(right)) => instance_arm_path(left, &pair.a)
-            .zip(instance_arm_path(right, &pair.b))
-            .is_none_or(|(left, right)| {
-                !left.is_unreachable()
-                    && !right.is_unreachable()
-                    && (pair.a.file != pair.b.file || !left.excludes(right))
-            }),
+    instances_can_coexist(paths, &pair.a, &pair.b)
+}
+
+/// Whether two occurrences can both be present in one C-family build: neither
+/// lies wholly in an unreachable arm, and they do not sit in mutually exclusive
+/// arms of one file. Each side's reachability stands on its own, so a side
+/// spanning an arm boundary cannot vouch for one that no build compiles.
+fn instances_can_coexist(paths: &[Option<&[ArmPath]>], a: &Instance, b: &Instance) -> bool {
+    if !instance_is_reachable(paths, a) || !instance_is_reachable(paths, b) {
+        return false;
+    }
+    match (arm_path_of(paths, a), arm_path_of(paths, b)) {
+        (Some(left), Some(right)) => a.file != b.file || !left.excludes(right),
         _ => true,
     }
+}
+
+/// Whether some build can compile `instance`: it does not lie wholly in an
+/// unreachable arm.
+fn instance_is_reachable(paths: &[Option<&[ArmPath]>], instance: &Instance) -> bool {
+    arm_path_of(paths, instance).is_none_or(|path| !path.is_unreachable())
+}
+
+/// The single arm `instance` lies in, when its file carries arm paths.
+fn arm_path_of<'a>(paths: &[Option<&'a [ArmPath]>], instance: &Instance) -> Option<&'a ArmPath> {
+    paths
+        .get(instance.file)
+        .and_then(|paths| *paths)
+        .and_then(|paths| instance_arm_path(paths, instance))
 }
 
 /// Return a common conditional path only when a match remains in one arm.
@@ -700,6 +732,168 @@ mod tests {
         let report = detect_with_arm_paths(&files, &[Some(&paths)], &EngineConfig::default());
         assert!(report.groups.is_empty(), "groups: {:?}", report.groups);
         assert!(report.stats.conditional_pairs > 0);
+    }
+
+    /// Whether any group holds two members overlapping in one file.
+    fn has_overlapping_members(groups: &[CloneGroup]) -> bool {
+        groups.iter().any(|group| {
+            group.members.iter().enumerate().any(|(position, a)| {
+                group.members[position + 1..].iter().any(|b| {
+                    a.file == b.file
+                        && a.token_start.max(b.token_start) < a.token_end.min(b.token_end)
+                })
+            })
+        })
+    }
+
+    #[test]
+    fn a_repetitive_body_forms_no_group_with_overlapping_members() {
+        let statements = (0..14)
+            .map(|index| format!("v{index} = w{index} ( q{index} ) ; "))
+            .collect::<Vec<_>>()
+            .concat();
+        let tokens = quick(&format!("fn body ( ) {{ {statements}}}"));
+        let units = [function_unit(0, tokens.len())];
+        let files = [InputFile {
+            tokens: &tokens,
+            units: &units,
+        }];
+
+        let report = detect(&files, &EngineConfig::default());
+
+        assert!(
+            !has_overlapping_members(&report.groups),
+            "groups: {:?}",
+            report.groups
+        );
+    }
+
+    #[test]
+    fn an_exact_repeat_inside_one_renamed_member_keeps_its_group() {
+        const BLOCK: &str =
+            "let acc = base + rate * step ; emit ( acc , base , rate , step ) ; store ( acc ) ;";
+        const BLOCK_RENAMED: &str =
+            "let sum = seed + gain * width ; emit ( sum , seed , gain , width ) ; store ( sum ) ;";
+        let first = quick(&format!("fn one ( ) {{ {BLOCK} mark ( ) ; {BLOCK} }}"));
+        let second = quick(&format!(
+            "fn two ( ) {{ {BLOCK_RENAMED} mark ( ) ; {BLOCK_RENAMED} }}"
+        ));
+        let block_len = quick(BLOCK).len();
+        let units_first = [function_unit(0, first.len())];
+        let units_second = [function_unit(0, second.len())];
+        let alone = [InputFile {
+            tokens: &first,
+            units: &units_first,
+        }];
+        let both = [
+            alone[0],
+            InputFile {
+                tokens: &second,
+                units: &units_second,
+            },
+        ];
+        let internal_repeat = |groups: &[CloneGroup]| {
+            groups.iter().any(|group| {
+                group.clone_type == CloneClass::Type1
+                    && group.members.len() == 2
+                    && group.members.iter().all(|member| {
+                        member.file == 0 && member.token_end - member.token_start >= block_len
+                    })
+            })
+        };
+        assert!(
+            internal_repeat(&detect(&alone, &EngineConfig::default()).groups),
+            "the repeat is found on its own"
+        );
+
+        let report = detect(&both, &EngineConfig::default());
+
+        assert!(
+            internal_repeat(&report.groups),
+            "groups: {:?}",
+            report.groups
+        );
+    }
+
+    #[test]
+    fn a_side_in_an_unreachable_arm_excludes_a_pair_whose_other_side_spans_arms() {
+        use crate::conditional::{ArmTracker, StaticCondition};
+
+        let dead = quick(FN_A);
+        let spanning = quick(FN_A);
+        let units_dead = [function_unit(0, dead.len())];
+        let units_spanning = [function_unit(0, spanning.len())];
+        let files = [
+            InputFile {
+                tokens: &dead,
+                units: &units_dead,
+            },
+            InputFile {
+                tokens: &spanning,
+                units: &units_spanning,
+            },
+        ];
+        let mut tracker = ArmTracker::default();
+        tracker.begin(StaticCondition::False);
+        let dead_paths = vec![tracker.current(); dead.len()];
+        // The other copy opens inside a conditional and closes after it.
+        let mut tracker = ArmTracker::default();
+        tracker.begin(StaticCondition::Unknown);
+        let mut spanning_paths = vec![tracker.current(); 3];
+        tracker.end();
+        spanning_paths.extend(vec![tracker.current(); spanning.len() - 3]);
+
+        let report = detect_with_arm_paths(
+            &files,
+            &[Some(&dead_paths), Some(&spanning_paths)],
+            &EngineConfig::default(),
+        );
+
+        assert!(report.groups.is_empty(), "groups: {:?}", report.groups);
+        assert!(report.stats.conditional_pairs > 0);
+    }
+
+    #[test]
+    fn a_group_never_holds_members_of_exclusive_arms_joined_through_a_third_copy() {
+        use crate::conditional::{ArmTracker, StaticCondition};
+
+        let first = quick(FN_A);
+        let split = first.len();
+        let mut arms = first;
+        arms.extend(quick(FN_A));
+        let elsewhere = quick(FN_A);
+        let units_arms = [function_unit(0, split), function_unit(split, arms.len())];
+        let units_elsewhere = [function_unit(0, elsewhere.len())];
+        let files = [
+            InputFile {
+                tokens: &arms,
+                units: &units_arms,
+            },
+            InputFile {
+                tokens: &elsewhere,
+                units: &units_elsewhere,
+            },
+        ];
+        let mut tracker = ArmTracker::default();
+        tracker.begin(StaticCondition::Unknown);
+        let mut paths = vec![tracker.current(); split];
+        tracker.next_arm(StaticCondition::Unknown);
+        paths.extend(vec![tracker.current(); arms.len() - split]);
+
+        let report = detect_with_arm_paths(&files, &[Some(&paths), None], &EngineConfig::default());
+
+        assert!(
+            !report.groups.is_empty(),
+            "the third copy still duplicates an arm"
+        );
+        for group in &report.groups {
+            let in_arms = group
+                .members
+                .iter()
+                .filter(|member| member.file == 0)
+                .count();
+            assert!(in_arms <= 1, "group spans exclusive arms: {group:?}");
+        }
     }
 
     #[test]
@@ -944,14 +1138,19 @@ mod tests {
                 continue;
             }
             dropped[position] = groups.iter().any(|outer| {
+                let mut claimed = BTreeSet::new();
                 outer.clone_type == CloneClass::Type2
                     && group.members.iter().all(|member| {
-                        outer.members.iter().any(|candidate| {
-                            comparisons += 1;
-                            candidate.file == member.file
-                                && candidate.token_start <= member.token_start
-                                && member.token_end <= candidate.token_end
-                        })
+                        outer
+                            .members
+                            .iter()
+                            .position(|candidate| {
+                                comparisons += 1;
+                                candidate.file == member.file
+                                    && candidate.token_start <= member.token_start
+                                    && member.token_end <= candidate.token_end
+                            })
+                            .is_some_and(|covering| claimed.insert(covering))
                     })
             });
         }

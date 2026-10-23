@@ -202,9 +202,8 @@ fn parse_tree(root: &Path) -> (Vec<SyntaxIrFile>, LanguageSelection) {
         let Some(language) = language_of(&path) else {
             continue;
         };
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
         let text = String::from_utf8_lossy(&bytes);
         irs.push(match language {
             Language::Rust => {
@@ -266,15 +265,28 @@ fn removing_a_candidate_stage_changes_nothing_it_was_recorded_to_change() {
     );
     let mut complaints = String::new();
     let mut unmaterialized = 0usize;
+    let mut labelled_scored = 0usize;
 
     for expected in CORPORA {
         let corpus = root.join("corpus").join(expected.path);
         if !corpus.is_dir() {
             // The labelled sources belong to the projects they came from and
-            // are fetched, not committed. Say so rather than passing quietly.
+            // are fetched, not committed. A case whose origin is recorded can
+            // be rebuilt, so its absence is a failure rather than a note.
             writeln!(table, "{:32}  (not materialized)", expected.path).unwrap();
             unmaterialized += 1;
+            if !is_labelled(expected.path) || has_reproducible_origin(&root, expected.path) {
+                writeln!(
+                    complaints,
+                    "{}: missing, though it is committed or has a reproducible origin",
+                    expected.path,
+                )
+                .unwrap();
+            }
             continue;
+        }
+        if is_labelled(expected.path) {
+            labelled_scored += 1;
         }
         let (irs, languages) = parse_tree(&corpus);
 
@@ -348,7 +360,26 @@ fn removing_a_candidate_stage_changes_nothing_it_was_recorded_to_change() {
         .unwrap();
     }
     println!("{table}");
+    assert!(
+        labelled_scored > 0,
+        "no labelled corpus snapshot was materialized, so no labelled case was scored"
+    );
     assert!(complaints.is_empty(), "\n{complaints}");
+}
+
+/// Whether a corpus row is a labelled snapshot rather than a committed tree.
+fn is_labelled(path: &str) -> bool {
+    path.starts_with("labeled/")
+}
+
+/// Whether a labelled case records the origin its snapshot is rebuilt from, as
+/// its `snapshot.toml` manifest states it.
+fn has_reproducible_origin(root: &Path, path: &str) -> bool {
+    let case = path.strip_suffix("/snapshot").unwrap_or(path);
+    let manifest = root.join("corpus").join(case).join("snapshot.toml");
+    let source = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", manifest.display()));
+    source.lines().any(|line| line.starts_with("origin = \""))
 }
 
 /// Verification is the expensive final comparison rather than another

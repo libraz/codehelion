@@ -52,6 +52,12 @@
 //! members it put apart ([`GroupingSet::severed_by_the_ceiling`]) and the
 //! caller counts those relations rather than stating them.
 //!
+//! Stopping between posting lists keeps an exact (Type-1/2) family whole,
+//! because every list holds all of its members. It does not do the same for a
+//! near-copy family: that family's pairs come from several posting lists and
+//! near-match buckets, so an exhausted candidate or near-match budget can still
+//! leave it partly proposed, and it then arrives split as described above.
+//!
 //! A ceiling that drops a whole set is fine and needs none of this: the
 //! high-frequency posting cap drops entire lists, and lowering it onto the
 //! labelled corpora only ever costs findings, never multiplies them. The
@@ -393,26 +399,71 @@ pub struct MemberSpan {
 /// rather than folding on missing evidence.
 #[must_use]
 pub fn contained_groups(groups: &[StructuralGroup], spans: &[MemberSpan]) -> Vec<bool> {
+    fold_contained(groups, spans).folded
+}
+
+/// What one containment fold marked, and how many group pairs it weighed.
+///
+/// `comparisons` counts every [`accounts_for`] call: the cost the member index
+/// exists to bound, reported rather than left to a wall clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContainmentFold {
+    folded: Vec<bool>,
+    comparisons: usize,
+}
+
+/// [`contained_groups`], through an index of settled groups by member unit.
+///
+/// A cover must hold the unit declaring `inner`'s first member, so only the
+/// settled groups holding that unit are weighed, instead of every one.
+fn fold_contained(groups: &[StructuralGroup], spans: &[MemberSpan]) -> ContainmentFold {
+    let bytes: Vec<usize> = groups
+        .iter()
+        .map(|group| covered_bytes(group, spans))
+        .collect();
     // Widest cover first, so a group is judged against the longest thing that
     // could account for it before anything shorter is considered. Only groups
     // already settled become covers, so two groups covering each other cannot
     // remove both.
     let mut widest: Vec<usize> = (0..groups.len()).collect();
-    widest.sort_by_key(|&index| std::cmp::Reverse(covered_bytes(&groups[index], spans)));
+    widest.sort_by_key(|&index| std::cmp::Reverse(bytes[index]));
 
     let mut folded = vec![false; groups.len()];
     let mut settled: Vec<usize> = Vec::with_capacity(groups.len());
+    let mut settled_by_member: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut comparisons = 0;
     for &inner in &widest {
-        if settled
-            .iter()
-            .any(|&outer| accounts_for(&groups[outer], &groups[inner], spans))
-        {
+        let candidates: &[usize] = match groups[inner].members.first() {
+            // Nothing to account for: every settled group is a candidate.
+            None => &settled,
+            Some(&first) => spans
+                .get(first)
+                .and_then(|span| settled_by_member.get(&span.declaration))
+                .map_or(&[], Vec::as_slice),
+        };
+        let accounted = candidates.iter().any(|&outer| {
+            comparisons += 1;
+            accounts_for(
+                &groups[outer],
+                bytes[outer],
+                &groups[inner],
+                bytes[inner],
+                spans,
+            )
+        });
+        if accounted {
             folded[inner] = true;
         } else {
             settled.push(inner);
+            for &member in &groups[inner].members {
+                settled_by_member.entry(member).or_default().push(inner);
+            }
         }
     }
-    folded
+    ContainmentFold {
+        folded,
+        comparisons,
+    }
 }
 
 /// Source bytes a group's members cover, summed.
@@ -437,10 +488,14 @@ fn covered_bytes(group: &StructuralGroup, spans: &[MemberSpan]) -> usize {
 /// The declaration a member names and the bytes it covers are asked together:
 /// a declaration index is a claim about the tree the units came from and the
 /// spans are what a reader is shown, and a fold needs both to agree.
-fn accounts_for(outer: &StructuralGroup, inner: &StructuralGroup, spans: &[MemberSpan]) -> bool {
-    if outer.clone_type > inner.clone_type
-        || covered_bytes(outer, spans) <= covered_bytes(inner, spans)
-    {
+fn accounts_for(
+    outer: &StructuralGroup,
+    outer_bytes: usize,
+    inner: &StructuralGroup,
+    inner_bytes: usize,
+    spans: &[MemberSpan],
+) -> bool {
+    if outer.clone_type > inner.clone_type || outer_bytes <= inner_bytes {
         return false;
     }
     let mut claimed: BTreeSet<usize> = BTreeSet::new();

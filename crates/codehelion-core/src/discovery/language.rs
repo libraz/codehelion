@@ -320,9 +320,19 @@ impl Classification {
 /// [`HeaderEvidence::verdict`] settles it.
 #[must_use]
 pub(super) fn classify(path: &Path, header_policy: HeaderPolicy) -> Option<Classification> {
-    // Match the raw extension: capitalisation is meaningful (`.C`/`.H` are the
-    // classic C++ spellings), so it is not lowercased first.
+    // Match the raw extension first: a single letter's case is meaningful
+    // (`.C`/`.H` are the classic C++ spellings). Longer extensions mean the same
+    // in any case, as the `.CPP` of Windows-origin trees shows.
     let ext = path.extension()?.to_str()?;
+    classify_extension(ext, header_policy).or_else(|| {
+        (ext.len() > 1)
+            .then(|| ext.to_ascii_lowercase())
+            .and_then(|lower| classify_extension(&lower, header_policy))
+    })
+}
+
+/// Classify one extension spelled exactly as given.
+fn classify_extension(ext: &str, header_policy: HeaderPolicy) -> Option<Classification> {
     let (language, is_header, provisional) = match ext {
         "rs" => (Language::Rust, false, false),
         "c" => (Language::C, false, false),
@@ -331,7 +341,7 @@ pub(super) fn classify(path: &Path, header_policy: HeaderPolicy) -> Option<Class
             HeaderPolicy::Cpp => (Language::Cpp, true, false),
             HeaderPolicy::Detect => (Language::C, true, true),
         },
-        "cc" | "cpp" | "cxx" | "c++" | "C" => (Language::Cpp, false, false),
+        "cc" | "cp" | "cpp" | "cxx" | "c++" | "C" => (Language::Cpp, false, false),
         "hpp" | "hh" | "hxx" | "h++" | "H" | "tpp" | "ipp" | "inl" => (Language::Cpp, true, false),
         _ => return None,
     };
@@ -378,6 +388,48 @@ mod tests {
             let cls = classify_str(name, HeaderPolicy::C).expect("classified");
             assert_eq!(cls.language, Language::Cpp, "{name}");
         }
+    }
+
+    /// A multi-letter extension means the same in any case; only the single
+    /// letters keep `.c`/`.C` and `.h`/`.H` apart.
+    #[test]
+    fn multi_letter_extensions_classify_regardless_of_case() {
+        for (upper, lower) in [
+            ("a.CPP", "a.cpp"),
+            ("a.HPP", "a.hpp"),
+            ("a.Cpp", "a.cpp"),
+            ("a.CC", "a.cc"),
+            ("a.CP", "a.cp"),
+            ("a.RS", "a.rs"),
+        ] {
+            assert_eq!(
+                classify_str(upper, HeaderPolicy::C),
+                classify_str(lower, HeaderPolicy::C),
+                "{upper}"
+            );
+            assert!(classify_str(upper, HeaderPolicy::C).is_some(), "{upper}");
+        }
+        assert_eq!(
+            classify_str("a.cp", HeaderPolicy::C).map(|c| (c.language, c.is_header)),
+            Some((Language::Cpp, false)),
+            "the Clang helper compiles .cp as C++"
+        );
+        assert_eq!(
+            classify_str("a.C", HeaderPolicy::C).map(|c| c.language),
+            Some(Language::Cpp)
+        );
+        assert_eq!(
+            classify_str("a.c", HeaderPolicy::C).map(|c| c.language),
+            Some(Language::C)
+        );
+        assert_eq!(
+            classify_str("a.H", HeaderPolicy::C).map(|c| c.language),
+            Some(Language::Cpp)
+        );
+        assert_eq!(
+            classify_str("a.h", HeaderPolicy::C).map(|c| c.language),
+            Some(Language::C)
+        );
     }
 
     #[test]

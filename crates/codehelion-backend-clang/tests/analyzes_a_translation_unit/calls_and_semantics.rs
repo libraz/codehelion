@@ -295,11 +295,13 @@ fn standard_expected_identity_return_is_a_propagation_construct() {
     .expect("select C++23 for expected");
 
     let ir = overload_ir(&planted);
-    // The whole case is about `std::expected`, so a build without the type has
-    // nothing here to judge. It still says the fixture reached the compiler.
-    if !standard_expected_available(&ir) {
-        return;
-    }
+    // The whole case is about `std::expected`; a standard library without it is
+    // an environment to fix, not a case that passed.
+    assert!(
+        standard_expected_available(&ir),
+        "this case needs a C++23 standard library providing <expected>; install a newer \
+         libstdc++ or libc++ for the libclang the helper loads"
+    );
     let propagated = ir
         .semantic_constructs
         .iter()

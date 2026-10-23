@@ -38,8 +38,20 @@ fn structural_non_exact_group_ids_survive_consistent_renames() {
     let after = corpus(3, 4);
 
     assert_eq!(
-        group_fingerprint(&group, &before, &variant),
-        group_fingerprint(&group, &after, &variant),
+        group_fingerprint(
+            group.clone_type,
+            group.canonical,
+            &group.members,
+            &before,
+            &variant
+        ),
+        group_fingerprint(
+            group.clone_type,
+            group.canonical,
+            &group.members,
+            &after,
+            &variant
+        ),
     );
 
     let exact_group = grouping::StructuralGroup {
@@ -47,8 +59,20 @@ fn structural_non_exact_group_ids_survive_consistent_renames() {
         ..group
     };
     assert_ne!(
-        group_fingerprint(&exact_group, &before, &variant),
-        group_fingerprint(&exact_group, &after, &variant),
+        group_fingerprint(
+            exact_group.clone_type,
+            exact_group.canonical,
+            &exact_group.members,
+            &before,
+            &variant
+        ),
+        group_fingerprint(
+            exact_group.clone_type,
+            exact_group.canonical,
+            &exact_group.members,
+            &after,
+            &variant
+        ),
     );
 }
 fn grouped(members: Vec<usize>) -> grouping::StructuralGroup {

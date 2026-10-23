@@ -225,6 +225,22 @@ impl IdHasher {
         self.hasher.update(&value.to_le_bytes());
     }
 
+    /// Close a group identity over its members' content fingerprints.
+    ///
+    /// Every clone group identity ends here: members are sorted and
+    /// deduplicated, so member order and repeated copies of known content never
+    /// move the digest, and nothing but content fingerprints can reach it.
+    fn finish_member_set(mut self, members: &[FragmentFingerprint]) -> [u8; 16] {
+        let mut distinct: Vec<[u8; 16]> = members.iter().map(|member| member.0).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        self.write_u32(u32::try_from(distinct.len()).unwrap_or(u32::MAX));
+        for bytes in &distinct {
+            self.write_bytes(bytes);
+        }
+        self.finish()
+    }
+
     /// The shared context prefix: schema, normalization, frontend, mode,
     /// language, build variant — in this fixed order.
     fn write_context(&mut self, variant: &BuildVariant, file: &FileContext<'_>, norm: ContentNorm) {
@@ -448,9 +464,10 @@ pub fn semantic_structure_fingerprint(
 /// Identify one semantic fragment occurrence inside its stable host unit.
 ///
 /// Semantic content intentionally excludes source position, so identical
-/// windows in distinct hosts need this separate identity before they can form
-/// a group without collapsing. The rank is assigned once per host by the scan
-/// after deterministic window extraction; it is not a source offset.
+/// windows in distinct hosts need this separate identity to be told apart as
+/// members. It never enters a group identity, which is content alone. The rank
+/// is assigned once per host by the scan after deterministic window
+/// extraction; it is not a source offset.
 #[must_use]
 pub fn semantic_occurrence_fingerprint(
     content: FragmentFingerprint,
@@ -477,21 +494,13 @@ pub fn clone_group_fingerprint(
     clone_type: CloneClass,
     members: &[FragmentFingerprint],
 ) -> CloneGroupFingerprint {
-    let mut distinct: Vec<[u8; 16]> = members.iter().map(|m| m.0).collect();
-    distinct.sort_unstable();
-    distinct.dedup();
-
     let mut hasher = IdHasher::new("group");
     hasher.write_str(FP_SCHEMA_VERSION);
     hasher.write_str(HASH_ALGORITHM);
     hasher.write_str(variant.mode.name());
     hasher.write_str(&variant.canonical());
     hasher.write_str(clone_type.name());
-    hasher.write_u32(u32::try_from(distinct.len()).unwrap_or(u32::MAX));
-    for bytes in &distinct {
-        hasher.write_bytes(bytes);
-    }
-    CloneGroupFingerprint(hasher.finish())
+    CloneGroupFingerprint(hasher.finish_member_set(members))
 }
 
 /// Start a clone-group history from the fingerprint that first identified it.
@@ -509,9 +518,12 @@ pub fn group_lineage_id(group: &CloneGroupFingerprint) -> GroupLineageId {
 
 /// Fingerprint a restricted-semantic group after a registered rule matched.
 ///
-/// This keeps rule identity and revision separate from the normalized graph
-/// fragments. A future change to a rule cannot silently claim continuity with
-/// a finding justified by different semantics.
+/// `members` are the windows' semantic content fingerprints, never their
+/// host-qualified occurrences: an edit to a host outside its window, or another
+/// copy of content the group already holds, leaves the group where it was. Rule
+/// identity and revision are hashed apart from the content, so a changed rule
+/// cannot silently claim continuity with a finding justified by different
+/// semantics.
 #[must_use]
 pub fn semantic_clone_group_fingerprint(
     variant: &BuildVariant,
@@ -519,9 +531,6 @@ pub fn semantic_clone_group_fingerprint(
     rule_version: u32,
     members: &[FragmentFingerprint],
 ) -> CloneGroupFingerprint {
-    let mut occurrences: Vec<[u8; 16]> = members.iter().map(|member| member.0).collect();
-    occurrences.sort_unstable();
-
     let mut hasher = IdHasher::new("group-semantic");
     hasher.write_str(FP_SCHEMA_VERSION);
     hasher.write_str(HASH_ALGORITHM);
@@ -531,11 +540,7 @@ pub fn semantic_clone_group_fingerprint(
     hasher.write_str(SOG_SCHEMA_VERSION);
     hasher.write_str(rule_id);
     hasher.write_u32(rule_version);
-    hasher.write_u32(u32::try_from(occurrences.len()).unwrap_or(u32::MAX));
-    for bytes in &occurrences {
-        hasher.write_bytes(bytes);
-    }
-    CloneGroupFingerprint(hasher.finish())
+    CloneGroupFingerprint(hasher.finish_member_set(members))
 }
 
 /// Fingerprint a Structural (Type-3) clone group, anchored on its canonical
@@ -561,10 +566,6 @@ pub fn structural_clone_group_fingerprint(
     canonical: &FragmentFingerprint,
     members: &[FragmentFingerprint],
 ) -> CloneGroupFingerprint {
-    let mut distinct: Vec<[u8; 16]> = members.iter().map(|m| m.0).collect();
-    distinct.sort_unstable();
-    distinct.dedup();
-
     let mut hasher = IdHasher::new("group-structural");
     hasher.write_str(FP_SCHEMA_VERSION);
     hasher.write_str(HASH_ALGORITHM);
@@ -573,11 +574,7 @@ pub fn structural_clone_group_fingerprint(
     hasher.write_str(class.name());
     // Anchor on the canonical instance, then the order-independent member set.
     hasher.write_bytes(&canonical.0);
-    hasher.write_u32(u32::try_from(distinct.len()).unwrap_or(u32::MAX));
-    for bytes in &distinct {
-        hasher.write_bytes(bytes);
-    }
-    CloneGroupFingerprint(hasher.finish())
+    CloneGroupFingerprint(hasher.finish_member_set(members))
 }
 
 /// What tells two occurrences of the same content apart.
@@ -795,10 +792,11 @@ fn comparison_id(domain: &str, policy_version: &str, origins: &[String]) -> [u8;
 
 /// Identify a verified group from an explicit Rust-to-C++ semantic comparison.
 ///
-/// Member fingerprints already include each graph's language, schema and full
-/// `BuildVariant` context. The comparison identity, rule revision and sorted
-/// member set make this separate from normal semantic and exact-comparison
-/// group identities.
+/// `members` are the windows' semantic content fingerprints, which already
+/// include each graph's language, schema and full `BuildVariant` context; the
+/// host-qualified occurrence belongs to [`cross_language_member_id`] only. The
+/// comparison identity, rule revision and deduplicated member set make this
+/// separate from normal semantic and exact-comparison group identities.
 #[must_use]
 pub fn cross_language_group_id(
     comparison: &CrossLanguageComparisonId,
@@ -806,19 +804,13 @@ pub fn cross_language_group_id(
     rule_version: u32,
     members: &[FragmentFingerprint],
 ) -> CrossLanguageGroupId {
-    let mut members = members.to_vec();
-    members.sort_unstable();
     let mut hasher = IdHasher::new("cross-language-group");
     hasher.write_str(FP_SCHEMA_VERSION);
     hasher.write_str(CROSS_LANGUAGE_POLICY_VERSION);
     hasher.write_bytes(comparison.as_bytes());
     hasher.write_str(rule_id);
     hasher.write_u32(rule_version);
-    hasher.write_u32(u32::try_from(members.len()).unwrap_or(u32::MAX));
-    for member in members {
-        hasher.write_bytes(member.as_bytes());
-    }
-    CrossLanguageGroupId(hasher.finish())
+    CrossLanguageGroupId(hasher.finish_member_set(members))
 }
 
 /// Identify an exact group produced by a cross-build-variant comparison.

@@ -37,14 +37,47 @@ fn semantic_fingerprints_are_position_free_and_rule_versioned() {
         group,
         semantic_clone_group_fingerprint(&variant(), "sequence-pipeline-v1", 2, &[first, moved],)
     );
-    assert_ne!(
+    assert_eq!(
         group,
         semantic_clone_group_fingerprint(
             &variant(),
             "sequence-pipeline-v1",
             1,
             &[first, moved, first],
+        ),
+        "another copy of content the group already holds is not a new group"
+    );
+}
+
+#[test]
+fn semantic_group_identity_ignores_the_host_and_rank_of_each_window() {
+    let content = fragment_fingerprint(&variant(), &ctx(), "semantic", &sample(), ContentNorm::Raw);
+    let other = fragment_fingerprint(
+        &variant(),
+        &ctx(),
+        "semantic",
+        &renamed_sample(),
+        ContentNorm::Raw,
+    );
+    let group =
+        semantic_clone_group_fingerprint(&variant(), "sequence-pipeline-v1", 1, &[content, other]);
+    // The host was edited outside the window and a third copy of known content
+    // arrived: the windows' content set is unchanged, so the group id is too.
+    assert_eq!(
+        group,
+        semantic_clone_group_fingerprint(
+            &variant(),
+            "sequence-pipeline-v1",
+            1,
+            &[other, content, content],
         )
+    );
+    let first_host = unit_fingerprint(&variant(), &ctx(), &sample(), ContentNorm::Raw);
+    let edited_host = unit_fingerprint(&variant(), &ctx(), &renamed_sample(), ContentNorm::Raw);
+    assert_ne!(
+        finding_id(&group, OccurrenceScope::Unit(&first_host), 0),
+        finding_id(&group, OccurrenceScope::Unit(&edited_host), 0),
+        "the host still moves the member's own finding id"
     );
 }
 

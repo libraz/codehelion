@@ -175,7 +175,8 @@ pub struct CompileCommandsDiagnostic {
 /// A failure that prevents discovery from running at all.
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
-    /// The scan root does not exist or could not be resolved.
+    /// The scan root does not exist, could not be resolved, or is not a
+    /// directory.
     #[error("resolving scan root {path}: {source}")]
     Root {
         /// The path that could not be resolved.
@@ -204,6 +205,12 @@ pub fn discover(root: &Path, config: &DiscoveryConfig) -> Result<DiscoveryReport
         path: root.to_path_buf(),
         source,
     })?;
+    if !root.is_dir() {
+        return Err(DiscoveryError::Root {
+            path: root,
+            source: std::io::Error::from(std::io::ErrorKind::NotADirectory),
+        });
+    }
 
     let settings = WalkSettings {
         respect_gitignore: config.respect_gitignore,
@@ -1237,5 +1244,23 @@ mod tests {
             discover(&missing, &DiscoveryConfig::default()),
             Err(DiscoveryError::Root { .. })
         ));
+    }
+
+    /// A file is not a tree to discover: walking it would yield the file itself
+    /// under an empty relative path.
+    #[test]
+    fn a_file_root_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        fs::write(&file, "fn main() {}\n").unwrap();
+        let result = discover(&file, &DiscoveryConfig::default());
+        assert!(
+            matches!(
+                &result,
+                Err(DiscoveryError::Root { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotADirectory
+            ),
+            "{result:?}"
+        );
     }
 }

@@ -3,6 +3,7 @@ use super::evidence::UnitEvidence;
 use super::model::{BodyMateriality, GroupDetail, SourceTokenSpan, StructuralConfig};
 use super::units::view;
 use crate::boilerplate::Boilerplate;
+use crate::clone_class::CloneClass;
 use crate::discovery::BuildVariant;
 use crate::features::{self, FileFeatures};
 use crate::frontend::{Lexeme, Token, TokenKind};
@@ -145,7 +146,13 @@ pub(super) fn group_detail(
         },
     );
 
-    let fingerprint = group_fingerprint(group, units, variant);
+    let fingerprint = group_fingerprint(
+        group.clone_type,
+        group.canonical,
+        &group.members,
+        units,
+        variant,
+    );
 
     GroupDetail {
         fingerprint,
@@ -191,25 +198,29 @@ fn weakest_pair(
     weakest.map(|(pair, _)| pair)
 }
 
-/// Compose a structural group id from the content domain its class promises.
+/// Compose a structural group or split-pair id from the content domain its
+/// class promises.
 ///
 /// Type-1 identity is exact source content. Type-2 and Type-3 identity is
 /// identifier-normalized content so a consistent rename does not turn an
-/// otherwise unchanged clone relation into a new baseline finding.
+/// otherwise unchanged clone relation into a new baseline finding. The
+/// `canonical` member must itself be chosen by that content domain, or the
+/// anchor would reintroduce what the member set leaves out.
 pub(super) fn group_fingerprint(
-    group: &grouping::StructuralGroup,
+    class: CloneClass,
+    canonical: usize,
+    members: &[usize],
     units: &[Unit],
     variant: &BuildVariant,
 ) -> CloneGroupFingerprint {
-    let member_contents: Vec<FragmentFingerprint> = group
-        .members
+    let member_contents: Vec<FragmentFingerprint> = members
         .iter()
-        .map(|&member| units[member].group_content(group.clone_type))
+        .map(|&member| units[member].group_content(class))
         .collect();
     stable_id::structural_clone_group_fingerprint(
         variant,
-        group.clone_type,
-        &units[group.canonical].group_content(group.clone_type),
+        class,
+        &units[canonical].group_content(class),
         &member_contents,
     )
 }

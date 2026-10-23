@@ -1,13 +1,15 @@
 use super::Unit;
 use super::model::VerifiedPair;
-use super::reporting::{dominant_boilerplate_members, written_once_per_width_members};
+use super::reporting::{
+    dominant_boilerplate_members, group_fingerprint, written_once_per_width_members,
+};
 use super::units::UnitIndex;
 use crate::clone_class::CloneClass;
 use crate::discovery::BuildVariant;
 use crate::features::FileFeatures;
 use crate::grouping::{GroupingSet, SimilarityEdge};
 use crate::ir::SyntaxIrFile;
-use crate::stable_id::{self, FragmentFingerprint};
+use crate::stable_id::FragmentFingerprint;
 use crate::{candidate, control_flow, near_match, verify};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -279,32 +281,27 @@ pub(super) fn unrepresented_pairs(
         .filter(|(_, entry)| !entry.described)
         .map(|((_low, _high, class), entry)| {
             let members: Vec<usize> = entry.members.into_iter().collect();
-            // Which instance is canonical follows content, not position: the
-            // members are peers, and an index would tie the anchor — and so
-            // the id — to the order the tree was walked. Raw content decides
-            // even though the relation is over normalized content, because it
-            // is the finer of the two and orders the members the identity
-            // domain holds as one.
+            // Which instance is canonical follows content, not position: an
+            // index would tie it to the order the tree was walked. Raw content
+            // decides, as the finer of the two orders.
             let canonical = members
                 .iter()
                 .copied()
                 .min_by_key(|&member| units[member].content)
                 .unwrap_or(members[0]);
+            // The id is anchored in its own identity domain, so a rename that
+            // flips the raw order above cannot move it.
+            let anchor = members
+                .iter()
+                .copied()
+                .min_by_key(|&member| (units[member].group_content(class), units[member].content))
+                .unwrap_or(canonical);
             let boilerplate = dominant_boilerplate_members(&members, units);
             let width_family = written_once_per_width_members(canonical, &members, units, files);
-            let identity_contents = members
-                .iter()
-                .map(|&member| units[member].group_content(class))
-                .collect::<Vec<_>>();
             VerifiedPair {
+                fingerprint: group_fingerprint(class, anchor, &members, units, variant),
                 members,
                 canonical,
-                fingerprint: stable_id::structural_clone_group_fingerprint(
-                    variant,
-                    class,
-                    &units[canonical].group_content(class),
-                    &identity_contents,
-                ),
                 similarity: entry.weakest.similarity,
                 breakdown: entry.weakest.breakdown,
                 class,

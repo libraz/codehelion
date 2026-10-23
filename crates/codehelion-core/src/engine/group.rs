@@ -19,8 +19,9 @@ use super::fingerprint::{ContentDigest, norm_token_hash};
 use super::normalize::normalize;
 use super::{
     CloneClass, CloneGroup, ClonePair, EngineConfig, InputFile, Instance, LiteralNorm,
-    SuppressReason,
+    SuppressReason, instance_is_reachable, instances_can_coexist,
 };
+use crate::conditional::ArmPath;
 use crate::frontend::Token;
 
 /// Shannon entropy, in bits, of a token slice's normalized-token
@@ -80,11 +81,23 @@ fn entropy_bits(files: &[InputFile<'_>], instance: &Instance, config: &EngineCon
 /// Instances are deduplicated across pairs, members are sorted, and the
 /// canonical instance is the first member under `(file, token range)` order.
 /// Groups come back sorted by their canonical instance, so output order does
-/// not depend on input order.
+/// not depend on input order. Every group passes [`admissible_members`], so no
+/// two members overlap in one file.
 #[must_use]
 pub fn group_pairs(
     pairs: &[ClonePair],
     files: &[InputFile<'_>],
+    config: &EngineConfig,
+) -> Vec<CloneGroup> {
+    group_admitted(pairs, files, None, config)
+}
+
+/// [`group_pairs`], admitting members against the preprocessor arms of
+/// `arm_paths` as well when the files carry them.
+pub(super) fn group_admitted(
+    pairs: &[ClonePair],
+    files: &[InputFile<'_>],
+    arm_paths: Option<&[Option<&[ArmPath]>]>,
     config: &EngineConfig,
 ) -> Vec<CloneGroup> {
     let mut by_key: BTreeMap<(u64, ContentDigest), Vec<&ClonePair>> = BTreeMap::new();
@@ -97,17 +110,37 @@ pub fn group_pairs(
 
     let mut groups: Vec<CloneGroup> = by_key
         .into_iter()
-        .map(|((content_key, _), pairs)| {
-            let mut members: Vec<Instance> = Vec::new();
+        .filter_map(|((content_key, _), pairs)| {
+            let mut candidates: Vec<Instance> = Vec::new();
             let mut seen: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
             for pair in &pairs {
                 for candidate in [&pair.a, &pair.b] {
                     if seen.insert((candidate.file, candidate.token_start, candidate.token_end)) {
-                        members.push(candidate.clone());
+                        candidates.push(candidate.clone());
                     }
                 }
             }
-            members.sort_by_key(|m| (m.file, m.token_start, m.token_end));
+            candidates.sort_by_key(|m| (m.file, m.token_start, m.token_end));
+            let members = admissible_members(candidates, arm_paths);
+            if members.len() < 2 {
+                return None;
+            }
+            // Class and score describe the relations among admitted members;
+            // when none survives directly, every member still shares the content.
+            let admitted = |instance: &Instance| {
+                members
+                    .binary_search_by_key(
+                        &(instance.file, instance.token_start, instance.token_end),
+                        |m| (m.file, m.token_start, m.token_end),
+                    )
+                    .is_ok()
+            };
+            let direct: Vec<&ClonePair> = pairs
+                .iter()
+                .copied()
+                .filter(|pair| admitted(&pair.a) && admitted(&pair.b))
+                .collect();
+            let pairs = if direct.is_empty() { pairs } else { direct };
 
             let clone_type = if pairs.iter().any(|p| p.clone_type == CloneClass::Type2) {
                 CloneClass::Type2
@@ -126,14 +159,14 @@ pub fn group_pairs(
             } else {
                 None
             };
-            CloneGroup {
+            Some(CloneGroup {
                 content_key,
                 clone_type,
                 score,
                 members,
                 entropy_bits: entropy,
                 suppressed,
-            }
+            })
         })
         .collect();
 
@@ -142,6 +175,46 @@ pub fn group_pairs(
         (c.file, c.token_start, c.token_end, g.content_key)
     });
     groups
+}
+
+/// The members one clone group may hold, from candidates sorted by
+/// `(file, token range)`.
+///
+/// This is the one admission check every Fast group passes: a member that
+/// overlaps an admitted member of its file would count the same tokens twice,
+/// and, when the files carry preprocessor arms, a member no build compiles or
+/// one excluded by an admitted member's arm could not sit in one build with the
+/// rest. The earlier candidate in `(file, token range)` order wins.
+fn admissible_members(
+    candidates: Vec<Instance>,
+    arm_paths: Option<&[Option<&[ArmPath]>]>,
+) -> Vec<Instance> {
+    let mut admitted: Vec<Instance> = Vec::with_capacity(candidates.len());
+    let mut file_start = 0;
+    for candidate in candidates {
+        if admitted
+            .last()
+            .is_none_or(|last| last.file != candidate.file)
+        {
+            file_start = admitted.len();
+        }
+        let same_file = &admitted[file_start..];
+        // Admitted members of a file are disjoint and sorted, so the last one
+        // reaches furthest.
+        let overlaps = same_file
+            .last()
+            .is_some_and(|last| last.token_end > candidate.token_start);
+        let coexists = arm_paths.is_none_or(|paths| {
+            instance_is_reachable(paths, &candidate)
+                && same_file
+                    .iter()
+                    .all(|member| instances_can_coexist(paths, member, &candidate))
+        });
+        if !overlaps && coexists {
+            admitted.push(candidate);
+        }
+    }
+    admitted
 }
 
 #[cfg(test)]

@@ -679,6 +679,105 @@ fn two_groups_over_one_stretch_cannot_remove_each_other() {
     assert_eq!(contained_groups(&groups, &spans), vec![false, false]);
 }
 
+/// `families` copies of one duplication at three cuts plus a nested helper:
+/// declarations `a`/`b`, expressions inside them, and helpers declaring
+/// themselves inside them, every family in files of its own.
+fn containment_corpus(families: usize) -> (Vec<StructuralGroup>, Vec<MemberSpan>) {
+    let mut spans = Vec::new();
+    let mut groups = Vec::new();
+    for family in 0..families {
+        let base = spans.len();
+        let (left, right) = (family * 2, family * 2 + 1);
+        let span = |file: usize, start: usize, end: usize, declaration: usize| MemberSpan {
+            file,
+            start,
+            end,
+            declaration,
+        };
+        spans.extend([
+            span(left, 100, 400, base),
+            span(right, 100, 400, base + 1),
+            span(left, 120, 300, base),
+            span(right, 120, 300, base + 1),
+            span(left, 310, 390, base + 4),
+            span(right, 310, 390, base + 5),
+        ]);
+        groups.push(cut(CloneClass::Type3, [base + 2, base + 3]));
+        groups.push(cut(CloneClass::Type3, [base, base + 1]));
+        groups.push(cut(CloneClass::Type3, [base + 4, base + 5]));
+        groups.push(cut(CloneClass::Type1, [base + 2, base + 3]));
+    }
+    (groups, spans)
+}
+
+/// The fold the member index replaces: every group weighed against every
+/// settled one.
+fn all_pairs_fold(groups: &[StructuralGroup], spans: &[MemberSpan]) -> ContainmentFold {
+    let bytes: Vec<usize> = groups
+        .iter()
+        .map(|group| covered_bytes(group, spans))
+        .collect();
+    let mut widest: Vec<usize> = (0..groups.len()).collect();
+    widest.sort_by_key(|&index| std::cmp::Reverse(bytes[index]));
+    let mut folded = vec![false; groups.len()];
+    let mut settled: Vec<usize> = Vec::new();
+    let mut comparisons = 0;
+    for &inner in &widest {
+        let accounted = settled.iter().any(|&outer| {
+            comparisons += 1;
+            accounts_for(
+                &groups[outer],
+                bytes[outer],
+                &groups[inner],
+                bytes[inner],
+                spans,
+            )
+        });
+        if accounted {
+            folded[inner] = true;
+        } else {
+            settled.push(inner);
+        }
+    }
+    ContainmentFold {
+        folded,
+        comparisons,
+    }
+}
+
+#[test]
+fn indexed_containment_folds_the_same_groups_as_the_all_pairs_fold() {
+    let (groups, spans) = containment_corpus(200);
+
+    let indexed = fold_contained(&groups, &spans);
+    let reference = all_pairs_fold(&groups, &spans);
+
+    assert_eq!(indexed.folded, reference.folded);
+    // Per family, the Type-3 expression cut folds; the helper and the stricter
+    // verbatim cut do not.
+    assert_eq!(indexed.folded.iter().filter(|&&folded| folded).count(), 200);
+    assert!(
+        indexed.comparisons * 20 < reference.comparisons,
+        "indexed {} vs all-pairs {}",
+        indexed.comparisons,
+        reference.comparisons
+    );
+}
+
+#[test]
+fn containment_work_grows_with_the_group_count_not_its_square() {
+    let (small_groups, small_spans) = containment_corpus(200);
+    let (doubled_groups, doubled_spans) = containment_corpus(400);
+
+    let small = fold_contained(&small_groups, &small_spans).comparisons;
+    let doubled = fold_contained(&doubled_groups, &doubled_spans).comparisons;
+
+    assert!(
+        doubled <= small * 3,
+        "doubling the groups must not multiply the work: {small} then {doubled}"
+    );
+}
+
 /// The groups as keys only: medoid key, then member keys, in output order.
 fn keyed(set: &GroupingSet, units: &[GroupingUnit]) -> Vec<(u8, Vec<u8>)> {
     set.groups

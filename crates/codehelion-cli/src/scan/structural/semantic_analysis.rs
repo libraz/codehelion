@@ -955,28 +955,28 @@ pub(super) fn semantic_member_ranks<'a>(
 /// Derive one occurrence rank per window before grouping so every consumer uses
 /// the same position-independent identity for the same semantic window.
 ///
-/// A window is discriminated by what content says about it: the host unit it
-/// sits in and its own normalized content. Nothing about where it sits enters
-/// the ordering, so a doc comment added to one file — which moves every byte
-/// offset after it, and used to swap two windows' ranks and with them their
-/// finding ids — leaves every rank where it was. Windows that content cannot
-/// separate at all keep the order they were extracted in, which is the last
-/// discrimination available once host and content have agreed.
+/// A window's finding id is its group, its host unit and this rank, so the rank
+/// counts every window of a host fingerprint, whatever its content: two windows
+/// of different content in one host share a group when a rule relates them,
+/// and must not share an id there. Windows are counted in content order, so no
+/// byte offset decides a rank; windows content cannot separate at all keep the
+/// order they were extracted in, which is the last discrimination available.
 fn assign_semantic_occurrence_ranks(units: &mut [SemanticUnitGraph], analysis: &StructuralReport) {
-    let discriminators: Vec<stable_id::OccurrenceDiscriminator> = units
+    let mut order: Vec<usize> = (0..units.len()).collect();
+    order.sort_by_key(|&index| (units[index].content, index));
+    let discriminators: Vec<stable_id::OccurrenceDiscriminator> = order
         .iter()
-        .map(|member| {
-            stable_id::OccurrenceDiscriminator::of_unit(&analysis.units[member.unit].fingerprint)
-                .and(stable_id::OccurrenceDiscriminator::of_fragment(
-                    &member.content,
-                ))
+        .map(|&index| {
+            stable_id::OccurrenceDiscriminator::of_unit(
+                &analysis.units[units[index].unit].fingerprint,
+            )
         })
         .collect();
-    for (member, rank) in units
-        .iter_mut()
+    for (index, rank) in order
+        .into_iter()
         .zip(stable_id::occurrence_ranks(&discriminators))
     {
-        member.occurrence_rank = rank;
+        units[index].occurrence_rank = rank;
     }
 }
 
@@ -1095,6 +1095,85 @@ mod occurrence_rank_tests {
         );
     }
 
+    /// Two windows of different content in one host can be related by a rule
+    /// and land in one group. Their finding ids are that group, the host and
+    /// the rank, so the rank alone has to tell them apart.
+    #[test]
+    fn two_windows_of_different_content_in_one_host_get_distinct_finding_ids() {
+        let analysis = analysis_of_two_identical_hosts();
+        let mut windows = windows_at([
+            ByteRange { start: 10, end: 20 },
+            ByteRange { start: 30, end: 40 },
+            ByteRange { start: 10, end: 20 },
+        ]);
+        windows.truncate(2);
+        for window in &mut windows {
+            window.unit = 0;
+        }
+        windows[1].content = stable_id::FragmentFingerprint::from_bytes([1; 16]);
+
+        ranked(&mut windows, &analysis);
+
+        let group = stable_id::semantic_clone_group_fingerprint(
+            &stable_id_variant(),
+            "sequence-pipeline-v1",
+            1,
+            &super::semantic_group_member_fingerprints(windows.iter(), &analysis),
+        );
+        let ids: std::collections::BTreeSet<_> = windows
+            .iter()
+            .zip(super::semantic_member_ranks(windows.iter()))
+            .map(|(window, rank)| {
+                stable_id::finding_id(
+                    &group,
+                    stable_id::OccurrenceScope::Unit(&analysis.units[window.unit].fingerprint),
+                    rank,
+                )
+            })
+            .collect();
+        assert_eq!(ids.len(), 2, "one host, two windows, two finding ids");
+    }
+
+    /// The group id is the windows' content: the host they sit in and how many
+    /// copies of known content exist are the members' business, not the group's.
+    #[test]
+    fn a_semantic_group_id_ignores_host_edits_and_added_copies() {
+        let analysis = analysis_of_two_identical_hosts();
+        let mut windows = windows_at([
+            ByteRange { start: 10, end: 20 },
+            ByteRange { start: 10, end: 20 },
+            ByteRange { start: 10, end: 20 },
+        ]);
+        windows[2].content = stable_id::FragmentFingerprint::from_bytes([1; 16]);
+        ranked(&mut windows, &analysis);
+        let group_of = |members: &[SemanticUnitGraph], analysis: &StructuralReport| {
+            stable_id::semantic_clone_group_fingerprint(
+                &stable_id_variant(),
+                "sequence-pipeline-v1",
+                1,
+                &super::semantic_group_member_fingerprints(members.iter(), analysis),
+            )
+        };
+        let pair = [windows[0].clone(), windows[2].clone()];
+        let before = group_of(&pair, &analysis);
+
+        // The other host is edited outside its window, and a second copy of the
+        // first window's content joins the group.
+        let mut edited = analysis_of_two_identical_hosts();
+        edited.units[2].fingerprint = stable_id::UnitFingerprint::from_bytes([99; 16]);
+        let mut grown = windows.clone();
+        ranked(&mut grown, &edited);
+
+        assert_eq!(before, group_of(&grown, &edited));
+    }
+
+    fn stable_id_variant() -> codehelion_core::discovery::BuildVariant {
+        codehelion_core::discovery::BuildVariant::structural(
+            codehelion_core::discovery::LanguageSelection::default(),
+            Language::Rust,
+        )
+    }
+
     /// Adding a doc comment to one file moves every byte offset after it. That
     /// is not a change to any window's content or to the unit hosting it, so no
     /// window's rank — and so no semantic finding id — may move with it.
@@ -1124,21 +1203,16 @@ mod occurrence_rank_tests {
     }
 }
 
-/// Convert semantic windows into occurrence-qualified inputs for a group ID.
+/// The inputs a semantic group id is composed from: each window's content.
+///
+/// Host and rank stay out, so an edit to a host outside its window or another
+/// copy of known content leaves the group id alone; they identify a member
+/// through its finding id instead.
 pub(super) fn semantic_group_member_fingerprints<'a>(
     members: impl IntoIterator<Item = &'a SemanticUnitGraph>,
-    analysis: &StructuralReport,
+    _analysis: &StructuralReport,
 ) -> Vec<stable_id::FragmentFingerprint> {
-    members
-        .into_iter()
-        .map(|member| {
-            stable_id::semantic_occurrence_fingerprint(
-                member.content,
-                &analysis.units[member.unit].fingerprint,
-                member.occurrence_rank,
-            )
-        })
-        .collect()
+    members.into_iter().map(|member| member.content).collect()
 }
 
 /// Decode the full 256-bit `BuildVariant` identity that SOG stores as bytes.

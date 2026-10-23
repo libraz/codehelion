@@ -22,6 +22,7 @@
 //! reaches all languages at once instead of one grammar at a time.
 
 use std::borrow::Borrow;
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::fmt;
 use std::ops::Deref;
@@ -343,6 +344,10 @@ pub struct IrAssembly<'s> {
     source: &'s str,
     /// Byte offset of the start of each source line.
     line_starts: Vec<usize>,
+    /// The last position converted, as `(byte, characters from its line
+    /// start)`, so offsets asked for in source order are counted from there
+    /// rather than from the line start each time.
+    column_cursor: Cell<(usize, usize)>,
     interner: LexemeInterner,
     tokens: Vec<Token>,
     /// Byte start of each emitted token, for mapping node byte ranges onto
@@ -365,6 +370,7 @@ impl<'s> IrAssembly<'s> {
         Self {
             source,
             line_starts,
+            column_cursor: Cell::new((0, 0)),
             interner: LexemeInterner::new(),
             tokens: Vec::new(),
             token_starts: Vec::new(),
@@ -385,6 +391,10 @@ impl<'s> IrAssembly<'s> {
     }
 
     /// 1-based line and character column of a byte offset.
+    ///
+    /// Offsets asked for in source order cost the characters between them, so
+    /// converting every token of a file is linear in its length however long
+    /// its lines are.
     #[must_use]
     pub fn line_column(&self, byte: usize) -> (u32, u32) {
         let line_index = self
@@ -392,10 +402,17 @@ impl<'s> IrAssembly<'s> {
             .partition_point(|&start| start <= byte)
             .saturating_sub(1);
         let line_start = self.line_starts.get(line_index).copied().unwrap_or(0);
-        let column_chars = self
-            .source
-            .get(line_start..byte)
-            .map_or(0, |prefix| prefix.chars().count());
+        let (cursor_byte, cursor_chars) = self.column_cursor.get();
+        let (from, base) = if line_start <= cursor_byte && cursor_byte <= byte {
+            (cursor_byte, cursor_chars)
+        } else {
+            (line_start, 0)
+        };
+        let column_chars = self.source.get(from..byte).map_or(0, |prefix| {
+            let chars = base + prefix.chars().count();
+            self.column_cursor.set((byte, chars));
+            chars
+        });
         (
             u32::try_from(line_index + 1).unwrap_or(u32::MAX),
             u32::try_from(column_chars + 1).unwrap_or(u32::MAX),
@@ -647,6 +664,65 @@ mod tests {
         assert_eq!(assembly.line_column(e_acute + 'é'.len_utf8()), (1, 6));
         let second_line = source.find("let b").unwrap_or_default();
         assert_eq!(assembly.line_column(second_line), (2, 1));
+    }
+
+    /// The column every offset had when each was counted from its line start.
+    fn columns_from_line_start(source: &str, byte: usize) -> (u32, u32) {
+        let line_start = source[..byte].rfind('\n').map_or(0, |newline| newline + 1);
+        let line = source[..byte].matches('\n').count() + 1;
+        let column = source[line_start..byte].chars().count() + 1;
+        (
+            u32::try_from(line).unwrap_or(u32::MAX),
+            u32::try_from(column).unwrap_or(u32::MAX),
+        )
+    }
+
+    #[test]
+    fn assembly_columns_agree_in_any_order_of_asking() {
+        let source = "let é = 1; let ü = 2;\nfn ñ() {}\n\nend";
+        let boundaries: Vec<usize> = (0..=source.len())
+            .filter(|&byte| source.is_char_boundary(byte))
+            .collect();
+        let assembly = IrAssembly::new(source);
+        // In order, backwards, and jumping between lines.
+        let mut orders = vec![boundaries.clone()];
+        orders.push(boundaries.iter().rev().copied().collect());
+        orders.push(
+            boundaries
+                .iter()
+                .step_by(3)
+                .chain(boundaries.iter().step_by(2))
+                .copied()
+                .collect(),
+        );
+        for order in orders {
+            for byte in order {
+                assert_eq!(
+                    assembly.line_column(byte),
+                    columns_from_line_start(source, byte),
+                    "byte {byte}"
+                );
+            }
+        }
+    }
+
+    /// One very long line: counting each token's column from the line start
+    /// would cost the square of its length.
+    #[test]
+    fn assembly_positions_on_one_long_line_take_linear_time() {
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+        let source = "#[a] ".repeat(150_000);
+        let started = std::time::Instant::now();
+        let mut assembly = IrAssembly::new(&source);
+        let mut start = 0;
+        while start < source.len() {
+            assembly.push_token(TokenKind::Punctuation, "#", start, start + 1);
+            start += 5;
+        }
+        let elapsed = started.elapsed();
+        let last = assembly.tokens.last().map(|token| token.span.start_column);
+        assert_eq!(last, u32::try_from(source.len() - 4).ok());
+        assert!(elapsed < BOUND, "positions took {elapsed:?}");
     }
 
     #[test]

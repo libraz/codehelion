@@ -121,13 +121,31 @@ fn a_requested_language_comparison_says_it_did_not_run_on_a_single_program() {
         fail_on_findings: false,
         untrusted: false,
     };
-    let Ok(compilers) = Compilers::found(
-        &ExecutionPolicy::deny_all(),
-        SandboxRequest::unrestricted(),
-        &crate::config::Helpers::default(),
-    ) else {
-        return;
+    // A helper described by fixture facts, so the case runs whatever is installed:
+    // a tree with no program never asks it anything.
+    let compilers = Compilers {
+        installed: super::installed_helper(
+            super::RUST_HELPER,
+            super::HelperFacts {
+                path: std::path::PathBuf::from("/tool/codehelion-backend-rust"),
+                state: super::HelperState::Answered(super::Greeting {
+                    version: "1.0.0".to_owned(),
+                    protocol: 2,
+                    toolchains: vec!["rust-analyzer".to_owned()],
+                    capabilities: vec!["types".to_owned()],
+                    executes: Vec::new(),
+                }),
+            },
+            &ExecutionPolicy::deny_all(),
+            SandboxRequest::unrestricted(),
+        )
+        .into_iter()
+        .collect(),
     };
+    assert!(
+        !compilers.installed.is_empty(),
+        "the fixture helper is admitted"
+    );
     let mut out = Vec::new();
     run_with(&args, &mut out, Some(&compilers)).expect("a tree with one program scans");
     let rendered: serde_json::Value = serde_json::from_slice(&out).expect("the report is JSON");

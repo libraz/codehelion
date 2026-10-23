@@ -202,16 +202,24 @@ const CORPORA: &[Expected] = &[
             // the finding that shows it instead of counting as unreported.
             // Fast mode forms no groups, so nothing here follows from how
             // groups are folded.
-            confirmed: 31,
+            //
+            // One more besides: a verbatim run repeated inside a single member
+            // of a renamed group is kept, since that group states only one of
+            // its occurrences.
+            confirmed: 32,
             refuted: 27,
-            forward_confirmed: 31,
+            forward_confirmed: 32,
             forward_refuted: 27,
             // Verbatim runs the fragment pass reports and no label speaks
             // about, the longest a macro arm spelled out twice in full. Two of
             // them only survive because a fragment-pass match is no longer
             // discarded on the assumption that the raw pass would report the
             // same span: when the raw pass runs out of allowance, it does not.
-            unjudged: 558,
+            // Thirteen more are verbatim repeats inside one renamed member, kept
+            // for the same reason as the confirmed one above, and one is a
+            // verbatim run a renamed group no longer covers once that group
+            // stops counting overlapping occurrences of itself.
+            unjudged: 572,
             conflicting: 1,
         },
     },
@@ -255,7 +263,10 @@ const CORPORA: &[Expected] = &[
             // fragment-pass match is no longer discarded on the assumption that
             // the raw pass would report the same span; a generated flags corpus
             // exhausts the raw pass's allowance readily, so it often would not.
-            unjudged: 238,
+            // Three are verbatim runs in the parser and formatting tests that a
+            // renamed group covered only through occurrences overlapping each
+            // other; with those trimmed, the group no longer states them.
+            unjudged: 241,
             conflicting: 0,
         },
     },

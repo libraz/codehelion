@@ -480,9 +480,97 @@ fn crossings_that_differ_only_where_normalization_erases_it_are_one_finding() {
 
     assert_eq!(pairs.len(), 1);
     assert_eq!(pairs[0].members, vec![0, 1, 2]);
-    // The anchor follows raw content, so it does not depend on which crossing
-    // the walk reached first.
+    // The canonical member follows raw content, so it does not depend on which
+    // crossing the walk reached first.
     assert_eq!(pairs[0].canonical, 0);
+}
+
+/// A consistent rename changes a member's raw content and nothing a Type-3
+/// relation is judged on. When the rename flips which member has the smaller
+/// raw content, the id's anchor must stay where the normalized content put it,
+/// or the pair would reappear under a new id.
+#[test]
+fn a_rename_that_flips_raw_order_keeps_the_split_pair_id() {
+    let files: Vec<SyntaxIrFile> = (0..2)
+        .map(|_| SyntaxIrFile {
+            language: Language::Rust,
+            frontend_version: "test",
+            ir_schema_version: IR_SCHEMA_VERSION,
+            tokens: vec![Token {
+                kind: TokenKind::Identifier,
+                text: "unit".into(),
+                span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 1,
+                    start_line: 1,
+                    start_column: 1,
+                },
+            }],
+            signatures: Vec::new(),
+            roots: Vec::new(),
+            diagnostics: Vec::new(),
+            error_ranges: Vec::new(),
+            depth_truncated: false,
+            test_module: false,
+        })
+        .collect();
+    let corpus = |first_raw: u8| -> Vec<Unit> {
+        [(first_raw, 20_u8), (2, 10)]
+            .into_iter()
+            .enumerate()
+            .map(|(position, (raw, normalized))| Unit {
+                file: position,
+                tokens: (0, 1),
+                fingerprint: UnitFingerprint::from_bytes([raw; 16]),
+                content: FragmentFingerprint::from_bytes([raw; 16]),
+                normalized_content: FragmentFingerprint::from_bytes([normalized; 16]),
+                ..unit_at(position, 0, 1)
+            })
+            .collect()
+    };
+    let edges = [grouping::SimilarityEdge {
+        a: 0,
+        b: 1,
+        similarity: 0.90,
+        breakdown: None,
+        class: CloneClass::Type3,
+        confidence: Confidence::High,
+    }];
+    let variant = BuildVariant::structural(
+        LanguageSelection {
+            rust: true,
+            c: false,
+            cpp: false,
+        },
+        Language::Rust,
+    );
+    let pair_of = |units: &[Unit]| {
+        let grouping_units: Vec<grouping::GroupingUnit> = units
+            .iter()
+            .map(|unit| grouping::GroupingUnit {
+                key: *unit.fingerprint.as_bytes(),
+            })
+            .collect();
+        let grouping = grouping::group(
+            &grouping_units,
+            &edges,
+            &grouping::GroupingConfig {
+                medoid_min_similarity: 0.98,
+                min_pairwise_similarity: 0.98,
+                ..grouping::GroupingConfig::default()
+            },
+        );
+        let (pairs, _, _) = unrepresented_pairs(&edges, &grouping, units, &files, &variant);
+        assert_eq!(pairs.len(), 1);
+        (pairs[0].canonical, pairs[0].fingerprint)
+    };
+
+    // Raw content 1 sorts before the other member's 2; renamed to 3, after it.
+    let before = pair_of(&corpus(1));
+    let after = pair_of(&corpus(3));
+
+    assert_ne!(before.0, after.0, "the rename flips the raw order");
+    assert_eq!(before.1, after.1, "and leaves the pair id where it was");
 }
 /// Two crossings of one pair of contents can agree on similarity and still say
 /// different things about it. Which of them the entry then reports has to

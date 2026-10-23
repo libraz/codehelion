@@ -58,28 +58,36 @@ fn cross_language_group_identity_is_member_order_independent_and_rule_bound() {
 }
 
 #[test]
-fn cross_language_group_identity_keeps_content_identical_occurrences_distinct() {
+fn cross_language_group_identity_is_content_while_members_keep_their_hosts() {
     let comparison = cross_language_comparison_id(&["cpp".to_owned(), "rust".to_owned()]);
-    let content = fragment_fingerprint(&variant(), &ctx(), "semantic", &sample(), ContentNorm::Raw);
-    let rust_host = unit_fingerprint(&variant(), &ctx(), &sample(), ContentNorm::Raw);
-    let cpp_host = unit_fingerprint(&variant(), &ctx(), &renamed_sample(), ContentNorm::Raw);
-    let first = cross_language_group_id(
-        &comparison,
-        "cross-language-sequence-pipeline-v1",
-        1,
-        &[
-            semantic_occurrence_fingerprint(content, &rust_host, 0),
-            semantic_occurrence_fingerprint(content, &cpp_host, 0),
-        ],
+    let rust = fragment_fingerprint(&variant(), &ctx(), "semantic", &sample(), ContentNorm::Raw);
+    let cpp = fragment_fingerprint(
+        &variant(),
+        &ctx(),
+        "semantic",
+        &renamed_sample(),
+        ContentNorm::Raw,
     );
-    let second = cross_language_group_id(
-        &comparison,
-        "cross-language-sequence-pipeline-v1",
-        1,
-        &[
-            semantic_occurrence_fingerprint(content, &rust_host, 1),
-            semantic_occurrence_fingerprint(content, &cpp_host, 0),
-        ],
+    let rule = "cross-language-sequence-pipeline-v1";
+    let group = cross_language_group_id(&comparison, rule, 1, &[rust, cpp]);
+    // A third identical copy of one window leaves the content set as it was.
+    assert_eq!(
+        group,
+        cross_language_group_id(&comparison, rule, 1, &[cpp, rust, rust])
     );
-    assert_ne!(first, second);
+    let first_host = unit_fingerprint(&variant(), &ctx(), &sample(), ContentNorm::Raw);
+    let second_host = unit_fingerprint(&variant(), &ctx(), &renamed_sample(), ContentNorm::Raw);
+    assert_ne!(
+        cross_language_member_id(
+            &group,
+            "rust",
+            &semantic_occurrence_fingerprint(rust, &first_host, 0)
+        ),
+        cross_language_member_id(
+            &group,
+            "rust",
+            &semantic_occurrence_fingerprint(rust, &second_host, 0)
+        ),
+        "identical windows in distinct hosts stay distinct members"
+    );
 }
