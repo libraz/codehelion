@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-artifact"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-backend-clang"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "clang",
  "codehelion-fixtures",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-backend-rust"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "codehelion-fixtures",
  "codehelion-helper",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "codehelion-fixtures",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-eval"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-fixtures"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-frontend-c"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "codehelion-core",
  "proptest",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-frontend-cpp"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "codehelion-core",
  "codehelion-frontend-c",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-frontend-rust"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "codehelion-core",
  "codehelion-eval",
@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-helper"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "codehelion-helper-protocol",
  "nix",
@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-helper-conformance"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "clap",
  "codehelion",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-helper-protocol"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-history"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "codehelion-fixtures",
  "gix",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-seam"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "codehelion-history",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "codehelion-store"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "codehelion-core",
