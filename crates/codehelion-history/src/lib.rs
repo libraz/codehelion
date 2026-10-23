@@ -374,7 +374,9 @@ pub enum HistoryError {
 /// commits, when `request.until` names nothing, or when git could not be read.
 pub fn read(repo_root: &Path, request: &HistoryRequest) -> Result<History, HistoryError> {
     let repository = open(repo_root)?;
-    let shallow = repository.is_shallow();
+    let shallow = repository
+        .is_shallow()
+        .map_err(|error| HistoryError::Read(error.to_string()))?;
     // A shallow clone's boundary commits have no parents in the repository, so
     // what they changed cannot be read: the walk stops before them.
     let boundary: BTreeSet<gix::ObjectId> = repository
