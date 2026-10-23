@@ -149,6 +149,34 @@ pub(crate) fn text_options(options: &ReportOutput<'_>) -> report::TextOptions {
     }
 }
 
+/// Refuse, before any analysis or database work, the output choices that
+/// would only fail once the report is rendered.
+///
+/// A flag the chosen format has no use for is a usage error. An existing
+/// destination without `--force` gets the refusal the write itself would
+/// give; the write still creates the file exclusively, so a file appearing in
+/// between is refused there.
+///
+/// # Errors
+///
+/// Returns a usage error for a text-only flag with another format, and an
+/// error when the destination exists and `force` is unset.
+pub(crate) fn validate_report_output(options: &ReportOutput<'_>) -> Result<()> {
+    validate_presentation_options(
+        options.format,
+        options.show_suppressed,
+        options.show_siblings,
+        options.show_near_misses,
+    )?;
+    if let Some(path) = options.output
+        && !options.force
+        && std::fs::symlink_metadata(path).is_ok()
+    {
+        bail!("{}", overwrite_refusal(path));
+    }
+    Ok(())
+}
+
 /// Validate flags whose meaning exists only in the text presentation.
 fn validate_presentation_options(
     format: Format,
@@ -731,6 +759,17 @@ pub(super) fn partitioned_json(
         .context("serializing partitioned JSON reports")
 }
 
+/// SARIF automation id of a cross-build-variant comparison run.
+///
+/// The trailing `/` makes the whole id the code-scanning category, with no
+/// instance part, so it is not the bare `codehelion/` the other comparison
+/// would share.
+const CROSS_VARIANT_AUTOMATION_ID: &str = "codehelion/cross-build-variants/";
+
+/// SARIF automation id of a cross-language comparison run, shaped like
+/// [`CROSS_VARIANT_AUTOMATION_ID`].
+const CROSS_LANGUAGE_AUTOMATION_ID: &str = "codehelion/cross-language/";
+
 pub(super) fn partitioned_sarif(
     models: &[Report],
     cross_variant: Option<&report::CrossVariantComparison>,
@@ -784,7 +823,7 @@ pub(super) fn cross_variant_sarif_run(
                 "shortDescription": { "text": "Exact clone across build variants" }
             }]
         }},
-        "automationDetails": { "id": "codehelion/cross-build-variants" },
+        "automationDetails": { "id": CROSS_VARIANT_AUTOMATION_ID },
         "originalUriBaseIds": comparison_uri_bases(root),
         "results": comparison.groups.iter().map(cross_variant_sarif_result).collect::<Vec<_>>(),
         "properties": { "crossVariantComparison": comparison }
@@ -806,7 +845,7 @@ fn cross_variant_not_run_sarif_run(
                 "shortDescription": { "text": "Exact clone across build variants" }
             }]
         }},
-        "automationDetails": { "id": "codehelion/cross-build-variants" },
+        "automationDetails": { "id": CROSS_VARIANT_AUTOMATION_ID },
         "originalUriBaseIds": comparison_uri_bases(root),
         "results": [],
         "properties": { "crossVariantComparisonStatus": status }
@@ -844,7 +883,7 @@ fn cross_language_sarif_run(comparison: &report::CrossLanguageComparison, root: 
                 "shortDescription": { "text": "Registered Rust-to-C++ semantic pipeline" }
             }]
         }},
-        "automationDetails": { "id": "codehelion/cross-language" },
+        "automationDetails": { "id": CROSS_LANGUAGE_AUTOMATION_ID },
         "originalUriBaseIds": comparison_uri_bases(root),
         "results": comparison.groups.iter().map(cross_language_sarif_result).collect::<Vec<_>>(),
         "properties": { "crossLanguageComparison": comparison }
@@ -864,7 +903,7 @@ fn cross_language_not_run_sarif_run(
                 "shortDescription": { "text": "Registered Rust-to-C++ semantic pipeline" }
             }]
         }},
-        "automationDetails": { "id": "codehelion/cross-language" },
+        "automationDetails": { "id": CROSS_LANGUAGE_AUTOMATION_ID },
         "originalUriBaseIds": comparison_uri_bases(root),
         "results": [],
         "properties": { "crossLanguageComparisonStatus": status }
@@ -1092,4 +1131,19 @@ fn write_partitioned_text(
         None => out.write_all(text.as_bytes())?,
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CROSS_LANGUAGE_AUTOMATION_ID, CROSS_VARIANT_AUTOMATION_ID};
+
+    /// A comparison's category is its whole automation id, and the two
+    /// comparisons never share one.
+    #[test]
+    fn the_two_comparisons_have_distinct_categories() {
+        for id in [CROSS_VARIANT_AUTOMATION_ID, CROSS_LANGUAGE_AUTOMATION_ID] {
+            assert!(id.ends_with('/'), "{id}");
+        }
+        assert_ne!(CROSS_VARIANT_AUTOMATION_ID, CROSS_LANGUAGE_AUTOMATION_ID);
+    }
 }

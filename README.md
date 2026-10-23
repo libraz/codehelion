@@ -101,8 +101,9 @@ report, so a run that could not finish the search says what it left unexamined.
   timeout, candidate budget) is counted in the report.
 - **Artifact size by owner** — `artifact analyze` reads WASM, ELF, Mach-O and
   PE/COFF without running them, splits the code bytes between your code, the
-  toolchain and everything else, and names the functions through which toolchain
-  code stays linked in.
+  toolchain and everything else, and, where the format carries a call graph (WASM,
+  ELF and archives of them), names the functions through which toolchain code
+  stays linked in.
 - **Local by construction** — the ban on network access and on executing the
   scanned tree is enforced by lints and dependency policy, not by convention:
   `clippy.toml` disallows process spawning and sockets in the scan path, and

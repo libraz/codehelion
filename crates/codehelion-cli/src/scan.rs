@@ -348,11 +348,20 @@ pub(crate) fn permitted(args: &ScanArgs) -> Result<ExecutionPolicy> {
 /// What a finished scan exits with: findings present only when the caller
 /// asked to be told by the status, and only counting what the report shows —
 /// a suppressed group is one the reader said not to be told about.
+///
+/// A group the baseline carries is not a finding either, whether the baseline
+/// hid it or, in compare mode, only marked it.
 pub(crate) fn outcome(args: &ScanArgs, model: &Report) -> Outcome {
     let visible = model
         .groups
         .iter()
-        .filter(|group| group.suppressed.is_none())
+        .filter(|group| {
+            group.suppressed.is_none()
+                && group
+                    .baseline
+                    .as_ref()
+                    .is_none_or(|baseline| baseline.state != report::GROUP_CONTINUING)
+        })
         .count();
     if args.fail_on_findings && visible > 0 {
         Outcome::FindingsPresent
@@ -380,7 +389,7 @@ pub(crate) use output::{
     write_partitioned_reports, write_partitioned_reports_without_artifact_guidance, write_report,
     write_report_without_artifact_guidance,
 };
-pub(crate) use output::{overwrite_refusal, write_output};
+pub(crate) use output::{overwrite_refusal, validate_report_output, write_output};
 
 pub(crate) mod runtime;
 

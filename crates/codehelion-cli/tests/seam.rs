@@ -392,6 +392,45 @@ fn report_shows_the_seam_section_for_a_recorded_run() {
     assert_eq!(seam["seams"][0]["breaches_since"], 0);
 }
 
+/// A seam re-cut between two generations is not the seam the earlier one
+/// measured, so no delta is set against it.
+#[test]
+fn a_seam_whose_members_changed_reports_no_delta() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    planted(root);
+
+    cmd()
+        .args(["scan", root.to_str().unwrap()])
+        .assert()
+        .success();
+    cmd()
+        .args(["seam", "--path", root.to_str().unwrap()])
+        .assert()
+        .success();
+    std::fs::write(
+        root.join("codehelion.toml"),
+        LEDGER.replace(r#""right/**"]"#, r#""right/**", "README.md"]"#),
+    )
+    .expect("re-cutting the seam");
+    cmd()
+        .args(["seam", "--path", root.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let document = json_of(root, &["report"]);
+    let seam = &document["seam"];
+    assert_eq!(seam["since_seam_run_id"], 1, "{seam}");
+    assert_eq!(seam["seams"][0]["id"], "pair");
+    for delta in [
+        "asymmetric_changes_since",
+        "breaches_since",
+        "findings_since",
+    ] {
+        assert!(seam["seams"][0][delta].is_null(), "{delta}: {seam}");
+    }
+}
+
 /// Three ways an invocation records nothing, each for its own reason: a
 /// proposal is not a measurement, a deliberately truncated range is not a
 /// generation of the current one, and `--no-record` is the explicit opt-out.
@@ -416,6 +455,34 @@ fn suggest_until_and_no_record_leave_the_database_untouched() {
             "`seam {}` recorded a run",
             arguments.join(" ")
         );
+    }
+}
+
+/// `--db` names where an evaluation is recorded, so it is refused beside each
+/// way of recording nothing, before any history is read.
+#[test]
+fn a_named_database_is_refused_where_nothing_is_recorded() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    planted(root);
+    let named = directory.path().join("named.db");
+
+    for arguments in [
+        vec!["--suggest"],
+        vec!["--until", "HEAD"],
+        vec!["--no-record"],
+    ] {
+        let mut command = cmd();
+        command.args([
+            "seam",
+            "--path",
+            root.to_str().unwrap(),
+            "--db",
+            named.to_str().unwrap(),
+        ]);
+        command.args(&arguments);
+        command.assert().code(2);
+        assert!(!named.exists(), "`seam --db {}` wrote", arguments.join(" "));
     }
 }
 
@@ -518,6 +585,45 @@ fn deny_asymmetric_is_what_turns_a_report_into_a_failure() {
             "guard",
             "--path",
             root.to_str().unwrap(),
+            "--deny-asymmetric",
+        ])
+        .assert()
+        .code(3);
+}
+
+/// `--deny-asymmetric` gates a judged change; a `--paths` lookup judges none,
+/// so the pair is refused rather than accepted as a gate that cannot fail.
+#[test]
+fn deny_asymmetric_is_refused_where_no_change_is_judged() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    planted(root);
+
+    cmd()
+        .args([
+            "guard",
+            "--path",
+            root.to_str().unwrap(),
+            "--paths",
+            "left/a.txt",
+            "--deny-asymmetric",
+        ])
+        .assert()
+        .code(2);
+
+    std::fs::write(root.join("left").join("a.txt"), "one\ntwo\nthree\n")
+        .expect("editing one side of the seam");
+    git_in(
+        root,
+        &["commit", "-q", "-am", "feat: move the left side alone"],
+    );
+    cmd()
+        .args([
+            "guard",
+            "--path",
+            root.to_str().unwrap(),
+            "--since",
+            "HEAD~1",
             "--deny-asymmetric",
         ])
         .assert()

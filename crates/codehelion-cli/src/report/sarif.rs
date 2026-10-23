@@ -186,8 +186,13 @@ impl<'a> From<&'a Report> for Run<'a> {
                     notifications: NOTICES.iter().map(NoticeDescriptor::from).collect(),
                 },
             },
+            // Everything before the last `/` is the code-scanning category, so
+            // each build-variant partition keeps one of its own from scan to scan.
             automation_details: run.run_id.map(|run_id| AutomationDetails {
-                id: format!("codehelion/{}/{}", run.mode, run_id),
+                id: format!(
+                    "codehelion/{}/{}/{}",
+                    run.mode, run.build_variant.fingerprint, run_id
+                ),
             }),
             original_uri_base_ids: std::iter::once((
                 SRCROOT,

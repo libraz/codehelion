@@ -45,6 +45,8 @@ regression. Removing a duplication also rewrites the code around it, so the
 groups that come out of the rearrangement carry new ids; one standing in the place
 an entry has just left is reported as standing there rather than as duplication
 somebody added.
+With `--fail-on-findings`, a group the baseline carries does not count in this
+mode either, so the exit status is the same in both modes.
 
 Scan with the same `--mode` when creating the baseline and when reading against
 it. If the build variant or the detector versions differ, create a fresh baseline for

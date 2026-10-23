@@ -112,6 +112,17 @@ fn every_command_line_rejection_exits_with_the_usage_status() {
             "build-scripts",
         ],
         vec!["scan", ".", "--force"],
+        // Decided before the database is looked for: nothing is recorded here.
+        vec!["report", "--format", "json", "--show-suppressed"],
+        vec!["report", "--format", "sarif", "--show-near-misses"],
+        vec![
+            "report",
+            "--run",
+            "1",
+            "--format",
+            "json",
+            "--show-siblings",
+        ],
         vec!["cache", "prune"],
         vec!["cache", "clear"],
         vec![
@@ -145,4 +156,16 @@ fn every_command_line_rejection_exits_with_the_usage_status() {
         .output()
         .expect("report with nothing recorded");
     assert_eq!(output.status.code(), Some(1), "{output:?}");
+
+    // A destination that is already there is refused before the database is.
+    std::fs::write(directory.path().join("taken.out"), "kept").expect("write destination");
+    let output = cmd()
+        .current_dir(directory.path())
+        .args(["report", "--output", "taken.out"])
+        .output()
+        .expect("report into an existing file");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("refusing to overwrite"), "{stderr}");
+    assert!(!stderr.contains("no local database"), "{stderr}");
 }

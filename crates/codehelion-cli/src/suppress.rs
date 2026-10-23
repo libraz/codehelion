@@ -144,6 +144,9 @@ struct CommentScan<'a> {
     line: u32,
     /// What has been recognised so far.
     comments: Vec<(u32, &'a str)>,
+    /// A byte range already probed and found to hold no unescaped apostrophe,
+    /// so an apostrophe inside it needs no second probe.
+    apostrophe_free: (usize, usize),
 }
 
 impl<'a> CommentScan<'a> {
@@ -154,6 +157,7 @@ impl<'a> CommentScan<'a> {
             index: 0,
             line: 1,
             comments: Vec::new(),
+            apostrophe_free: (0, 0),
         }
     }
 
@@ -185,6 +189,17 @@ impl<'a> CommentScan<'a> {
             .as_bytes()
             .get(self.index.saturating_add(offset))
             .copied()
+    }
+
+    /// At most `limit` bytes starting `offset` positions ahead of the cursor.
+    ///
+    /// A probe that may give up reads through this, so the work it does
+    /// before giving up does not grow with the length of the file.
+    fn bounded_lookahead(&self, offset: usize, limit: usize) -> &'a [u8] {
+        let bytes = self.text.as_bytes();
+        let start = self.index.saturating_add(offset).min(bytes.len());
+        let end = start.saturating_add(limit).min(bytes.len());
+        bytes.get(start..end).unwrap_or_default()
     }
 
     /// Move the cursor on by `count` bytes, counting the lines crossed.
@@ -349,16 +364,36 @@ impl<'a> CommentScan<'a> {
         }
         // A character literal cannot cross a line, so an apostrophe with no
         // partner on its own line is not one.
-        let rest = self
-            .text
-            .get(self.index.saturating_add(1)..)
-            .unwrap_or_default();
-        let line = rest.split('\n').next().unwrap_or_default();
-        if holds_closing_quote(line) {
+        if self.closing_quote_on_line() {
             self.quoted(b'\'');
         } else {
             self.advance(1);
         }
+    }
+
+    /// Whether an unescaped apostrophe follows the cursor on its line.
+    ///
+    /// A probe that finds none remembers the range it read: an apostrophe
+    /// inside that range was an escaped one there, so the rest of the range
+    /// holds none either. Each byte of a line is therefore read by at most one
+    /// failing probe, and a successful one is consumed by the literal it
+    /// found, which keeps the whole scan linear in the file's length.
+    fn closing_quote_on_line(&mut self) -> bool {
+        let (free_from, free_to) = self.apostrophe_free;
+        if (free_from..free_to).contains(&self.index) {
+            return false;
+        }
+        let from = self.index.saturating_add(1).min(self.text.len());
+        let rest = self.text.as_bytes().get(from..).unwrap_or_default();
+        let line = rest
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(rest, |end| rest.get(..end).unwrap_or_default());
+        if holds_closing_quote(line) {
+            return true;
+        }
+        self.apostrophe_free = (self.index, from.saturating_add(line.len()));
+        false
     }
 
     /// Consume a raw string literal at the cursor, reporting whether one was
@@ -417,18 +452,22 @@ impl<'a> CommentScan<'a> {
         if self.byte(prefix.saturating_add(1)) != Some(b'"') {
             return false;
         }
-        let opening = self.index.saturating_add(prefix).saturating_add(2);
-        let rest = self.text.get(opening..).unwrap_or_default();
-        let Some(length) = rest.find('(') else {
+        let opening = prefix.saturating_add(2);
+        // A delimiter longer than the cap is not one, so `(` must sit within it.
+        let Some(length) = self
+            .bounded_lookahead(opening, MAX_RAW_STRING_DELIMITER.saturating_add(1))
+            .iter()
+            .position(|byte| *byte == b'(')
+        else {
             return false;
         };
-        let Some(delimiter) = rest.get(..length) else {
+        let start = self.index.saturating_add(opening);
+        let Some(delimiter) = self.text.get(start..start.saturating_add(length)) else {
             return false;
         };
-        if length > MAX_RAW_STRING_DELIMITER
-            || delimiter
-                .bytes()
-                .any(|byte| byte == b')' || byte == b'\\' || byte.is_ascii_whitespace())
+        if delimiter
+            .bytes()
+            .any(|byte| byte == b')' || byte == b'\\' || byte.is_ascii_whitespace())
         {
             return false;
         }
@@ -449,8 +488,8 @@ impl<'a> CommentScan<'a> {
 }
 
 /// Whether `line` holds an unescaped apostrophe.
-fn holds_closing_quote(line: &str) -> bool {
-    let mut bytes = line.as_bytes().iter();
+fn holds_closing_quote(line: &[u8]) -> bool {
+    let mut bytes = line.iter();
     while let Some(byte) = bytes.next() {
         match byte {
             b'\\' => {
@@ -501,7 +540,8 @@ pub(crate) struct FileSuppression {
     symbol_units: Vec<Option<usize>>,
     /// Whether each unit of the file is marker-suppressed.
     suppressed_units: Vec<bool>,
-    /// The file's marker lines, for occurrences outside any unit.
+    /// The file's marker lines in ascending order, for occurrences outside
+    /// any unit.
     marker_lines: Vec<u32>,
     /// Every configured selector that matched this file or one of its units.
     ///
@@ -722,12 +762,14 @@ impl Rules {
             .iter()
             .map(|unit| (unit.start_line, unit.end_line))
             .collect();
+        let mut marker_lines = markers.to_vec();
+        marker_lines.sort_unstable();
         FileSuppression {
             path_rule,
             vendored_rule,
             symbol_units,
-            suppressed_units: suppressed_units(markers, &lines),
-            marker_lines: markers.to_vec(),
+            suppressed_units: suppressed_units(&marker_lines, &lines),
+            marker_lines,
             matched_rules,
         }
     }
@@ -772,9 +814,10 @@ impl Rules {
         let inline = self.inline_rule?;
         let marked = unit.map_or_else(
             || {
+                let first = file.marker_lines.partition_point(|&line| line < start_line);
                 file.marker_lines
-                    .iter()
-                    .any(|line| *line >= start_line && *line <= end_line)
+                    .get(first)
+                    .is_some_and(|&line| line <= end_line)
             },
             |unit_index| file.suppressed_units.get(unit_index).copied() == Some(true),
         );
@@ -847,26 +890,44 @@ fn clone_id_prefix(id: &str) -> Result<String> {
 /// marker in a closure body also covers the enclosing function — suppression
 /// errs on the broad side). A marker outside any unit suppresses the next
 /// unit that starts below it.
-fn suppressed_units(markers: &[u32], unit_lines: &[(u32, u32)]) -> Vec<bool> {
-    let mut flags = vec![false; unit_lines.len()];
-    for &line in markers {
-        let mut contained = false;
-        for (index, &(start, end)) in unit_lines.iter().enumerate() {
-            if line >= start && line <= end {
-                flags[index] = true;
-                contained = true;
-            }
-        }
+///
+/// `sorted_markers` is in ascending order.
+fn suppressed_units(sorted_markers: &[u32], unit_lines: &[(u32, u32)]) -> Vec<bool> {
+    // A unit holds a marker when the first marker at or after its start is
+    // not past its end.
+    let mut flags: Vec<bool> = unit_lines
+        .iter()
+        .map(|&(start, end)| {
+            let first = sorted_markers.partition_point(|&line| line < start);
+            sorted_markers.get(first).is_some_and(|&line| line <= end)
+        })
+        .collect();
+    // Units by start, ties in index order; `reach` is the furthest end among
+    // the units starting at or before each position.
+    let mut by_start: Vec<usize> = (0..unit_lines.len()).collect();
+    by_start.sort_by_key(|&index| unit_lines.get(index).map_or(0, |&(start, _)| start));
+    let starts: Vec<u32> = by_start
+        .iter()
+        .map(|&index| unit_lines.get(index).map_or(0, |&(start, _)| start))
+        .collect();
+    let reach: Vec<u32> = by_start
+        .iter()
+        .scan(0u32, |furthest, &index| {
+            *furthest = (*furthest).max(unit_lines.get(index).map_or(0, |&(_, end)| end));
+            Some(*furthest)
+        })
+        .collect();
+    for &line in sorted_markers {
+        let next = starts.partition_point(|&start| start <= line);
+        let contained = next
+            .checked_sub(1)
+            .and_then(|last| reach.get(last))
+            .is_some_and(|&end| end >= line);
         if contained {
             continue;
         }
-        if let Some((index, _)) = unit_lines
-            .iter()
-            .enumerate()
-            .filter(|&(_, &(start, _))| start > line)
-            .min_by_key(|&(_, &(start, _))| start)
-        {
-            flags[index] = true;
+        if let Some(flag) = by_start.get(next).and_then(|&index| flags.get_mut(index)) {
+            *flag = true;
         }
     }
     flags
@@ -1039,6 +1100,87 @@ mod tests {
             "{:?}",
             markers(text, Language::Rust)
         );
+    }
+
+    /// A line of apostrophes that never close, or of raw-string openers that
+    /// never open, is read in time proportional to its length; the markers
+    /// around it are classified as before.
+    #[test]
+    fn a_long_line_of_failed_probes_is_scanned_in_linear_time() {
+        let escaped = format!("int a = 0; {}// codehelion:ignore\n", "\\'".repeat(1 << 19));
+        for language in [Language::C, Language::Cpp] {
+            assert_eq!(markers(&escaped, language), vec![1], "{language:?}");
+        }
+        let openers = format!("{}\n// codehelion:ignore\n", "R\"".repeat(1 << 19));
+        assert_eq!(markers(&openers, Language::Cpp), vec![2]);
+
+        // A delimiter at the cap still opens a raw string; one past it does not.
+        let raw =
+            |delimiter: &str| format!("R\"{delimiter}(a \" // codehelion:ignore){delimiter}\";\n");
+        let at_cap = markers(&raw(&"d".repeat(16)), Language::Cpp);
+        assert!(at_cap.is_empty(), "{at_cap:?}");
+        assert_eq!(markers(&raw(&"d".repeat(17)), Language::Cpp), vec![1]);
+    }
+
+    /// The marker-to-unit rule stated pairwise, as the reference the sorted
+    /// form must agree with.
+    fn suppressed_units_pairwise(markers: &[u32], unit_lines: &[(u32, u32)]) -> Vec<bool> {
+        let mut flags = vec![false; unit_lines.len()];
+        for &line in markers {
+            let mut contained = false;
+            for (index, &(start, end)) in unit_lines.iter().enumerate() {
+                if line >= start && line <= end {
+                    flags[index] = true;
+                    contained = true;
+                }
+            }
+            if contained {
+                continue;
+            }
+            if let Some((index, _)) = unit_lines
+                .iter()
+                .enumerate()
+                .filter(|&(_, &(start, _))| start > line)
+                .min_by_key(|&(_, &(start, _))| start)
+            {
+                flags[index] = true;
+            }
+        }
+        flags
+    }
+
+    #[test]
+    fn marker_suppression_agrees_with_the_pairwise_rule() {
+        // Every unit layout of up to three spans over lines 1-5, with nesting,
+        // overlap and shared starts, against every marker set over lines 0-6.
+        let spans: Vec<(u32, u32)> = (1..=5)
+            .flat_map(|start| (start..=5).map(move |end| (start, end)))
+            .collect();
+        let mut layouts: Vec<Vec<(u32, u32)>> = vec![Vec::new()];
+        for _ in 0..3 {
+            let longer: Vec<Vec<(u32, u32)>> = layouts
+                .iter()
+                .filter(|layout| layout.len() == layouts.last().map_or(0, Vec::len))
+                .flat_map(|layout| {
+                    spans.iter().map(move |&span| {
+                        let mut next = layout.clone();
+                        next.push(span);
+                        next
+                    })
+                })
+                .collect();
+            layouts.extend(longer);
+        }
+        for layout in &layouts {
+            for mask in 0u32..(1 << 7) {
+                let markers: Vec<u32> = (0..7).filter(|line| mask & (1 << line) != 0).collect();
+                assert_eq!(
+                    suppressed_units(&markers, layout),
+                    suppressed_units_pairwise(&markers, layout),
+                    "markers {markers:?} units {layout:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1292,6 +1434,13 @@ mod tests {
         let file = rules.evaluate_file("src/lib.rs", &[7], &[]);
         assert_eq!(rules.member_rule(&file, 5, 9, None), Some(inline));
         assert_eq!(rules.member_rule(&file, 10, 14, None), None);
+
+        // Markers handed over in any order are matched against each range.
+        let several = rules.evaluate_file("src/lib.rs", &[12, 3, 7], &[]);
+        assert_eq!(rules.member_rule(&several, 5, 9, None), Some(inline));
+        assert_eq!(rules.member_rule(&several, 10, 12, None), Some(inline));
+        assert_eq!(rules.member_rule(&several, 13, 20, None), None);
+        assert_eq!(rules.member_rule(&several, 1, 2, None), None);
     }
 
     #[test]

@@ -25,7 +25,10 @@ fn the_log_names_its_version_and_the_tool_that_produced_it() {
     assert_eq!(rules[3]["id"], "clone/restricted-semantic");
 
     let run = &value["runs"][0];
-    assert_eq!(run["automationDetails"]["id"], "codehelion/fast/1");
+    assert_eq!(
+        run["automationDetails"]["id"],
+        format!("codehelion/fast/{}/1", "aa".repeat(32))
+    );
     assert_eq!(
         run["originalUriBaseIds"]["SRCROOT"]["uri"],
         "file:///work/project/"
@@ -37,6 +40,28 @@ fn the_log_names_its_version_and_the_tool_that_produced_it() {
         run["invocations"][0]["startTimeUtc"],
         "2026-01-01T00:00:00.000Z"
     );
+}
+
+/// The code-scanning category is the automation id up to its last `/`: one
+/// per build-variant partition, the same on every scan of that partition.
+#[test]
+fn each_build_variant_partition_has_its_own_stable_category() {
+    let category = |report: &Report| {
+        let value = sarif(report);
+        let id = value["runs"][0]["automationDetails"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        id[..=id.rfind('/').unwrap()].to_string()
+    };
+    let first = sample_report();
+    let mut rescanned = sample_report();
+    rescanned.run.run_id = Some(7);
+    let mut other = sample_report();
+    other.run.build_variant.fingerprint = "bb".repeat(32);
+
+    assert_eq!(category(&first), category(&rescanned));
+    assert_ne!(category(&first), category(&other));
 }
 
 #[test]

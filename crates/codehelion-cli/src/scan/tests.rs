@@ -73,7 +73,7 @@ fn cross_language_comparison_stays_in_its_own_report_domain() {
     .expect("valid SARIF JSON");
     assert_eq!(
         sarif["runs"][0]["automationDetails"]["id"],
-        "codehelion/cross-language"
+        "codehelion/cross-language/"
     );
 
     let text = partitioned_text(

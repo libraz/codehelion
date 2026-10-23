@@ -134,6 +134,25 @@ repetition — the same few tokens repeating rather than a routine. The value is
 relative to the largest entropy a group of the same token length can carry, so it
 does not turn clone length into a noise filter.
 
+## By inline marker
+
+```rust
+// codehelion:ignore
+fn decoded_header(bytes: &[u8]) -> Header { /* ... */ }
+```
+
+A comment containing `codehelion:ignore` suppresses the unit it is written in,
+together with every unit enclosing it. Written between units, it suppresses the
+next unit that starts below it. An occurrence that sits in no unit is suppressed
+when a marker line falls inside its own line range. A report cites the rule as
+the `codehelion:ignore` marker, and SARIF records it as an in-source
+suppression.
+
+Only a comment counts: the same characters in a string literal, a character
+literal or an identifier suppress nothing, so a file that merely mentions the
+marker reports its duplication as usual. A path or name rule that also matches
+is the one cited. Markers are read in every mode, Fast included.
+
 ## By id
 
 ```toml

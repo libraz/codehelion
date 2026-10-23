@@ -1,6 +1,7 @@
 //! Rebuilding one report model from what the store recorded.
 
 use super::{Context, Result, RunOrigin, Store, report, scan};
+use codehelion_store::seam::SeamEntryRecord;
 
 pub(super) fn recorded_build_variant_settings(
     settings: &[codehelion_store::query::StoredSetting],
@@ -167,9 +168,10 @@ fn recorded_groups(store: &Store, run_id: i64) -> Result<Vec<report::Group>> {
 /// shows a measurement taken after it.
 ///
 /// A delta is reported only where the previous run under the same settings
-/// carried the same seam. A seam written into the ledger since then has no
-/// earlier generation, and subtracting against nothing would report the
-/// ledger's growth as movement in the code. A findings delta additionally
+/// carried the same seam, under the same id and over the same members. A seam
+/// written into the ledger since then, or cut differently, has no earlier
+/// generation, and subtracting against one would report the ledger's change as
+/// movement in the code. A findings delta additionally
 /// needs both generations' findings to come from scans of the same modes and
 /// build variants; otherwise it would report the change of scan as movement.
 ///
@@ -203,7 +205,7 @@ pub(crate) fn recorded_seam(store: &Store, scan_run_id: i64) -> Result<Option<re
                     .run
                     .entries
                     .iter()
-                    .find(|candidate| candidate.seam_id == entry.seam_id)
+                    .find(|candidate| same_seam(candidate, entry))
             });
             report::ReportedSeam {
                 id: entry.seam_id.clone(),
@@ -234,6 +236,15 @@ pub(crate) fn recorded_seam(store: &Store, scan_run_id: i64) -> Result<Option<re
         since_seam_run_id: previous.as_ref().map(|previous| previous.id),
         seams,
     }))
+}
+
+/// Whether two recorded ledger entries describe one seam: the same id over the
+/// same members, in whatever order the ledger lists them.
+fn same_seam(earlier: &SeamEntryRecord, later: &SeamEntryRecord) -> bool {
+    fn members(entry: &SeamEntryRecord) -> std::collections::BTreeSet<&str> {
+        entry.members.iter().map(String::as_str).collect()
+    }
+    earlier.seam_id == later.seam_id && members(earlier) == members(later)
 }
 
 /// The analysis modes and build variants a seam run's finding counts were

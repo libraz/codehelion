@@ -158,6 +158,39 @@ fn a_baseline_hides_what_came_before_it_and_nothing_else() {
     assert!(!frozen.contains(&visible[0]));
 }
 
+/// Compare mode marks what the baseline carries instead of hiding it, and the
+/// findings exit still counts only what the baseline does not carry.
+#[test]
+fn a_compare_mode_gate_fails_only_on_what_the_baseline_does_not_carry() {
+    let dir = fixture();
+    let root = dir.path();
+    scan_json(root);
+    record_baseline(root);
+    let gate = |root: &Path| {
+        cmd()
+            .current_dir(root)
+            .args([
+                "scan",
+                ".",
+                "--baseline",
+                "baseline.json",
+                "--baseline-mode",
+                "compare",
+                "--fail-on-findings",
+            ])
+            .output()
+            .expect("run scan")
+    };
+
+    let unchanged = gate(root);
+    assert_eq!(unchanged.status.code(), Some(0), "{unchanged:?}");
+
+    std::fs::write(root.join("src/new_one.rs"), FORMAT_RS).unwrap();
+    std::fs::write(root.join("src/new_two.rs"), FORMAT_RS).unwrap();
+    let grown = gate(root);
+    assert_eq!(grown.status.code(), Some(3), "{grown:?}");
+}
+
 #[test]
 fn baseline_create_refreshes_findings_hidden_by_an_earlier_baseline() {
     let dir = fixture();

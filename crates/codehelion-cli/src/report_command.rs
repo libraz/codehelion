@@ -16,6 +16,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<Outcome> {
+    validate_args(args)?;
     let (root, resolved_config, path) = report_database(args)?;
     let churn_top = resolved_config.config.report.churn_top;
     if !path.is_file() {
@@ -34,7 +35,29 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         .filter_map(|model| model.run.run_id.map(|run_id| (run_id, model)))
         .flat_map(|(run_id, model)| scan::hydrate_recorded_run(&store, run_id, churn_top, model))
         .collect::<Vec<_>>();
-    let output = scan::ReportOutput {
+    let output = report_output(args);
+    let write = if scan::artifact_guidance_holds(&failures) {
+        scan::write_partitioned_reports
+    } else {
+        scan::write_partitioned_reports_without_artifact_guidance
+    };
+    write(output, out, &models, None, None, None, None)?;
+    scan::report_hydration_failures(failures)?;
+    Ok(Outcome::Success)
+}
+
+/// Refuse what the command line alone decides is unusable, before the
+/// database is resolved or any run replayed.
+///
+/// The flags bound to an analysis mode are checked per replayed run instead,
+/// because the mode is the run's own record.
+fn validate_args(args: &ReportArgs) -> Result<()> {
+    scan::validate_report_output(&report_output(args))
+}
+
+/// The output choices a report's command line makes.
+fn report_output(args: &ReportArgs) -> scan::ReportOutput<'_> {
+    scan::ReportOutput {
         format: args.format,
         output: args.output.as_deref(),
         force: args.force,
@@ -44,15 +67,7 @@ pub(crate) fn report_command(args: &ReportArgs, out: &mut impl Write) -> Result<
         show_near_misses: args.show_near_misses,
         sort: args.sort.axis(),
         min_identifier_jaccard: args.min_identifier_jaccard,
-    };
-    let write = if scan::artifact_guidance_holds(&failures) {
-        scan::write_partitioned_reports
-    } else {
-        scan::write_partitioned_reports_without_artifact_guidance
-    };
-    write(output, out, &models, None, None, None, None)?;
-    scan::report_hydration_failures(failures)?;
-    Ok(Outcome::Success)
+    }
 }
 
 /// Rebuild the report one recorded run printed, from its own rows.

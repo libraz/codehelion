@@ -66,7 +66,7 @@ open one: codehelion explain 64f5bc34 · list every group: --limit 0
 - **安定した finding ID** — finding は行番号ではなく内容の fingerprint で名前を持ちます。同じ入力からは常に同じ識別子と同じグループ順序が得られ、これが抑制設定と baseline をリファクタリングをまたいで持続させます。
 - **単一スコアではなく根拠** — 欠落を伴うクローンは lexical / structural / control-flow / type / API の similarity を個別に報告し、clone confidence・maintenance risk・refactoring difficulty を並べて示します。そのモードで測れない次元は推測せず、測定なしとして報告します。
 - **見える上限** — 発火したリソース上限（ファイルサイズ・parse timeout・候補 budget）はすべてレポートに計上されます。
-- **所有者別の成果物サイズ** — `artifact analyze` は WASM / ELF / Mach-O / PE/COFF を実行せずに読み、コードのバイトを自分のコード・toolchain・それ以外に分け、toolchain のコードをリンクに残している関数を名指しします。
+- **所有者別の成果物サイズ** — `artifact analyze` は WASM / ELF / Mach-O / PE/COFF を実行せずに読み、コードのバイトを自分のコード・toolchain・それ以外に分けます。呼び出しグラフを持つ形式（WASM・ELF とそのアーカイブ）では、toolchain のコードをリンクに残している関数も名指しします。
 - **構造としてのローカル実行** — ネットワークアクセスの禁止と対象ツリーを実行しない方針は、運用上の約束ではなく lint と依存ポリシーで強制しています。`clippy.toml` が scan path でのプロセス起動とソケットを禁止し、`cargo-deny` が主要な HTTP スタックを依存グラフごと拒否します。
 
 ## インストール

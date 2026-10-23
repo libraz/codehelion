@@ -185,6 +185,8 @@ into; left off, it is the one every other command resolves for itself.
 `--until <rev>` records: a proposal is not a measurement, and a range deliberately
 cut short would be read by the next comparison as a change in the code. A
 recording that fails leaves the report standing and says so on the error stream.
+`--db` beside `--no-record`, `--suggest` or `--until` is a usage error, since
+nothing would be recorded into it.
 
 ## `guard`
 
@@ -198,6 +200,7 @@ alone and never opening git.
 members and not the others. Without it, `guard` reports and returns 0. There is
 no per-invocation exception; a seam that reports too much is cut more finely in
 its `members`. An absent or empty ledger reports nothing and returns 0.
+`--deny-asymmetric` beside `--paths` is a usage error: a lookup judges no change.
 
 ## Exit status
 

@@ -72,12 +72,27 @@ fn explicit_cross_build_comparison_is_separate_and_origin_aware() {
         String::from_utf8_lossy(&sarif.stderr)
     );
     let sarif: Value = serde_json::from_slice(&sarif.stdout).expect("SARIF JSON");
-    let comparison_run = sarif["runs"]
-        .as_array()
-        .expect("SARIF runs")
+    let runs = sarif["runs"].as_array().expect("SARIF runs");
+    let comparison_run = runs
         .iter()
-        .find(|run| run["automationDetails"]["id"] == "codehelion/cross-build-variants")
+        .find(|run| run["automationDetails"]["id"] == "codehelion/cross-build-variants/")
         .expect("cross comparison SARIF run");
+    // Code scanning tells runs apart by driver and category, the automation
+    // id up to its last `/`; every partition and the comparison need their own.
+    let categories: std::collections::BTreeSet<(String, String)> = runs
+        .iter()
+        .map(|run| {
+            let id = run["automationDetails"]["id"]
+                .as_str()
+                .expect("automation id");
+            (
+                run["tool"]["driver"]["name"].to_string(),
+                id[..=id.rfind('/').expect("a category")].to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(categories.len(), runs.len(), "{categories:?}");
+    assert!(runs.len() > 2, "two partitions and a comparison");
     assert!(comparison_run["properties"]["crossVariantComparison"]["origin_variants"].is_array());
 }
 

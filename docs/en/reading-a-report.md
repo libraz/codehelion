@@ -58,6 +58,8 @@ then has no earlier generation, and subtracting against nothing would report the
 ledger's growth as movement in the code. The findings delta is also left out when
 the two generations' scans differ in mode or build variants, because it would
 report the change of scan as movement.
+A seam whose members changed in between counts as a different seam and gets no
+delta either, for the same reason as a new one.
 
 A count of zero is written as words — `no breaches`, `no asymmetric changes` —
 where its absence is the answer. A seam crossed repeatedly and never breached is

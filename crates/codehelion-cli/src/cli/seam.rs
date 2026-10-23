@@ -76,7 +76,9 @@ pub struct SeamArgs {
     /// Audit database to record this evaluation in.
     ///
     /// Left off, the same database every other command resolves for itself.
-    #[arg(long, value_name = "FILE")]
+    /// Refused alongside `--suggest`, `--no-record` or `--until`, none of
+    /// which records anything.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["suggest", "no_record", "until"])]
     pub db: Option<PathBuf>,
     /// Report the evaluation without recording it.
     ///
@@ -110,6 +112,7 @@ pub struct GuardArgs {
     /// is no per-invocation exception: reporting is the default, so an escape
     /// hatch would exist only to defeat a flag somebody deliberately set. A
     /// seam that reports too much is one whose members are cut too coarsely.
-    #[arg(long)]
+    /// Refused alongside `--paths`, a lookup that judges no change.
+    #[arg(long, conflicts_with = "paths")]
     pub deny_asymmetric: bool,
 }
