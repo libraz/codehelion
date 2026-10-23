@@ -63,35 +63,86 @@ pub(crate) struct ReuseProfile<'a> {
     pub(crate) presentation: &'a crate::config::Suppression,
 }
 
-/// Hash the effective detector configuration and the reuse profile.
+/// Hash the detection-relevant configuration and the reuse profile.
 ///
-/// The profile is part of reuse compatibility even though it is not a
-/// detector setting serialized by `Config`: an untrusted scan is subject to a
-/// different execution contract from a trusted one, and a run that was told to
-/// hide known findings records different rows from one told to mark them.
-/// Keeping this recipe in one place prevents the Fast, Structural, and
-/// Semantic paths from selecting different predecessors for the same
-/// invocation.
+/// This digest is what a run is recorded under and what selects the
+/// predecessor its lineage, churn and tree changes are measured against, so it
+/// covers only inputs that change detected or recorded rows: settings read by
+/// other commands, and the path a baseline was named by, leave it unchanged.
+/// Reuse additionally requires [`reusable_run`], which compares the rest of
+/// what decides the rows. Keeping this recipe in one place prevents the Fast,
+/// Structural, and Semantic paths from selecting different predecessors for
+/// the same invocation.
 pub(crate) fn reuse_config_hash(cfg: &Config, profile: ReuseProfile<'_>) -> Result<ContentHash> {
     let mut config_text = format!(
         "{}\nreuse-profile-v3:untrusted={};siblings-by-signature={}\npresentation:{}\nrules:",
-        cfg.to_toml()?,
+        detection_config(cfg).to_toml()?,
         profile.untrusted,
         profile.siblings_by_signature,
         serde_json::to_string(profile.presentation)
             .context("serializing the presentation policy of a scan")?,
     );
     for rule in profile.rules {
+        // A baseline is named by a path as typed; what it hides is compared by
+        // its digest when reuse is decided.
+        let pattern = if rule.scope == BASELINE_RULE_SCOPE {
+            ""
+        } else {
+            rule.pattern.as_str()
+        };
         write!(
             config_text,
             "\n{}\u{1f}{}\u{1f}{}",
             rule.scope,
-            rule.pattern,
+            pattern,
             rule.reason.as_deref().unwrap_or_default(),
         )
         .context("describing a suppression rule of a scan")?;
     }
     Ok(ContentHash::of(config_text.as_bytes()))
+}
+
+/// Suppression scope of the rule a `--baseline` file registers.
+const BASELINE_RULE_SCOPE: &str = "baseline";
+
+/// `cfg` with every setting that changes no scan row reset to its default.
+///
+/// Settings at their defaults hash as they always have, so a configuration
+/// that never set them keeps the predecessor it was recorded against.
+fn detection_config(cfg: &Config) -> Config {
+    let Config {
+        include,
+        exclude,
+        min_clone_tokens,
+        entropy_ratio_floor,
+        literal_normalization,
+        languages,
+        suppression,
+        priority,
+        limits,
+        semantic,
+        helpers,
+        database: _,
+        seam: _,
+        seam_tracking: _,
+        report: _,
+        artifact: _,
+        jobs: _,
+    } = cfg;
+    Config {
+        include: include.clone(),
+        exclude: exclude.clone(),
+        min_clone_tokens: *min_clone_tokens,
+        entropy_ratio_floor: *entropy_ratio_floor,
+        literal_normalization: *literal_normalization,
+        languages: languages.clone(),
+        suppression: suppression.clone(),
+        priority: *priority,
+        limits: limits.clone(),
+        semantic: semantic.clone(),
+        helpers: helpers.clone(),
+        ..Config::default()
+    }
 }
 
 /// What the run an invocation is about to record would be, beyond the
@@ -510,13 +561,142 @@ fn snapshot_rows(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use codehelion_core::clone_class::CloneClass;
     use codehelion_core::discovery::{Language, LanguageSelection};
     use codehelion_core::engine::{CloneGroup, EngineStats, Instance};
     use codehelion_core::frontend::{SourceSpan, Token, TokenKind, Unit, UnitKind};
 
-    use super::{BuildVariant, EngineReport, FileContext, LexedSource, snapshot_rows};
+    use super::{
+        BTreeMap, BuildVariant, Config, EngineReport, FileContext, LexedSource, ReuseIdentity,
+        ReuseProfile, Snapshot, Store, SummaryRow, reuse_config_hash, select_predecessor,
+        snapshot_rows,
+    };
+
+    fn digest(cfg: &Config, rules: &crate::suppress::Rules) -> String {
+        reuse_config_hash(
+            cfg,
+            ReuseProfile {
+                untrusted: false,
+                siblings_by_signature: false,
+                rules: &rules.rows,
+                presentation: &cfg.suppression,
+            },
+        )
+        .unwrap()
+        .as_str()
+        .to_string()
+    }
+
+    fn rules(cfg: &Config) -> crate::suppress::Rules {
+        crate::suppress::Rules::compile(&cfg.suppression, false).unwrap()
+    }
+
+    /// Settings no scan row depends on leave the predecessor digest alone,
+    /// while a detection setting still changes it.
+    #[test]
+    fn settings_that_change_no_row_keep_the_predecessor_digest() {
+        let plain = Config::default();
+        let edited = Config::from_toml(
+            "jobs = 3\n\
+             database = \"elsewhere/audit.db\"\n\
+             [report]\nchurn-top = 7\n\
+             [artifact]\nown = [\"mycrate\"]\n\
+             [seam-tracking]\nbreach-window = 9\n\
+             [[seam]]\nid = \"twins\"\nmembers = [\"a/**\", \"b/**\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            digest(&plain, &rules(&plain)),
+            digest(&edited, &rules(&edited))
+        );
+        let detection = Config {
+            min_clone_tokens: plain.min_clone_tokens + 1,
+            ..Config::default()
+        };
+        assert_ne!(
+            digest(&plain, &rules(&plain)),
+            digest(&detection, &rules(&detection))
+        );
+    }
+
+    /// However the baseline file is spelled, the digest is the same; whether a
+    /// baseline hides findings at all still changes it.
+    #[test]
+    fn the_spelling_of_a_baseline_path_keeps_the_predecessor_digest() {
+        let cfg = Config::default();
+        let spelled = ["b.json", "./b.json", "/repo/b.json"].map(|path| {
+            let mut with_baseline = rules(&cfg);
+            with_baseline.add_baseline(path, BTreeMap::new());
+            digest(&cfg, &with_baseline)
+        });
+        assert_eq!(spelled[0], spelled[1]);
+        assert_eq!(spelled[0], spelled[2]);
+        assert_ne!(spelled[0], digest(&cfg, &rules(&cfg)));
+    }
+
+    /// A run recorded before an unrelated setting changed is still the
+    /// predecessor of the next scan, and is reused only when every
+    /// row-deciding input agrees.
+    #[test]
+    fn a_run_recorded_under_other_unrelated_settings_is_the_predecessor() {
+        let before = Config::default();
+        let after = Config {
+            jobs: Some(3),
+            ..Config::default()
+        };
+        let variant = BuildVariant::fast(LanguageSelection::default(), Language::C);
+        let detectors = vec![("fast-engine".to_string(), "v1".to_string())];
+        let tree = BTreeMap::new();
+        let recorded_hash = digest(&before, &rules(&before));
+        let mut store = Store::open_in_memory().unwrap();
+        let recorded = store
+            .record_snapshot(&Snapshot {
+                root_path: "/repo",
+                tool_version: env!("CARGO_PKG_VERSION"),
+                config_hash: &recorded_hash,
+                config_source: "defaults",
+                config_path: None,
+                started_at: "2026-07-24T00:00:00Z",
+                finished_at: "2026-07-24T00:00:01Z",
+                variant: &variant,
+                min_clone_tokens: before.min_clone_tokens,
+                detector_versions: &detectors,
+                suppressions: Vec::new(),
+                units: Vec::new(),
+                groups: Vec::new(),
+                sibling_groups: Vec::new(),
+                near_misses: Vec::new(),
+                files: Vec::new(),
+                compiler_helpers: Vec::new(),
+                compiler_units: Vec::new(),
+                summary: SummaryRow::default(),
+            })
+            .unwrap();
+        let select = |detectors: &[(String, String)]| {
+            select_predecessor(
+                &store,
+                "/repo",
+                &digest(&after, &rules(&after)),
+                &variant.fingerprint(),
+                &ReuseIdentity {
+                    detector_versions: detectors,
+                    baseline_digest: None,
+                    tree: &tree,
+                },
+                true,
+            )
+            .unwrap()
+            .expect("the earlier run is the predecessor")
+        };
+        let same = select(&detectors);
+        assert_eq!(same.id, recorded);
+        assert!(same.reusable);
+        let changed = select(&[("fast-engine".to_string(), "v2".to_string())]);
+        assert_eq!(changed.id, recorded);
+        assert!(!changed.reusable);
+    }
 
     fn token() -> Token {
         Token {

@@ -1,6 +1,7 @@
 //! Row writes for one clone group: its ranking, members, siblings, near
 //! misses, similarity breakdown and semantic evidence.
 
+use crate::recordable_line;
 use crate::snapshot::variant::{upsert_fingerprint, upsert_group_fingerprint};
 use crate::snapshot::{
     BTreeMap, BTreeSet, Boilerplate, CrossLanguageSemanticGroupRow, GroupRow, Language, MemberRow,
@@ -364,8 +365,8 @@ fn write_fragments(
             host_row_id,
             fragment_fp_id,
             member.file_path,
-            member.start_line,
-            member.end_line,
+            recordable_line("fragment.start_line", member.start_line)?,
+            recordable_line("fragment.end_line", member.end_line)?,
             i64::try_from(member.token_count).unwrap_or(i64::MAX),
         ])?;
         fragment_row_ids.push(fragment_row_id);

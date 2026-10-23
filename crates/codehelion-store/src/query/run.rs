@@ -1,3 +1,4 @@
+use super::common::SCAN_RUN_RECENCY;
 use super::{
     BTreeMap, CloneGroupFingerprint, GroupLineageId, OptionalExtension, RunOrigin, RunSummary,
     Store, StoreError, StoredGroupSnapshot, StoredSetting, StoredVariant, params,
@@ -22,7 +23,8 @@ impl Store {
     ) -> Result<Option<RunSummary>, StoreError> {
         self.conn
             .query_row(
-                "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
+                &format!(
+                    "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
                         r.started_at, r.finished_at,
                         (SELECT COUNT(*) FROM clone_group g WHERE g.scan_run_id = r.id)
                  FROM scan_run r
@@ -31,8 +33,9 @@ impl Store {
                    AND r.analysis_mode = ?2
                    AND v.variant_fingerprint = ?3
                    AND r.status = 'completed'
-                 ORDER BY r.started_at DESC, r.id DESC
+                 ORDER BY {SCAN_RUN_RECENCY}
                  LIMIT 1",
+                ),
                 params![root_path, analysis_mode, variant_fingerprint],
                 |row| {
                     Ok(RunSummary {
@@ -96,7 +99,8 @@ impl Store {
     ) -> Result<Option<RunSummary>, StoreError> {
         self.conn
             .query_row(
-                "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
+                &format!(
+                    "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
                         r.started_at, r.finished_at,
                         (SELECT COUNT(*) FROM clone_group g WHERE g.scan_run_id = r.id)
                  FROM scan_run r
@@ -105,8 +109,9 @@ impl Store {
                    AND r.config_hash = ?2
                    AND v.variant_fingerprint = ?3
                    AND r.status = 'completed'
-                 ORDER BY r.started_at DESC, r.id DESC
+                 ORDER BY {SCAN_RUN_RECENCY}
                  LIMIT 1",
+                ),
                 params![root_path, config_hash, variant_fingerprint],
                 |row| {
                     Ok(RunSummary {
@@ -162,35 +167,16 @@ impl Store {
         crate::lifecycle::ensure_completed_run(&self.conn, run_id)
     }
 
-    /// The most recently started scan run, if any.
+    /// The newest completed scan run, if any.
+    ///
+    /// A running or failed run is never returned, so the answer is always one
+    /// every run reader accepts.
     ///
     /// # Errors
     ///
     /// Returns any underlying database error.
     pub fn latest_run(&self) -> Result<Option<RunSummary>, StoreError> {
-        self.conn
-            .query_row(
-                "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
-                        r.started_at, r.finished_at,
-                        (SELECT COUNT(*) FROM clone_group g WHERE g.scan_run_id = r.id)
-                 FROM scan_run r
-                 ORDER BY r.started_at DESC, r.id DESC
-                 LIMIT 1",
-                [],
-                |row| {
-                    Ok(RunSummary {
-                        id: row.get(0)?,
-                        root_path: row.get(1)?,
-                        tool_version: row.get(2)?,
-                        analysis_mode: row.get(3)?,
-                        started_at: row.get(4)?,
-                        finished_at: row.get(5)?,
-                        group_count: row.get(6)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(StoreError::from)
+        self.latest_completed_run_any_root()
     }
 
     /// The newest completed scan run across all recorded roots.
@@ -204,13 +190,15 @@ impl Store {
     pub fn latest_completed_run_any_root(&self) -> Result<Option<RunSummary>, StoreError> {
         self.conn
             .query_row(
-                "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
+                &format!(
+                    "SELECT r.id, r.root_path, r.tool_version, r.analysis_mode,
                         r.started_at, r.finished_at,
                         (SELECT COUNT(*) FROM clone_group g WHERE g.scan_run_id = r.id)
                  FROM scan_run r
                  WHERE r.status = 'completed'
-                 ORDER BY r.started_at DESC, r.id DESC
+                 ORDER BY {SCAN_RUN_RECENCY}
                  LIMIT 1",
+                ),
                 [],
                 |row| {
                     Ok(RunSummary {
@@ -299,14 +287,16 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT r.id
+                &format!(
+                    "SELECT r.id
                  FROM scan_run r
                  JOIN build_variant v ON v.id = r.build_variant_id
                  WHERE r.root_path = ?1
                    AND (?2 IS NULL OR v.variant_fingerprint = ?2)
                    AND r.status = 'completed'
-                 ORDER BY r.started_at DESC, r.id DESC
+                 ORDER BY {SCAN_RUN_RECENCY}
                  LIMIT 1",
+                ),
                 params![root_path, variant_fingerprint],
                 |row| row.get(0),
             )
@@ -521,17 +511,19 @@ impl Store {
     pub fn preceding_compatible_run(&self, run_id: i64) -> Result<Option<i64>, StoreError> {
         self.conn
             .query_row(
-                "SELECT previous.id
+                &format!(
+                    "SELECT r.id
                  FROM scan_run current
-                 JOIN scan_run previous
-                      ON previous.root_path = current.root_path
-                     AND previous.config_hash = current.config_hash
-                     AND previous.build_variant_id = current.build_variant_id
-                     AND previous.status = 'completed'
-                     AND (previous.started_at, previous.id) < (current.started_at, current.id)
+                 JOIN scan_run r
+                      ON r.root_path = current.root_path
+                     AND r.config_hash = current.config_hash
+                     AND r.build_variant_id = current.build_variant_id
+                     AND r.status = 'completed'
+                     AND (r.started_at, r.id) < (current.started_at, current.id)
                  WHERE current.id = ?1
-                 ORDER BY previous.started_at DESC, previous.id DESC
+                 ORDER BY {SCAN_RUN_RECENCY}
                  LIMIT 1",
+                ),
                 params![run_id],
                 |row| row.get(0),
             )

@@ -157,11 +157,13 @@ fn insert_fingerprint_row(
     language: &str,
     variant_id: i64,
 ) -> Result<i64, StoreError> {
+    // Only the UNIQUE clash is expected; `OR IGNORE` would also swallow a CHECK.
     let mut insert = tx.prepare_cached(
-        "INSERT OR IGNORE INTO fingerprint
+        "INSERT INTO fingerprint
              (kind, hash_algo, hash, normalization_version, frontend_version,
               analysis_mode, language, build_variant_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT DO NOTHING",
     )?;
     insert.execute(params![
         kind,

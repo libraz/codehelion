@@ -23,6 +23,12 @@ pub(super) use crate::fingerprint::{parse_build_variant_reference, parse_hex_id}
 pub(super) const COMPLETED_CLONE_GROUP_RUN_JOIN: &str =
     "JOIN scan_run r ON r.id = g.scan_run_id AND r.status = 'completed'";
 
+/// Ordering that decides which scan run, aliased `r`, is the most recent.
+///
+/// Reusing a run refreshes its start time, so recency is the start time with
+/// the row id only breaking ties; every "newest run" lookup orders by this.
+pub(super) const SCAN_RUN_RECENCY: &str = "r.started_at DESC, r.id DESC";
+
 impl Store {
     /// Number of rows in `table` — a diagnostic for `doctor`/`cache status`
     /// and tests. The name is validated against the schema first, so this
@@ -61,7 +67,8 @@ impl Store {
         let found = self
             .conn
             .query_row(
-                "SELECT lower(hex(m.finding_id)), fr.file_path, fr.start_line, fr.end_line,
+                &format!(
+                    "SELECT lower(hex(m.finding_id)), fr.file_path, fr.start_line, fr.end_line,
                         fr.token_count, u.name, m.is_canonical,
                         lower(hex(gf.hash)), g.clone_type, g.score, g.scan_run_id,
                         g.member_count, g.boilerplate, s.scope, s.pattern, s.reason, CASE WHEN s.id IS NULL THEN NULL ELSE 1 END,
@@ -80,8 +87,9 @@ impl Store {
                  JOIN scan_run r ON r.id = g.scan_run_id
                  WHERE m.finding_id = ?1
                    AND r.status = 'completed'
-                 ORDER BY g.scan_run_id DESC
+                 ORDER BY {SCAN_RUN_RECENCY}
                  LIMIT 1",
+                ),
                 params![bytes.as_slice()],
                 |row| {
                     let suppression = row

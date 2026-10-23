@@ -1,6 +1,6 @@
 use super::{CompilerHelperRow, CompilerOutcome};
-use crate::StoreError;
 use crate::snapshot::Snapshot;
+use crate::{StoreError, recordable_line};
 use codehelion_helper_protocol::ir::{
     Anchor, CallSite, CallTarget, CompilerIr, ControlFlowGraph, DataFlowSummary, DirectPropagation,
     EffectSummary, FallibleKind, Instantiation, ResolvedExpression, ResolvedSymbol, ResolvedType,
@@ -68,22 +68,25 @@ fn write_helpers(
         let id = tx.last_insert_rowid();
         for capability in &helper.identity.capabilities {
             tx.execute(
-                "INSERT OR IGNORE INTO compiler_helper_capability
-                     (compiler_helper_id, capability) VALUES (?1, ?2)",
+                "INSERT INTO compiler_helper_capability
+                     (compiler_helper_id, capability) VALUES (?1, ?2)
+                 ON CONFLICT DO NOTHING",
                 params![id, capability.name()],
             )?;
         }
         for toolchain in &helper.identity.toolchains {
             tx.execute(
-                "INSERT OR IGNORE INTO compiler_helper_toolchain
-                     (compiler_helper_id, toolchain) VALUES (?1, ?2)",
+                "INSERT INTO compiler_helper_toolchain
+                     (compiler_helper_id, toolchain) VALUES (?1, ?2)
+                 ON CONFLICT DO NOTHING",
                 params![id, toolchain],
             )?;
         }
         for execution in &helper.identity.executes {
             tx.execute(
-                "INSERT OR IGNORE INTO compiler_helper_execution
-                     (compiler_helper_id, execution) VALUES (?1, ?2)",
+                "INSERT INTO compiler_helper_execution
+                     (compiler_helper_id, execution) VALUES (?1, ?2)
+                 ON CONFLICT DO NOTHING",
                 params![id, execution.name()],
             )?;
         }
@@ -308,7 +311,7 @@ fn write_symbols(
 
 fn write_calls(tx: &Transaction<'_>, sites: &[CallSite], unit_id: i64) -> Result<(), StoreError> {
     for (ordinal, call) in sites.iter().enumerate() {
-        let cells = AnchorCells::of(&call.anchor);
+        let cells = AnchorCells::of(&call.anchor)?;
         let (resolution, target) = match &call.target {
             CallTarget::Static { symbol } => ("static", Some(symbol.as_str())),
             CallTarget::Dynamic { .. } => ("dynamic", None),
@@ -353,7 +356,7 @@ fn write_calls(tx: &Transaction<'_>, sites: &[CallSite], unit_id: i64) -> Result
 
 fn write_cfg(tx: &Transaction<'_>, cfg: &ControlFlowGraph, unit_id: i64) -> Result<(), StoreError> {
     for (index, block) in cfg.blocks.iter().enumerate() {
-        let cells = AnchorCells::of(&block.anchor);
+        let cells = AnchorCells::of(&block.anchor)?;
         tx.execute(
             "INSERT INTO compiler_block
                  (compiler_unit_id, block_index, length,
@@ -399,7 +402,12 @@ fn write_instantiations(
     unit_id: i64,
 ) -> Result<(), StoreError> {
     for (ordinal, instantiation) in instantiations.iter().enumerate() {
-        let cells = AnchorCells::of(&instantiation.anchor);
+        let cells = AnchorCells::of(&instantiation.anchor)?;
+        let definition_end_line = instantiation
+            .definition_end_line
+            .map(|line| recordable_line("definition_end_line", line))
+            .transpose()?
+            .map(i64::from);
         tx.execute(
             "INSERT INTO compiler_instantiation
                  (compiler_unit_id, ordinal, definition, artifact_match_key, instantiation_key,
@@ -421,7 +429,7 @@ fn write_instantiations(
                 cells.definition_start_byte,
                 cells.definition_end_byte,
                 cells.definition_start_line,
-                instantiation.definition_end_line.map(i64::from),
+                definition_end_line,
             ],
         )?;
         let row_id = tx.last_insert_rowid();
@@ -488,23 +496,28 @@ struct AnchorCells<'a> {
 }
 
 impl<'a> AnchorCells<'a> {
-    fn of(anchor: &'a Anchor) -> Self {
-        Self {
+    fn of(anchor: &'a Anchor) -> Result<Self, StoreError> {
+        let definition_start_line = anchor
+            .definition
+            .as_ref()
+            .map(|site| recordable_line("definition_start_line", site.start_line))
+            .transpose()?;
+        Ok(Self {
             file: &anchor.expansion.file,
             start_byte: offset(anchor.expansion.start_byte),
             end_byte: offset(anchor.expansion.end_byte),
-            start_line: i64::from(anchor.expansion.start_line),
+            start_line: i64::from(recordable_line(
+                "expansion_start_line",
+                anchor.expansion.start_line,
+            )?),
             definition_file: anchor.definition.as_ref().map(|site| site.file.as_str()),
             definition_start_byte: anchor
                 .definition
                 .as_ref()
                 .map(|site| offset(site.start_byte)),
             definition_end_byte: anchor.definition.as_ref().map(|site| offset(site.end_byte)),
-            definition_start_line: anchor
-                .definition
-                .as_ref()
-                .map(|site| i64::from(site.start_line)),
-        }
+            definition_start_line: definition_start_line.map(i64::from),
+        })
     }
 }
 
@@ -524,7 +537,7 @@ fn insert_anchored_row(
     anchor: &Anchor,
     columns: &[&dyn ToSql],
 ) -> Result<(), StoreError> {
-    let cells = AnchorCells::of(anchor);
+    let cells = AnchorCells::of(anchor)?;
     let ordinal = index_of(ordinal);
     let mut bound: Vec<&dyn ToSql> = Vec::with_capacity(columns.len() + 10);
     bound.push(&unit_id);

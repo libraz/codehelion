@@ -358,3 +358,90 @@ fn abort_accepts_missing_and_running_handles_and_is_idempotent() {
         .expect("abort already missing second");
     assert_eq!(count(&store, "scan_run"), 0);
 }
+
+/// A unit fingerprint whose frontend version is empty violates the table's
+/// CHECK; the write fails with that constraint, naming the column, and leaves
+/// no run behind rather than failing later on a row that is not there.
+#[test]
+fn an_empty_frontend_version_fails_with_the_constraint_it_breaks() {
+    let variant = fast_variant();
+    let detectors = vec![("frontend.rust".to_string(), String::new())];
+    let mut store = Store::open_in_memory().unwrap();
+
+    let error = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("CHECK constraint failed"), "{error}");
+    assert!(error.contains("frontend_version"), "{error}");
+    assert_eq!(count(&store, "scan_run"), 0);
+    assert_eq!(count(&store, "fingerprint"), 0);
+}
+
+/// A unit, fragment or cross-variant member on line 0 is one every reader
+/// refuses, so the write fails naming the column and stores nothing of it.
+#[test]
+fn a_row_on_line_zero_is_refused_before_it_is_stored() {
+    let variant = fast_variant();
+    let detectors = detector_versions();
+    let unit_zero = |snapshot: &mut Snapshot<'_>| snapshot.units[0].start_line = 0;
+    let fragment_zero = |snapshot: &mut Snapshot<'_>| {
+        snapshot.groups[0].members[1].end_line = 0;
+    };
+    for (spoil, column) in [
+        (
+            &unit_zero as &dyn Fn(&mut Snapshot<'_>),
+            "source_unit.start_line",
+        ),
+        (&fragment_zero, "fragment.end_line"),
+    ] {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut snapshot = sample_snapshot(&variant, &detectors);
+        spoil(&mut snapshot);
+        let error = store.record_snapshot(&snapshot).unwrap_err();
+        assert!(
+            matches!(error, StoreError::InvalidLine { field } if field == column),
+            "{error}"
+        );
+        assert_eq!(count(&store, "scan_run"), 0);
+        assert_eq!(count(&store, "source_unit"), 0);
+        assert_eq!(count(&store, "fragment"), 0);
+    }
+
+    let mut store = Store::open_in_memory().unwrap();
+    let origins = vec!["a".to_string()];
+    let groups = vec![CrossVariantGroupRow {
+        group_id: CrossVariantGroupId::from_bytes([0x72; 16]),
+        clone_type: CloneClass::Type1,
+        members: vec![CrossVariantMemberRow {
+            member_id: CrossVariantMemberId::from_bytes([0x73; 16]),
+            origin_variant: "a".to_string(),
+            language: Language::Cpp,
+            file_path: "generated.cpp".to_string(),
+            start_line: 0,
+            end_line: 1,
+            unit_name: None,
+            token_count: 4,
+        }],
+    }];
+    let comparison = CrossVariantComparisonSnapshot {
+        origins: &origins,
+        groups: &groups,
+        ..empty_cross_variant()
+    };
+    let error = store
+        .record_cross_variant_comparison(&comparison)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StoreError::InvalidLine {
+                field: "cross_variant_clone_member.start_line"
+            }
+        ),
+        "{error}"
+    );
+    assert_eq!(count(&store, "cross_variant_comparison"), 0);
+    assert_eq!(count(&store, "cross_variant_clone_member"), 0);
+}

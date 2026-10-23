@@ -71,6 +71,19 @@ pub fn directory_of(path: &str) -> &str {
     path.rfind(['/', '\\']).map_or("", |cut| &path[..cut])
 }
 
+/// Refuse line 0 before it is written, since every reader rejects it.
+///
+/// # Errors
+///
+/// Returns [`StoreError::InvalidLine`] for line 0.
+pub(crate) const fn recordable_line(field: &'static str, line: u32) -> Result<u32, StoreError> {
+    if line == 0 {
+        Err(StoreError::InvalidLine { field })
+    } else {
+        Ok(line)
+    }
+}
+
 /// Storage errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -245,6 +258,13 @@ pub enum StoreError {
     InvalidLineageEvidence {
         /// Why this connection cannot be committed.
         reason: String,
+    },
+    /// A row to be recorded carries line 0, which the read path refuses, so
+    /// committing it would leave the whole run unreadable.
+    #[error("{field} is 0, but recorded lines count from one")]
+    InvalidLine {
+        /// Column the line was to be stored in.
+        field: &'static str,
     },
     /// A seam run named a seam that cannot be recorded as one.
     #[error("invalid seam run entry: {reason}")]

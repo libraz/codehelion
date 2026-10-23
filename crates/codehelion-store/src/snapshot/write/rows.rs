@@ -1,6 +1,7 @@
 //! Per-table row writes for one snapshot: what the run reported about itself,
 //! the tree it read, its suppression policy, and its source units.
 
+use crate::recordable_line;
 use crate::snapshot::variant::upsert_fingerprint;
 use crate::snapshot::{
     FileRow, OptionalExtension, Snapshot, StagedSuppression, StoreError, SummaryRow,
@@ -16,12 +17,14 @@ pub(super) fn record_detector_version(
     version: &str,
 ) -> Result<(), StoreError> {
     tx.execute(
-        "INSERT OR IGNORE INTO detector_version (component, version) VALUES (?1, ?2)",
+        "INSERT INTO detector_version (component, version) VALUES (?1, ?2)
+         ON CONFLICT DO NOTHING",
         params![component, version],
     )?;
     tx.execute(
-        "INSERT OR IGNORE INTO scan_run_detector_version (scan_run_id, detector_version_id)
-         SELECT ?1, id FROM detector_version WHERE component = ?2 AND version = ?3",
+        "INSERT INTO scan_run_detector_version (scan_run_id, detector_version_id)
+         SELECT ?1, id FROM detector_version WHERE component = ?2 AND version = ?3
+         ON CONFLICT DO NOTHING",
         params![run_id, component, version],
     )?;
     Ok(())
@@ -308,8 +311,8 @@ pub(super) fn write_units(
             unit.kind.name(),
             unit.name,
             unit.file_path,
-            unit.start_line,
-            unit.end_line,
+            recordable_line("source_unit.start_line", unit.start_line)?,
+            recordable_line("source_unit.end_line", unit.end_line)?,
             i64::try_from(unit.token_count).unwrap_or(i64::MAX),
         ])?;
         unit_row_ids.push(tx.last_insert_rowid());

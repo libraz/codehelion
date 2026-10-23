@@ -362,3 +362,43 @@ fn a_reason_no_helper_could_avoid_does_not_take_the_analysed_units_with_it() {
         coverage.not_asked
     );
 }
+
+/// A compiler anchor on line 0 is one every source reader refuses, so the
+/// write fails naming the column and leaves no run and no compiler row.
+#[test]
+fn an_anchor_on_line_zero_is_refused_before_it_is_stored() {
+    let mut expansion_zero = full_analysis(unit_ref("render", "src/render.rs"));
+    expansion_zero.symbols[0].anchor.expansion.start_line = 0;
+    let mut definition_zero = full_analysis(unit_ref("render", "src/render.rs"));
+    definition_zero.calls[0].anchor.definition = Some(SourceRange {
+        start_line: 0,
+        ..range("src/macros.rs", 32)
+    });
+    let mut end_zero = full_analysis(unit_ref("render", "src/render.rs"));
+    end_zero.instantiations[0].definition_end_line = Some(0);
+    for (ir, column) in [
+        (expansion_zero, "expansion_start_line"),
+        (definition_zero, "definition_start_line"),
+        (end_zero, "definition_end_line"),
+    ] {
+        let (_dir, mut store, path) = on_disk();
+        let variant = variant();
+        let error = store
+            .record_snapshot(&snapshot(
+                "/tree",
+                &variant,
+                vec![helper_row()],
+                vec![answered(ir)],
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(error, StoreError::InvalidLine { field } if field == column),
+            "{error}"
+        );
+        let conn = peek(&path);
+        assert_eq!(count(&conn, "scan_run"), 0);
+        for table in COMPILER_TABLES {
+            assert_eq!(count(&conn, table), 0, "{table}");
+        }
+    }
+}

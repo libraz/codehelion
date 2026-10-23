@@ -1,4 +1,4 @@
-use super::common::{COMPLETED_CLONE_GROUP_RUN_JOIN, map_member};
+use super::common::{COMPLETED_CLONE_GROUP_RUN_JOIN, SCAN_RUN_RECENCY, map_member};
 use super::{
     IdKind, IdMatch, StoredFinding, StoredGroup, StoredGroupDetail, StoredGroupOrigin,
     StoredLineageParent, StoredMember, StoredNearMiss, StoredNearMissUnit, StoredPriority,
@@ -24,7 +24,8 @@ impl Store {
         let finding_id = super::common::parse_hex_id(finding_hex)?;
         self.conn
             .query_row(
-                "SELECT g.scan_run_id, lower(hex(group_fp.hash)),
+                &format!(
+                    "SELECT g.scan_run_id, lower(hex(group_fp.hash)),
                         lower(hex(s.finding_id)), lower(hex(s.fragment_fingerprint)),
                         u.language, u.file_path, u.start_line, u.end_line, u.token_count,
                         u.name, s.boilerplate, s.clone_type, s.confidence_band,
@@ -39,8 +40,9 @@ impl Store {
                  LEFT JOIN suppression sup ON sup.id = s.suppression_id
                  JOIN scan_run r ON r.id = g.scan_run_id AND r.status = 'completed'
                  WHERE s.finding_id = ?1
-                 ORDER BY g.scan_run_id DESC
+                 ORDER BY {SCAN_RUN_RECENCY}
                  LIMIT 1",
+                ),
                 params![finding_id.as_slice()],
                 |row| {
                     Ok(StoredSiblingDetail {
@@ -313,7 +315,7 @@ impl Store {
                  JOIN fingerprint f ON f.id = g.group_fingerprint_id
                  {COMPLETED_CLONE_GROUP_RUN_JOIN}
                  WHERE f.kind = 'clone_group' AND f.hash = ?1
-                 ORDER BY g.scan_run_id DESC
+                 ORDER BY {SCAN_RUN_RECENCY}
                  LIMIT 1",
                 ),
                 params![fingerprint.as_slice()],

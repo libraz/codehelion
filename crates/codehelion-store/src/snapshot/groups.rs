@@ -4,6 +4,7 @@ use super::{
 };
 
 use crate::lifecycle::ensure_completed_run;
+use crate::recordable_line;
 use crate::snapshot::{LineageAdoption, LineageAdoptionResult};
 
 mod lineage;
@@ -140,8 +141,14 @@ impl Store {
                         member.origin_variant,
                         member.language.name(),
                         member.file_path,
-                        i64::from(member.start_line),
-                        i64::from(member.end_line),
+                        i64::from(recordable_line(
+                            "cross_variant_clone_member.start_line",
+                            member.start_line,
+                        )?),
+                        i64::from(recordable_line(
+                            "cross_variant_clone_member.end_line",
+                            member.end_line,
+                        )?),
                         member.unit_name,
                         i64::try_from(member.token_count).unwrap_or(i64::MAX),
                     ],
@@ -233,8 +240,14 @@ impl Store {
                         member.origin_variant,
                         member.language.name(),
                         member.file_path,
-                        i64::from(member.start_line),
-                        i64::from(member.end_line),
+                        i64::from(recordable_line(
+                            "cross_language_semantic_member.start_line",
+                            member.start_line,
+                        )?),
+                        i64::from(recordable_line(
+                            "cross_language_semantic_member.end_line",
+                            member.end_line,
+                        )?),
                         member.unit_name,
                         member.graph_schema_version,
                         member.graph_json,

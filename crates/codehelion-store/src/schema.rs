@@ -10,8 +10,6 @@
 //! the findings it lists, and the `compiler_*` tables holding what a compiler
 //! helper answered about each unit — including the units it could not answer
 //! for, which is an outcome rather than a gap.
-//! The artifact tables are created empty in this release — the schema is the
-//! contract, population comes with the features that need them.
 //!
 //! Invariants enforced at the schema level:
 //!

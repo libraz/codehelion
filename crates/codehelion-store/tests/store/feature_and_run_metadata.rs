@@ -625,3 +625,92 @@ fn a_group_is_looked_up_by_its_identity_bytes() {
         Err(StoreError::MalformedId { .. })
     ));
 }
+
+/// A run reused by a later invocation is the newest run even though a run
+/// with a higher row id exists: every lookup of "the latest run" ranks runs
+/// by their refreshed start time, not by row id.
+#[test]
+fn a_refreshed_reused_run_is_the_newest_for_every_lookup() {
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut snapshot = sample_snapshot(&variant, &detectors);
+    snapshot.units.push(UnitRow {
+        fingerprint: unit_fp(3),
+        language: Language::Rust,
+        kind: UnitKind::Function,
+        name: Some("near_checksum".to_string()),
+        file_path: "src/c.rs".to_string(),
+        start_line: 1,
+        end_line: 8,
+        token_count: 30,
+    });
+    snapshot.sibling_groups.push(SiblingGroupRow {
+        group: group_fp(9),
+        siblings: vec![SiblingRow {
+            unit: 2,
+            content: frag_fp(3),
+            finding: finding(203),
+            basis: SiblingBasis::Similarity,
+            signature: None,
+            signature_units: None,
+            clone_type: CloneClass::Type3,
+            confidence: Confidence::Medium,
+            similarity: SimilarityBreakdownRow {
+                weight_version: "structural-verify-v1".to_string(),
+                lexical: 0.42,
+                structural: 0.55,
+                control_flow: None,
+                type_similarity: None,
+                api: None,
+                composite: 0.42,
+                min_pairwise: 0.42,
+                confidence_band: Confidence::Medium,
+            },
+            boilerplate: None,
+            suppressed_by: None,
+        }],
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    let reused = store.record_snapshot(&snapshot).unwrap();
+    let mut later = snapshot.clone();
+    later.started_at = "2026-07-25T00:00:00Z";
+    later.finished_at = "2026-07-25T00:00:05Z";
+    let higher_id = store.record_snapshot(&later).unwrap();
+    assert!(higher_id > reused);
+    store
+        .confirm_reused_run(reused, &[], "2026-07-26T00:00:00Z", "2026-07-26T00:00:05Z")
+        .unwrap();
+
+    assert_eq!(store.latest_run().unwrap().unwrap().id, reused);
+    assert_eq!(
+        store.latest_completed_run("/repo").unwrap().unwrap().id,
+        reused
+    );
+    let group = store.group(&group_fp(9).to_hex()).unwrap().unwrap();
+    assert_eq!(group.run_id, reused);
+    let occurrence = store.occurrence(&finding(101).to_hex()).unwrap().unwrap();
+    assert_eq!(occurrence.scan_run_id, reused);
+    let sibling = store.sibling(&finding(203).to_hex()).unwrap().unwrap();
+    assert_eq!(sibling.run_id, reused);
+}
+
+/// The latest run is always a completed one: a newer partition still being
+/// written is never returned, so every run reader accepts the answer.
+#[test]
+fn the_latest_run_skips_a_newer_run_that_has_not_completed() {
+    let variant = BuildVariant::structural(LanguageSelection::default(), Language::C);
+    let detectors = detector_versions();
+    let mut store = Store::open_in_memory().unwrap();
+    let completed = store
+        .record_snapshot(&sample_snapshot(&variant, &detectors))
+        .unwrap();
+    let mut newer = sample_snapshot(&variant, &detectors);
+    newer.started_at = "2026-07-25T00:00:00Z";
+    let running = store.record_snapshot_part(&newer).unwrap();
+    assert!(store.ensure_completed_run(running).is_err());
+
+    let latest = store.latest_run().unwrap().expect("the completed run");
+    assert_eq!(latest.id, completed);
+    store.ensure_completed_run(latest.id).unwrap();
+    store.run_groups(latest.id).unwrap();
+}
