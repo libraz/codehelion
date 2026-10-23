@@ -388,6 +388,9 @@ impl<'d, 's> Lexer<'d, 's> {
                 // line state.
                 break;
             }
+            if (c == '"' || c == '\'') && self.skip_directive_literal(c) {
+                continue;
+            }
             if let Some(width) = self.spliced_match("/*") {
                 self.consume_block_comment(width);
                 continue;
@@ -401,6 +404,41 @@ impl<'d, 's> Lexer<'d, 's> {
         if let Some(directive) = directive(self.text_from(start)) {
             self.conditional_directives
                 .push((self.byte_at[start.index], directive));
+        }
+    }
+
+    /// Skip a quoted literal inside a directive so a comment opener within it
+    /// is not read as a comment. A quote with no partner on its logical line
+    /// (a digit separator, an apostrophe in prose) is left alone and `false`
+    /// is returned with the position unchanged.
+    fn skip_directive_literal(&mut self, quote: char) -> bool {
+        let start = self.mark();
+        self.bump();
+        loop {
+            if self.try_line_splice() {
+                continue;
+            }
+            match self.peek(0) {
+                None | Some('\n') => {
+                    self.i = start.index;
+                    self.line = start.line;
+                    self.column = start.column;
+                    return false;
+                }
+                Some('\\') => {
+                    self.bump();
+                    while self.try_line_splice() {}
+                    if !matches!(self.peek(0), None | Some('\n')) {
+                        self.bump();
+                    }
+                }
+                Some(c) => {
+                    self.bump();
+                    if c == quote {
+                        return true;
+                    }
+                }
+            }
         }
     }
 
@@ -925,6 +963,15 @@ mod tests {
         assert!(diags.is_empty(), "diags: {diags:?}");
         let texts: Vec<_> = tokens.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(texts, vec!["int", "y", ";"]);
+    }
+
+    #[test]
+    fn a_comment_opener_inside_a_directive_literal_is_not_a_comment() {
+        let src = "#define OPEN \"/*\"\n#define SLASHES '//'\n#define N 1'000 /* a\nb */\nint f;\n";
+        let (tokens, diags) = lex_c(src);
+        assert!(diags.is_empty(), "diags: {diags:?}");
+        let texts: Vec<_> = tokens.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["int", "f", ";"]);
     }
 
     #[test]

@@ -134,6 +134,30 @@ fn a_block_macro_after_a_statement_keyword_is_not_a_function() {
     }
 }
 
+#[test]
+fn a_block_macro_in_an_inline_method_body_is_not_a_unit() {
+    let body = "int s = 0; FOR_EACH_ITEM(item, items) { s += item; } return s;";
+    let inline = format!("class Worker {{ public: int run(int n) {{ {body} }} }};");
+    let out_of_line =
+        format!("class Worker {{ public: int run(int n); }};\nint Worker::run(int n) {{ {body} }}");
+    let shape = |source: &str| -> Vec<Option<String>> {
+        let units = units_of(source);
+        assert!(
+            units
+                .iter()
+                .all(|unit| unit.name.as_deref() != Some("FOR_EACH_ITEM")),
+            "in {source}: {units:?}"
+        );
+        units
+            .iter()
+            .filter(|unit| matches!(unit.kind, UnitKind::Function | UnitKind::Method))
+            .map(|unit| unit.name.clone())
+            .collect()
+    };
+    assert_eq!(shape(&inline), vec![Some("run".to_string())]);
+    assert_eq!(shape(&out_of_line), vec![Some("run".to_string())]);
+}
+
 fn structural_names(source: &str) -> Vec<Option<String>> {
     fn walk(node: &IrNode, out: &mut Vec<Option<String>>) {
         if matches!(node.shape, Shape::Function | Shape::Method) {

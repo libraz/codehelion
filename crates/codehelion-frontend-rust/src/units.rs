@@ -518,12 +518,21 @@ fn closure_unit(
     i: usize,
     seen_bars: &mut HashSet<usize>,
 ) -> Option<Unit> {
-    // A closure begins with an optional `move`, then `|params|` or `||`.
-    let (start, bar) = if tokens[i].kind == TokenKind::Keyword && tokens[i].text == "move" {
-        (i, i + 1)
-    } else {
-        (i, i)
+    // A closure begins with an optional `async`, an optional `move`, then
+    // `|params|` or `||`.
+    let is_keyword = |at: usize, word: &str| {
+        tokens
+            .get(at)
+            .is_some_and(|t| t.kind == TokenKind::Keyword && t.text == word)
     };
+    let mut bar = i;
+    if is_keyword(bar, "async") {
+        bar += 1;
+    }
+    if is_keyword(bar, "move") {
+        bar += 1;
+    }
+    let start = i;
     if seen_bars.contains(&bar) {
         return None;
     }
@@ -685,6 +694,24 @@ mod tests {
             units.iter().filter(|u| u.kind == UnitKind::Closure).count(),
             2
         );
+    }
+
+    #[test]
+    fn async_closures_are_closure_units() {
+        for source in [
+            "fn f() { let a = async move || { 0 }; }",
+            "fn f() { let a = async || { 0 }; }",
+            "fn f() { let a = async move |x: u8| { x }; }",
+        ] {
+            let units = units_of(source);
+            assert_eq!(
+                units.iter().filter(|u| u.kind == UnitKind::Closure).count(),
+                1,
+                "in {source}: {units:?}"
+            );
+        }
+        let block = units_of("fn f() { let a = async move { 0 }; }");
+        assert!(block.iter().all(|u| u.kind != UnitKind::Closure));
     }
 
     #[test]

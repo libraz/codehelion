@@ -35,6 +35,7 @@ const SHARED_PROBES: &[&str] = &[
     "int truth(void) { return g(true) + h(false); }\n",
     "const char *nothing(void) { return nullptr; }\n",
     "inline constexpr int limit = 4;\n",
+    "#define COMMENT_OPEN \"/*\"\nint a(int n) { return n + 1; }\nint b(int n) { return n + 1; }\n",
 ];
 
 /// Sources only C++ accepts.

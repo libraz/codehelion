@@ -272,10 +272,8 @@ fn resolve_signature(
             {
                 return None;
             }
-            let inside_record = records
-                .iter()
-                .any(|record| record.token_start < name_i && name_i < record.token_end);
-            if !inside_record && !has_declaration_prefix(tokens, name_i) {
+            let in_member_scope = in_member_scope(tokens, pairs, records, name_i);
+            if !in_member_scope && !has_declaration_prefix(tokens, name_i) {
                 return None;
             }
             let tilde = name_i
@@ -300,6 +298,35 @@ fn resolve_signature(
         return None;
     }
     None
+}
+
+/// Whether the token at `at` sits directly in the member scope of a record,
+/// as opposed to inside a member function's body within it.
+fn in_member_scope(tokens: &[Token], pairs: &DelimPairs, records: &[Unit], at: usize) -> bool {
+    let mut k = at;
+    while let Some(prev) = k.checked_sub(1) {
+        k = prev;
+        let token = &tokens[k];
+        if token.kind != TokenKind::Punctuation {
+            continue;
+        }
+        match token.text.as_str() {
+            ")" | "}" | "]" => {
+                if let Some(open) = group_open(tokens, pairs, k) {
+                    k = open;
+                }
+            }
+            "{" => {
+                return group_close(pairs, k).is_some_and(|close| {
+                    records
+                        .iter()
+                        .any(|record| record.token_start < k && record.token_end == close + 1)
+                });
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whether `token` is a keyword that starts or continues a statement, so that

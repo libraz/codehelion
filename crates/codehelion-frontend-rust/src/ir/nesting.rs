@@ -7,7 +7,7 @@
 //! Error leaf over the omitted region.
 
 use codehelion_core::discovery::Language;
-use codehelion_core::frontend::Token;
+use codehelion_core::frontend::{Token, TokenKind};
 use codehelion_core::ir::{
     ByteRange, IR_SCHEMA_VERSION, MAX_IR_DEPTH, SyntaxIrFile, canonicalize_signatures,
 };
@@ -51,6 +51,13 @@ fn operator_nesting(text: &str) -> Option<usize> {
     }
 }
 
+/// Whether a token can be the last one of an expression, so that a `(` or `[`
+/// directly after it is a call or an index rather than a fresh group.
+fn ends_expression(token: &Token) -> bool {
+    matches!(token.kind, TokenKind::Identifier | TokenKind::Literal(_))
+        || matches!(token.text.as_str(), ")" | "]" | "}" | "?")
+}
+
 /// One `{`, `(` or `[` group, together with the nesting opened directly inside
 /// it by constructs that no delimiter pair can span.
 struct NestingFrame {
@@ -62,6 +69,9 @@ struct NestingFrame {
     /// Operator nesting accumulated inside this group since the last token
     /// that ended an expression.
     operators: usize,
+    /// Call and index groups that directly follow an expression-ending token
+    /// inside this group, since the last token that ended the chain.
+    postfix: usize,
     /// Function-type and closure return arrows opened inside this group and
     /// not yet ended by the body, terminator or clause that follows the type.
     arrows: usize,
@@ -88,11 +98,16 @@ struct NestingDepth {
     chains: usize,
     /// Operator depth summed over every open frame.
     operators: usize,
+    /// Postfix call and index depth summed over every open frame.
+    postfix: usize,
     /// Return-arrow depth summed over every open frame.
     arrows: usize,
     /// Whether the previous token was `else`, which makes the `if` after it a
     /// nested expression of the one before.
     after_else: bool,
+    /// Whether the previous token ended an expression, which makes a `(` or
+    /// `[` after it a call or index on that expression.
+    after_value: bool,
 }
 
 impl NestingDepth {
@@ -102,11 +117,14 @@ impl NestingDepth {
                 closer: None,
                 chains: 0,
                 operators: 0,
+                postfix: 0,
                 arrows: 0,
             }],
             chains: 0,
             operators: 0,
+            postfix: 0,
             arrows: 0,
+            after_value: false,
             after_else: false,
         }
     }
@@ -114,7 +132,7 @@ impl NestingDepth {
     /// The budget spent so far. The file's own frame is not nesting, so it is
     /// excluded from the group count.
     const fn depth(&self) -> usize {
-        self.frames.len() - 1 + self.chains + self.operators + self.arrows
+        self.frames.len() - 1 + self.chains + self.operators + self.postfix + self.arrows
     }
 
     /// Open `opened` levels of chain nesting in the innermost group.
@@ -149,6 +167,17 @@ impl NestingDepth {
             self.operators -= frame.operators;
             frame.operators = 0;
         }
+        self.clear_postfix();
+    }
+
+    /// Give back the innermost group's postfix chain: a `{`, `,` or statement
+    /// end after it starts a subtree that is a sibling of the chain, not a
+    /// child.
+    fn clear_postfix(&mut self) {
+        if let Some(frame) = self.frames.last_mut() {
+            self.postfix -= frame.postfix;
+            frame.postfix = 0;
+        }
     }
 
     /// Give back the innermost group's return arrows: the body, terminator or
@@ -161,8 +190,10 @@ impl NestingDepth {
     }
 
     /// Charge one token against the budget and report the depth it reaches.
-    fn feed(&mut self, text: &str) -> usize {
+    fn feed(&mut self, token: &Token) -> usize {
+        let text = token.text.as_str();
         let after_else = std::mem::replace(&mut self.after_else, text == "else");
+        let after_value = std::mem::replace(&mut self.after_value, ends_expression(token));
         match text {
             // `else if` recurses once per link, and the conditions and blocks
             // between links must not give the count back.
@@ -173,6 +204,12 @@ impl NestingDepth {
             "{" | "(" | "[" => {
                 if text == "{" {
                     self.clear_arrows();
+                    self.clear_postfix();
+                } else if after_value && let Some(frame) = self.frames.last_mut() {
+                    // Each call or index nests the whole chain before it, and
+                    // its group closes before the next one opens.
+                    frame.postfix += 1;
+                    self.postfix += 1;
                 }
                 let closer = match text {
                     "{" => "}",
@@ -183,6 +220,7 @@ impl NestingDepth {
                     closer: Some(closer),
                     chains: 0,
                     operators: 0,
+                    postfix: 0,
                     arrows: 0,
                 });
             }
@@ -195,6 +233,7 @@ impl NestingDepth {
                 {
                     self.chains -= frame.chains;
                     self.operators -= frame.operators;
+                    self.postfix -= frame.postfix;
                     self.arrows -= frame.arrows;
                 }
             }
@@ -242,7 +281,7 @@ impl NestingDepth {
 pub(super) fn nesting_overflow(tokens: &[Token], source_len: usize) -> Option<ByteRange> {
     let mut nesting = NestingDepth::new();
     for token in tokens {
-        if nesting.feed(&token.text) > MAX_IR_DEPTH {
+        if nesting.feed(token) > MAX_IR_DEPTH {
             return Some(ByteRange {
                 start: token.span.start_byte,
                 end: source_len,
@@ -327,7 +366,7 @@ fn safe_depth_prefix_end(tokens: &[Token], overflow: ByteRange) -> usize {
         if token.span.start_byte >= overflow.start {
             break;
         }
-        if nesting.feed(&token.text) >= safe_limit {
+        if nesting.feed(token) >= safe_limit {
             return token.span.start_byte;
         }
     }
@@ -528,6 +567,32 @@ mod tests {
             let file = parse_on_bounded_stack(source);
             assert_bounded_depth_truncation(&file, source_len);
         }
+    }
+
+    #[test]
+    fn long_call_and_index_chains_are_truncated_instead_of_reaching_the_parser() {
+        let nesting = 50_000;
+        for source in [
+            format!("fn f() {{ let x = a{}; }}", "[0]".repeat(nesting)),
+            format!("fn f() {{ f{}; }}", "()".repeat(nesting)),
+            format!("fn f() {{ a{}; }}", ".m()".repeat(nesting)),
+            format!("fn f() {{ a{}; }}", "?()".repeat(nesting)),
+        ] {
+            let source_len = source.len();
+            let file = parse_on_bounded_stack(source);
+            assert_bounded_depth_truncation(&file, source_len);
+        }
+    }
+
+    #[test]
+    fn many_ordinary_calls_and_indexes_do_not_accumulate_against_the_budget() {
+        let count = MAX_IR_DEPTH * 4;
+        let mut source = String::new();
+        for _ in 0..count {
+            source.push_str("fn f<F: Fn(u8)>(g: F) { g(1); let v = a[0]; h(v)[1](2); }\n");
+        }
+        let file = parse_on_bounded_stack(source);
+        assert!(!file.depth_truncated, "flat code must not be truncated");
     }
 
     #[test]
