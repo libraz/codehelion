@@ -395,7 +395,7 @@ pub(crate) mod runtime;
 
 pub(crate) use runtime::{
     DatabaseUse, build_globset, database_path_for, discover_sources, effective_jobs, filter_globs,
-    guarded, incompatible_database_replacement, literal_norm, readable_here,
+    guarded, literal_norm,
 };
 use runtime::{engine_config, lex_sources};
 

@@ -696,6 +696,49 @@ mod tests {
         );
     }
 
+    /// A database that names a device rather than a file is refused before a
+    /// byte is read: `/dev/zero` would otherwise be read until memory ran out.
+    #[cfg(unix)]
+    #[test]
+    fn a_compilation_database_that_is_not_a_regular_file_is_refused() {
+        let (_guard, root) = fixture();
+        std::os::unix::fs::symlink("/dev/zero", root.join("commands.json")).unwrap();
+        let config = DiscoveryConfig {
+            compile_commands: Some(PathBuf::from("commands.json")),
+            ..DiscoveryConfig::default()
+        };
+
+        let report = discover(&root, &config).unwrap();
+
+        assert!(report.compile_commands.is_none());
+        let message = report
+            .compile_commands_error
+            .map(|diagnostic| diagnostic.message)
+            .unwrap_or_default();
+        assert!(message.contains("not a regular file"), "{message}");
+    }
+
+    /// The selected database keeps the path it was read from, which is what
+    /// a compiler helper is handed.
+    #[test]
+    fn the_selected_compilation_database_keeps_its_path() {
+        let (_guard, root) = fixture();
+        fs::write(root.join("commands.json"), "[]").unwrap();
+        let config = DiscoveryConfig {
+            compile_commands: Some(PathBuf::from("commands.json")),
+            ..DiscoveryConfig::default()
+        };
+
+        let report = discover(&root, &config).unwrap();
+
+        assert_eq!(
+            report
+                .compile_commands
+                .map(|database| database.path.canonicalize().unwrap()),
+            Some(root.join("commands.json").canonicalize().unwrap())
+        );
+    }
+
     /// `CMake` commonly leaves its database in an ignored build directory and
     /// exposes it through this root-level symlink for editor tooling. The
     /// ignored directory is out of the walk's reach in a real repository, so

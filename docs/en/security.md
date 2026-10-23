@@ -64,6 +64,10 @@ as they do for DWARF.
 It is a flag rather than a configuration key for the same reason: the file that
 would carry the setting is supplied by the tree whose trust level is in question.
 
+Comments in the scanned tree can still hide groups: a comment containing the
+`codehelion:ignore` marker suppresses the units it covers, under `--untrusted`
+as well (see [Suppression](suppression.md#by-inline-marker)).
+
 Combined with `--mode semantic` it additionally requires an operating-system
 memory ceiling around the helper process, which only Linux can enforce. Elsewhere
 that combination fails rather than run a helper unconfined. The same applies to

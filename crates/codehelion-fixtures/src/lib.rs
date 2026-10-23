@@ -106,6 +106,51 @@ pub enum FixtureError {
     },
 }
 
+/// Something a test needs from the machine, as `doctor` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Prerequisite {
+    /// The label `doctor` reports it under.
+    pub label: &'static str,
+    /// What to do when it is missing.
+    pub remedy: &'static str,
+}
+
+/// The helper that answers about Rust.
+pub const RUST_HELPER: Prerequisite = Prerequisite {
+    label: "rust-compiler-helper",
+    remedy: "Run `cargo build -p codehelion-backend-rust` to build it.",
+};
+
+/// The helper that answers about C and C++.
+pub const CLANG_HELPER: Prerequisite = Prerequisite {
+    label: "clang-helper",
+    remedy: "It is built by a workspace test run and loads libclang at run time; install a \
+             libclang shared library, or run `cargo build -p codehelion-backend-clang` if only \
+             the binary is missing.",
+};
+
+/// Fail the calling test unless `doctor_report` says `prerequisite` is
+/// available.
+///
+/// A test that needs something from the machine either runs its assertions or
+/// fails naming what to fix: returning early instead would pass without
+/// testing anything.
+///
+/// # Panics
+///
+/// When no line of `doctor_report` names the prerequisite as available.
+#[track_caller]
+pub fn require_prerequisite(prerequisite: &Prerequisite, doctor_report: &str) {
+    assert!(
+        doctor_report
+            .lines()
+            .any(|line| line.contains(prerequisite.label) && line.contains("available")),
+        "{} is unavailable, so this test cannot run.\n{}\n{doctor_report}",
+        prerequisite.label,
+        prerequisite.remedy
+    );
+}
+
 /// The `fixtures/` directory of this checkout.
 #[must_use]
 pub fn root() -> PathBuf {
@@ -389,6 +434,15 @@ fn render(template: &Path, directory: &Path) -> Result<String, FixtureError> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
+    #[test]
+    fn a_prerequisite_is_required_by_its_available_line() {
+        require_prerequisite(&CLANG_HELPER, "  clang-helper: available (/bin/x)\n");
+        let missing = std::panic::catch_unwind(|| {
+            require_prerequisite(&RUST_HELPER, "  rust-compiler-helper: missing\n");
+        });
+        assert!(missing.is_err(), "a missing prerequisite fails the test");
+    }
+
     use super::*;
 
     fn read(path: &Path) -> String {

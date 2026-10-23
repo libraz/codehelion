@@ -216,16 +216,8 @@ fn partitioned_machine_reports_reject_text_only_flags() {
                 "--show-near-misses" => args.show_near_misses = true,
                 _ => unreachable!("the fixture uses only known text-only flags"),
             }
-            let error = write_partitioned_reports(
-                ReportOutput::of_scan(&args),
-                &mut Vec::new(),
-                &[],
-                None,
-                None,
-                None,
-                None,
-            )
-            .expect_err("machine reports reject text-only flags");
+            let error = validate_report_output(&ReportOutput::of_scan(&args))
+                .expect_err("machine reports reject text-only flags");
             assert!(format!("{error:#}").contains(flag));
         }
     }

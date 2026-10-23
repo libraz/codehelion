@@ -68,6 +68,12 @@ pub(super) fn record(
     detector_versions.push(("ranking".to_string(), cfg.priority.weights().recipe()));
     let root_path = path_key(inputs.root);
     let current_tree = shared::file_tree(&files);
+    let (compiler_helpers, compiler_units) = asked.map_or_else(
+        // No compiler was asked anything: this mode reads source and nothing
+        // else, and an empty list is the whole truth about it.
+        || (Vec::new(), Vec::new()),
+        compiler_rows,
+    );
     let predecessor = select_predecessor(
         &store,
         &root_path,
@@ -77,6 +83,8 @@ pub(super) fn record(
             detector_versions: &detector_versions,
             baseline_digest: summary.baseline_digest.as_deref(),
             tree: &current_tree,
+            compiler_helpers: &compiler_helpers,
+            compiler_units: &compiler_units,
         },
         !completed || inputs.reuse_allowed,
     )?;
@@ -101,12 +109,6 @@ pub(super) fn record(
             reusable: None,
         });
     }
-    let (compiler_helpers, compiler_units) = asked.map_or_else(
-        // No compiler was asked anything: this mode reads source and nothing
-        // else, and an empty list is the whole truth about it.
-        || (Vec::new(), Vec::new()),
-        compiler_rows,
-    );
     let snapshot = Snapshot {
         root_path: &root_path,
         tool_version: env!("CARGO_PKG_VERSION"),

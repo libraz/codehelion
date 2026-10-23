@@ -18,6 +18,6 @@ pub mod tree_file;
 pub use compile_commands::{RecordedCommand, split_command};
 pub use ir::{COMPILER_IR_SCHEMA_VERSION, CompilerIr, Unavailability, UnitRef};
 pub use protocol::{
-    Absence, BuildDescription, Capability, CompileCommandSelector, Execution, HelperIdentity,
-    PROTOCOL_VERSION,
+    Absence, BuildDescription, Capability, CompilationDatabase, CompileCommandSelector, Execution,
+    HelperIdentity, PROTOCOL_VERSION,
 };

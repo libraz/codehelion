@@ -1,6 +1,7 @@
 use super::comparison::cross_language_funnel;
 use super::helpers::{
-    Compilers, helper_timeout, installed_helper, semantic_sandbox, unavailable_execution_message,
+    Compilers, helper_limits, helper_timeout, installed_helper, semantic_sandbox,
+    unavailable_execution_message,
 };
 use super::model::{CfgShape, SemanticConfidenceEvidence, SemanticDetection, SourceMeta};
 use super::reporting::{DiscoveryExclusions, detector_versions, discovery_exclusions, funnel};

@@ -142,7 +142,7 @@ fn main() -> std::process::ExitCode {
 struct ClangBackend<'c> {
     clang: &'c clang::Clang,
     cfg_available: bool,
-    /// The compilation databases this process has already looked for, kept for
+    /// The compilation databases this process has already read, kept for
     /// as long as it lives: every unit of one project is governed by the same
     /// database, and reading it per request would make analysing a tree cost
     /// one parse of it per file.
@@ -191,14 +191,17 @@ impl Backend for ClangBackend<'_> {
     fn describe(&mut self, request: &DescribeBuild) -> Description {
         // Sentences left by an earlier request belong to that request.
         taken_refusals();
-        // A tree with no compilation database has no C or C++ build to
-        // describe, which is an answer rather than a failure: a project that is
-        // entirely Rust is not missing one, and refusing here would stop a scan
-        // of it because a helper it never needed happened to be installed. A
-        // database that is there and cannot be read is the opposite: the
-        // conditions could not be established, and a run must not be filed
-        // under ones that were guessed at.
-        match self.databases.nearest(Path::new(&request.root)) {
+        // A tree the client selected no compilation database for has no C or
+        // C++ build to describe, which is an answer rather than a failure: a
+        // project that is entirely Rust is not missing one, and refusing here
+        // would stop a scan of it because a helper it never needed happened to
+        // be installed. A database that is named and cannot be read is the
+        // opposite: the conditions could not be established, and a run must
+        // not be filed under ones that were guessed at.
+        match self
+            .databases
+            .selected(request.compilation_database.as_ref())
+        {
             Ok(Some(database)) => Description::Build(BuildDescription {
                 features: Vec::new(),
                 // The macros a translation unit is compiled with decide which
@@ -218,15 +221,19 @@ impl Backend for ClangBackend<'_> {
         let clang = self.clang;
         // Only what this request produces travels with its answer.
         taken_refusals();
-        let database = match self.databases.nearest(Path::new(&request.unit.file)) {
+        let database = match self
+            .databases
+            .selected(request.compilation_database.as_ref())
+        {
             Ok(Some(database)) => database,
-            // Nothing above this file says how it is compiled. Reported per
-            // file rather than as a failed run: a scan of a mixed tree reads
-            // the half that does have a build, and the half nobody could speak
-            // for is what a coverage report is for.
+            // No database was selected, so nothing says how this file is
+            // compiled. Reported per file rather than as a failed run: a scan
+            // of a mixed tree reads the half that does have a build, and the
+            // half nobody could speak for is what a coverage report is for.
             Ok(None) => {
                 refused(&format!(
-                    "{}: no compilation database above this file says how it is compiled",
+                    "{}: no compilation database was selected for this scan, so nothing says \
+                     how this file is compiled",
                     request.unit.unit
                 ));
                 return Answer::Unavailable(Unavailability::NoBuildInformation);

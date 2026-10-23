@@ -33,7 +33,7 @@ pub(super) fn semantic_pair_row(
         inputs.variant,
         pair.rule.id,
         pair.rule.version,
-        &semantic_group_member_fingerprints(members, inputs.analysis),
+        &semantic_group_member_fingerprints(members),
     );
     let test_code_evidence =
         aggregate_test_code_evidence(inputs.analysis, members.iter().map(|member| member.unit));
@@ -96,7 +96,7 @@ pub(super) fn semantic_group_row(
         inputs.variant,
         group.rule.id,
         group.rule.version,
-        &semantic_group_member_fingerprints(group.members.iter(), inputs.analysis),
+        &semantic_group_member_fingerprints(group.members.iter()),
     );
     let test_code_evidence = aggregate_test_code_evidence(
         inputs.analysis,

@@ -5,7 +5,7 @@ use super::*;
 /// opt-in comparison names every member's source build variant.
 #[test]
 fn explicit_cross_build_comparison_is_separate_and_origin_aware() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant fixture");
 
@@ -100,7 +100,7 @@ fn explicit_cross_build_comparison_is_separate_and_origin_aware() {
 /// from one build variant, but the report must say why it could not run.
 #[test]
 fn one_build_variant_reports_a_cross_comparison_that_did_not_run() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root =
         codehelion_fixtures::copy_cpp("template-instantiation", dir.path()).expect("plant fixture");
@@ -165,7 +165,7 @@ fn one_build_variant_reports_a_cross_comparison_that_did_not_run() {
 /// coverage result instead of being omitted or borrowed into a real variant.
 #[test]
 fn a_cpp_source_missing_from_the_database_is_recorded_as_no_build_information() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
     std::fs::write(
@@ -205,7 +205,7 @@ fn a_cpp_source_missing_from_the_database_is_recorded_as_no_build_information() 
 /// baseline-checked scan finds a partition for each of its own.
 #[test]
 fn a_partly_reused_invocation_is_read_back_whole() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
     let unlisted = root.join("src/unlisted.cpp");
@@ -278,7 +278,7 @@ fn a_partly_reused_invocation_is_read_back_whole() {
 /// partitioned scan is every partition it printed, in the same document shape.
 #[test]
 fn a_bare_report_replays_every_partition_the_scan_printed() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
     std::fs::write(
@@ -319,7 +319,7 @@ fn a_bare_report_replays_every_partition_the_scan_printed() {
 /// entries survive planning and each Clang request chooses its own `-D`.
 #[test]
 fn a_duplicate_source_command_selects_each_exact_build_entry() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
     let database = root.join("compile_commands.json");
@@ -390,7 +390,7 @@ fn a_duplicate_source_command_selects_each_exact_build_entry() {
 /// backfills the header.
 #[test]
 fn template_instantiations_survive_header_agreement_and_storage() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root =
         codehelion_fixtures::copy_cpp("template-instantiation", dir.path()).expect("plant fixture");
@@ -433,5 +433,112 @@ fn template_instantiations_survive_header_agreement_and_storage() {
     assert_eq!(
         header.types[argument].category,
         codehelion_helper::ir::TypeCategory::Integer
+    );
+}
+
+/// Every C/C++ unit a scan's partitions asked about was answered, and none was
+/// refused for want of a build.
+fn assert_every_unit_answered(report: &Value) {
+    let partitions = reports(report);
+    let answered: u64 = partitions
+        .iter()
+        .map(|partition| {
+            partition["summary"]["compiler"]["answered"]
+                .as_u64()
+                .unwrap_or(0)
+        })
+        .sum();
+    assert!(
+        answered >= 2,
+        "the selected entries were answered: {report}"
+    );
+    for partition in partitions {
+        let compiler = &partition["summary"]["compiler"];
+        assert!(
+            compiler["unavailable"]["no_build_information"].is_null()
+                && compiler["not_asked_reasons"]["no_build_information"].is_null(),
+            "no selected entry lacks build information: {report}"
+        );
+    }
+}
+
+/// A database the scanner selected outside the locations a helper would look
+/// in is the one the helper reads: the helper is handed it rather than
+/// searching beside each source.
+#[test]
+fn a_database_in_a_nonstandard_build_directory_is_the_one_the_helper_reads() {
+    require_prerequisite(&CLANG_HELPER, &doctor());
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
+    std::fs::create_dir(root.join("build-x")).expect("create the build directory");
+    std::fs::rename(
+        root.join("compile_commands.json"),
+        root.join("build-x/compile_commands.json"),
+    )
+    .expect("move the database");
+
+    let report = scan(&root);
+    assert_every_unit_answered(&report);
+    assert_eq!(
+        reports(&report).len(),
+        2,
+        "one report per -D command: {report}"
+    );
+}
+
+/// An operator's `--compile-commands` names the database the helper reads,
+/// wherever it is.
+#[test]
+fn an_explicit_compilation_database_is_the_one_the_helper_reads() {
+    require_prerequisite(&CLANG_HELPER, &doctor());
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).expect("create the database directory");
+    let named = elsewhere.join("commands.json");
+    std::fs::rename(root.join("compile_commands.json"), &named).expect("move the database");
+
+    let output = cmd()
+        .current_dir(&root)
+        .args(["scan", ".", "--mode", "semantic", "--format", "json"])
+        .arg("--compile-commands")
+        .arg(&named)
+        .output()
+        .expect("run scan");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("one JSON document");
+    assert_every_unit_answered(&report);
+}
+
+/// A database above the scanned tree is one the scanner never selected, so no
+/// unit is answered from it.
+#[test]
+fn a_database_above_the_scan_root_is_not_read() {
+    require_prerequisite(&CLANG_HELPER, &doctor());
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
+    let outer = root.parent().expect("the fixture has a parent");
+    std::fs::rename(
+        root.join("compile_commands.json"),
+        outer.join("compile_commands.json"),
+    )
+    .expect("move the database above the tree");
+
+    let report = scan(&root);
+    let answered: u64 = reports(&report)
+        .iter()
+        .map(|partition| {
+            partition["summary"]["compiler"]["answered"]
+                .as_u64()
+                .unwrap_or(0)
+        })
+        .sum();
+    assert_eq!(
+        answered, 0,
+        "nothing is answered from an unselected database: {report}"
     );
 }

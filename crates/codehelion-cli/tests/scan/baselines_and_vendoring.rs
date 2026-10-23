@@ -467,3 +467,31 @@ fn duplication_between_a_vendored_tree_and_the_project_stays_visible() {
         "a group is hidden only when every occurrence in it is: {crossing:?}"
     );
 }
+
+/// A group another rule hides was never frozen, so rescanning the tree a
+/// baseline was made from reports nothing new because of it, in either mode.
+#[test]
+fn a_rule_suppressed_group_is_not_new_after_an_unchanged_rescan() {
+    let dir = vendored_fixture();
+    let root = dir.path();
+    scan_json(root);
+    record_baseline(root);
+
+    for mode in ["compare", "suppress"] {
+        let report = scan_json_with(
+            root,
+            &["--baseline", "baseline.json", "--baseline-mode", mode],
+        );
+        assert_eq!(report["summary"]["baseline"]["appeared"], 0, "{mode}");
+        let vendored = report["groups"]
+            .as_array()
+            .expect("groups")
+            .iter()
+            .find(|group| group["suppressed"]["scope"] == "vendored_path")
+            .expect("the vendored pair is still detected");
+        assert!(
+            vendored["baseline"].is_null(),
+            "{mode}: a group the baseline never froze carries no state: {vendored}"
+        );
+    }
+}

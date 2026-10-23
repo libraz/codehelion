@@ -1,26 +1,41 @@
 //! Compiler-helper discovery, capability checks, and sandbox requests.
 
-use crate::cli::ScanArgs;
-use crate::config::Config;
+use crate::config::{Config, Limits};
 use anyhow::{Context, Result, bail};
 use codehelion_core::discovery::{
     BuildConfiguration, CppBuild, Language, LanguageSelection, RustBuild, SourceUnit, content_hash,
 };
 use codehelion_core::doctor;
 use codehelion_core::execution::{Execution as PermittedExecution, ExecutionPolicy};
-use codehelion_helper::protocol::Execution;
+use codehelion_helper::protocol::{CompilationDatabase, Execution};
 use codehelion_helper::{Helper, SandboxRequest};
 use std::path::{Path, PathBuf};
 
-pub(super) fn semantic_sandbox(args: &ScanArgs) -> Result<SandboxRequest> {
-    if !args.untrusted {
-        return Ok(SandboxRequest::unrestricted());
+/// The limits a semantic run's helpers are held to: the configured ones,
+/// lowered to the untrusted profile when the run is untrusted, as the scan's own
+/// stages are.
+pub(super) fn helper_limits(cfg: &Config, untrusted: bool) -> Limits {
+    let mut limits = cfg.limits.clone();
+    if untrusted {
+        limits.clamp_to_untrusted(&codehelion_core::execution::Limits::untrusted());
     }
-    let limits = codehelion_core::execution::Limits::untrusted();
-    let Some(bytes) = limits.max_subprocess_bytes else {
+    limits
+}
+
+/// Containment requested for compiler helpers in this semantic run.
+///
+/// Helpers read the tree's own files too, so every run hands them the file
+/// ceiling the scanner reads the same tree under. The untrusted profile also
+/// requires the core profile's subprocess ceiling; a platform that cannot apply
+/// it fails before any helper is launched rather than analysing an untrusted
+/// tree with an unenforced policy.
+pub(super) fn semantic_sandbox(untrusted: bool, limits: &Limits) -> Result<SandboxRequest> {
+    if !untrusted {
+        return Ok(SandboxRequest::unrestricted().with_file_ceiling(limits.max_file_bytes));
+    }
+    let Some(bytes) = codehelion_core::execution::Limits::untrusted().max_subprocess_bytes else {
         bail!("the untrusted profile must require a subprocess memory ceiling");
     };
-    // Helpers read the tree's own files too, under the ceiling the scanner uses.
     let request =
         SandboxRequest::require_memory_limit(bytes).with_file_ceiling(limits.max_file_bytes);
     codehelion_helper::sandbox::validate(request)?;
@@ -61,9 +76,10 @@ impl Installed {
     pub(super) fn build(
         &self,
         root: &Path,
+        compilation_database: Option<&CompilationDatabase>,
         timeout: std::time::Duration,
     ) -> Result<BuildConfiguration> {
-        let described = self.describe(root, timeout)?;
+        let described = self.describe(root, compilation_database, timeout)?;
         let permitted_execution: Vec<String> = self
             .permitted
             .iter()
@@ -114,6 +130,7 @@ impl Installed {
     pub(super) fn describe(
         &self,
         root: &Path,
+        compilation_database: Option<&CompilationDatabase>,
         timeout: std::time::Duration,
     ) -> Result<codehelion_helper::BuildDescription> {
         let mut helper = Helper::start_with_sandbox(&self.program, &[], timeout, self.sandbox)
@@ -122,7 +139,8 @@ impl Installed {
                     "asking {} what this tree is built with",
                     self.program.display()
                 )
-            })?;
+            })?
+            .reading_database(compilation_database.cloned());
         let described = helper.describe(root);
         let _ = helper.shutdown();
         described.with_context(|| {
@@ -162,6 +180,7 @@ impl Compilers {
         permitted: &ExecutionPolicy,
         sandbox: SandboxRequest,
         paths: &crate::config::Helpers,
+        timeout: std::time::Duration,
     ) -> Result<Self> {
         let discovered = doctor::OPTIONAL_HELPERS.map(|component| {
             let configured = match component.binary {
@@ -169,7 +188,7 @@ impl Compilers {
                 "codehelion-backend-clang" => paths.clang.as_deref(),
                 _ => None,
             };
-            let facts = crate::interrogate(component.binary, configured, sandbox);
+            let facts = crate::interrogate(component.binary, configured, sandbox, timeout);
             (
                 component,
                 Discovered::of(component, configured, facts, permitted, sandbox),
@@ -456,8 +475,8 @@ pub(super) fn unavailable_execution_message(class: PermittedExecution) -> String
 }
 
 /// The configured ceiling for every compiler-helper response.
-pub(super) const fn helper_timeout(cfg: &Config) -> std::time::Duration {
-    std::time::Duration::from_millis(cfg.limits.helper_timeout_ms)
+pub(super) const fn helper_timeout(limits: &Limits) -> std::time::Duration {
+    std::time::Duration::from_millis(limits.helper_timeout_ms)
 }
 
 #[cfg(test)]
@@ -540,6 +559,7 @@ mod tests {
                 RUST_HELPER.binary,
                 Some(missing),
                 SandboxRequest::unrestricted(),
+                crate::doctor_command::HANDSHAKE_TIMEOUT,
             );
             assert!(facts.is_some(), "a configured location is never absent");
             discovered(RUST_HELPER, Some(missing), facts)

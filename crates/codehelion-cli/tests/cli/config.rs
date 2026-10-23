@@ -76,6 +76,26 @@ fn config_show_reads_a_discovered_file() {
         .stdout(predicate::str::contains("codehelion.toml"));
 }
 
+/// A scan disregards `[helpers]` in a configuration found where it runs, and
+/// `config show` says so instead of presenting the section as effective.
+#[test]
+fn config_show_states_a_discovered_helpers_section_is_disregarded() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("codehelion.toml"),
+        "[helpers]\nrust = \"/tools/rust-helper\"\n",
+    )
+    .expect("write config");
+    cmd()
+        .current_dir(dir.path())
+        .args(["config", "show"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "# note: ignoring [helpers] rust in ",
+        ));
+}
+
 #[test]
 fn config_show_rejects_unknown_keys() {
     let dir = tempfile::tempdir().expect("temp dir");

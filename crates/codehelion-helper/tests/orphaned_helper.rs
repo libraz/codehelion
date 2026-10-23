@@ -99,6 +99,7 @@ fn a_client_that_vanishes_mid_request_does_not_leave_the_helpers_descendants_run
                 },
                 compile_command: None,
                 read_boundary: None,
+                compilation_database: None,
                 want: vec![Capability::Types],
                 permitted: Vec::new(),
             }),

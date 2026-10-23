@@ -21,6 +21,7 @@ use anyhow::{Context, Result, bail};
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection, SourceUnit};
 use codehelion_core::ir::StructuralFrontend;
 use codehelion_core::structural::DirectoryPartition;
+use codehelion_helper::protocol::CompilationDatabase;
 use codehelion_store::snapshot::{SnapshotComparisons, StagedSnapshotPart, SummaryRow};
 
 use super::build::as_u64;
@@ -123,26 +124,24 @@ pub fn semantic(
     permitted: &ExecutionPolicy,
     out: &mut impl Write,
 ) -> Result<Outcome> {
-    let sandbox = semantic_sandbox(args)?;
     let root = codehelion_core::paths::canonical(&args.path)
         .with_context(|| format!("resolving scan path {}", args.path.display()))?;
     let resolved = config::load(args.config.as_deref(), &root)?;
+    let limits = helper_limits(&resolved.config, args.untrusted);
+    let sandbox = semantic_sandbox(args.untrusted, &limits)?;
     if let Some(note) = config::disregarded_helpers_note(&resolved) {
         eprintln!("{note}");
     }
     let helper_paths = config::helper_paths(&resolved, &args.helpers)?;
-    let compilers = Compilers::found(permitted, sandbox, &helper_paths)?;
+    let compilers = Compilers::found(permitted, sandbox, &helper_paths, helper_timeout(&limits))?;
     run_with(args, out, Some(&compilers))
 }
 
-/// Containment requested for compiler helpers in this semantic run.
-///
-/// The untrusted profile requires the core profile's subprocess ceiling. A
-/// platform that cannot apply it fails before any helper is launched rather
-/// than analysing an untrusted tree with an unenforced policy.
 mod helpers;
 
-use helpers::{Compilers, Installed, asking_about, helper_timeout, semantic_sandbox};
+use helpers::{
+    Compilers, Installed, asking_about, helper_limits, helper_timeout, semantic_sandbox,
+};
 
 #[allow(clippy::too_many_lines)]
 fn run_with(
@@ -194,6 +193,14 @@ fn run_with(
             diagnostic.message
         );
     }
+    // The helpers read the database discovery selected, never one of their own.
+    let compilation_database =
+        compilers
+            .and(discovered.compile_commands.as_ref())
+            .map(|database| CompilationDatabase {
+                path: database.path.display().to_string(),
+                root: root.display().to_string(),
+            });
     let sources = std::mem::take(&mut discovered.units);
     let (sources, glob_excluded) = filter_globs(&cfg, sources)?;
 
@@ -205,7 +212,7 @@ fn run_with(
             &cfg,
             asking.as_deref(),
             &root,
-            helper_timeout(&cfg),
+            helper_timeout(&cfg.limits),
         )?
     } else {
         Vec::new()
@@ -215,7 +222,15 @@ fn run_with(
     // rather than a part the invocation commits with others.
     let whole_tree = partitions
         .is_empty()
-        .then(|| variant_of(asking.as_deref(), &cfg, discovered.header_language, &root))
+        .then(|| {
+            variant_of(
+                asking.as_deref(),
+                &cfg,
+                discovered.header_language,
+                &root,
+                compilation_database.as_ref(),
+            )
+        })
         .transpose()?;
     let no_commands = BTreeMap::new();
     let programs: Vec<_> = whole_tree.as_ref().map_or_else(
@@ -238,6 +253,7 @@ fn run_with(
         configuration: &configuration,
         started_at: &started_at,
         asking: asking.as_deref(),
+        compilation_database: compilation_database.as_ref(),
         glob_excluded,
         mode: if compilers.is_some() {
             crate::cli::Mode::Semantic
@@ -432,6 +448,7 @@ fn variant_of(
     cfg: &Config,
     headers: Language,
     root: &Path,
+    compilation_database: Option<&CompilationDatabase>,
 ) -> Result<BuildVariant> {
     let languages = LanguageSelection {
         rust: cfg.languages.rust,
@@ -443,7 +460,7 @@ fn variant_of(
     };
     let builds = asking
         .iter()
-        .map(|helper| helper.build(root, helper_timeout(cfg)))
+        .map(|helper| helper.build(root, compilation_database, helper_timeout(&cfg.limits)))
         .collect::<Result<Vec<_>>>()?;
     Ok(BuildVariant::semantic(languages, headers, builds))
 }

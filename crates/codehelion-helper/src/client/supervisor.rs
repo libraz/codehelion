@@ -8,7 +8,9 @@ use super::Helper;
 use super::diagnostics::bounded;
 use super::error::{HelperError, explanation, unavailability};
 use crate::ir::{CompilerIr, Unavailability, UnitRef};
-use crate::protocol::{Capability, CompileCommandSelector, Execution, HelperIdentity};
+use crate::protocol::{
+    Capability, CompilationDatabase, CompileCommandSelector, Execution, HelperIdentity,
+};
 use crate::sandbox::SandboxRequest;
 
 /// What came back from asking about one unit.
@@ -56,6 +58,8 @@ pub struct Supervisor {
     spoke_with: Option<HelperIdentity>,
     /// What every helper started here may run out of the project.
     permitted: Vec<Execution>,
+    /// The compilation database every helper started here reads.
+    compilation_database: Option<CompilationDatabase>,
     /// Units that have already broken a helper once, under what broke it.
     poisoned: BTreeMap<UnitRef, Explained>,
     /// Bounded stderr emitted while answering the most recent unavailable unit.
@@ -106,6 +110,7 @@ impl Supervisor {
             helper: None,
             spoke_with: None,
             permitted: Vec::new(),
+            compilation_database: None,
             poisoned: BTreeMap::new(),
             diagnostics: Vec::new(),
             last_failure: Vec::new(),
@@ -137,6 +142,14 @@ impl Supervisor {
     #[must_use]
     pub fn permitting(mut self, permitted: Vec<Execution>) -> Self {
         self.permitted = permitted;
+        self
+    }
+
+    /// Name the compilation database for every helper this supervises,
+    /// restarts included, for the reason [`Self::permitting`] is held here.
+    #[must_use]
+    pub fn reading_database(mut self, database: Option<CompilationDatabase>) -> Self {
+        self.compilation_database = database;
         self
     }
 
@@ -323,7 +336,9 @@ impl Supervisor {
             let started =
                 Helper::start_with_sandbox(&self.program, &arguments, self.timeout, self.sandbox);
             let helper = match started {
-                Ok(helper) => helper.permitting(self.permitted.clone()),
+                Ok(helper) => helper
+                    .permitting(self.permitted.clone())
+                    .reading_database(self.compilation_database.clone()),
                 Err(error) => {
                     // A helper that will not start will not start for the next
                     // unit either, so the run stops asking rather than paying a

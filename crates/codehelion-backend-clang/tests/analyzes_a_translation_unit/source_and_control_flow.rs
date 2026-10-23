@@ -50,7 +50,7 @@ fn pointer_and_reference_returning_functions_keep_their_cfg_blocks() {
         file: source.display().to_string(),
         variant: "host".to_string(),
     };
-    let mut helper = helper();
+    let mut helper = helper_reading(&root);
     let analysis = helper
         .analyze(&unit, &[Capability::MirCfg])
         .expect("the helper should answer");
@@ -82,7 +82,7 @@ fn pointer_and_reference_returning_functions_keep_their_cfg_blocks() {
 fn compiler_cfgs_are_anchored_to_unambiguous_function_definitions() {
     let planted = plant("cmake");
     let unit = planted.unit("src/geometry.cpp", "src/geometry.cpp");
-    let mut helper = helper();
+    let mut helper = helper_reading(&planted.root);
     let analysis = helper
         .analyze(&unit, &[Capability::MirCfg])
         .expect("the helper should answer");

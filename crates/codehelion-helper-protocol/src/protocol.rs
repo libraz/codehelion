@@ -184,6 +184,27 @@ pub struct DescribeBuild {
     /// member of a workspace, and finding the project from there is the
     /// helper's job because it is the side that knows what a project is.
     pub root: String,
+    /// The compilation database the client selected, for a C or C++ helper.
+    ///
+    /// Absent when the client selected none, which a C or C++ helper answers
+    /// as a tree with no build to describe rather than by searching for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compilation_database: Option<CompilationDatabase>,
+}
+
+/// A compilation database the client selected, and where answers read from
+/// it are spelled from.
+///
+/// The client decides which database governs a scan — an operator's explicit
+/// choice or the one found in the scanned tree — so a helper reads this file
+/// rather than one it finds above a source, which could be outside the tree
+/// and never checked by the client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilationDatabase {
+    /// The database file, as this machine spells it.
+    pub path: String,
+    /// The directory answers are spelled against: the scan root.
+    pub root: String,
 }
 
 /// The conditions a tree's code is analyzed under.
@@ -242,6 +263,13 @@ pub struct Analyze {
     /// It also covers a unit and nothing else: [`DescribeBuild`] carries no
     /// boundary, so describing a tree is unconstrained however this was set.
     pub read_boundary: Option<String>,
+    /// The compilation database `compile_command` is an entry of.
+    ///
+    /// Absent for a Rust request and for a C or C++ request the client found
+    /// no database for; a C or C++ helper answers the latter as a unit with no
+    /// build information rather than searching for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compilation_database: Option<CompilationDatabase>,
     /// What to spend time on.
     ///
     /// Never more than the helper offered at handshake. Asking for less than it

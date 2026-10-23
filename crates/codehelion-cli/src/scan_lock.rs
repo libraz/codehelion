@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow};
 use fs2::FileExt;
 
 /// An exclusive lease for one audit database.
@@ -63,13 +63,24 @@ pub fn acquire(database: &Path) -> Result<DatabaseLock> {
         .truncate(false)
         .open(&lock_path)
         .with_context(|| format!("opening database lock {}", lock_path.display()))?;
-    if let Err(error) = FileExt::try_lock_exclusive(&file) {
-        bail!(
+    FileExt::try_lock_exclusive(&file).map_err(|error| lock_refusal(database, &error))?;
+    Ok(DatabaseLock { file })
+}
+
+/// The error for a refused lock: in use only when somebody holds the lease,
+/// the lock error itself otherwise, as [`lease_status`] classifies it.
+fn lock_refusal(database: &Path, error: &std::io::Error) -> anyhow::Error {
+    if is_contention(error) {
+        anyhow!(
             "database {} is in use by another codehelion scan or cache clear: {error}",
             database.display()
-        );
+        )
+    } else {
+        anyhow!(
+            "cannot lock database {} for this command: {error}",
+            database.display()
+        )
     }
-    Ok(DatabaseLock { file })
 }
 
 /// Inspect a database lease without creating its sidecar or retaining a lock.
@@ -155,6 +166,24 @@ mod tests {
         assert!(!is_contention(&std::io::Error::from(
             std::io::ErrorKind::PermissionDenied
         )));
+    }
+
+    #[test]
+    fn only_contention_is_reported_as_a_database_in_use() {
+        let database = Path::new("audit.db");
+        let held = lock_refusal(database, &fs2::lock_contended_error()).to_string();
+        assert!(held.contains("in use by another codehelion scan"), "{held}");
+        for kind in [
+            std::io::ErrorKind::Unsupported,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let refused = lock_refusal(database, &std::io::Error::from(kind)).to_string();
+            assert!(!refused.contains("in use"), "{refused}");
+            assert!(
+                refused.contains("cannot lock database audit.db"),
+                "{refused}"
+            );
+        }
     }
 
     #[test]

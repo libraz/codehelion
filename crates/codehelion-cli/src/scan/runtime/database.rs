@@ -17,7 +17,7 @@ use crate::provenance::{Authority, FromScannedTree, OperatorSupplied};
 ///
 /// One rule, three answers, because the same step aside is right for a
 /// command that records, half right for one that reads, and wrong for one
-/// that deletes.
+/// that describes what was configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DatabaseUse {
     /// The command records: it may write beside an unreadable default, making
@@ -28,10 +28,9 @@ pub(crate) enum DatabaseUse {
     /// "nothing has been scanned yet" stays distinguishable from "the scan
     /// went somewhere else".
     Reading,
-    /// The command acts on the file it names — deleting or pruning it. It uses
-    /// exactly the path that was resolved, because reading a destructive
-    /// instruction as naming some other file is how the wrong history gets
-    /// erased.
+    /// The command reports on the file that was configured, before any
+    /// stepping aside: `doctor` describing the directory, or a hint about the
+    /// directory the database lives in.
     Literal,
 }
 
@@ -41,7 +40,28 @@ pub(crate) enum DatabaseUse {
 /// Every command that opens the audit database resolves it here, so that the
 /// reader who followed a note printed by one of them arrives at the same file.
 /// A scan that records beside an unreadable default and a report that then
-/// opens the default is one tool disagreeing with itself.
+/// opens the default is one tool disagreeing with itself. The choice itself is
+/// [`DatabaseLocation::select`]; this prints the note it owes.
+///
+/// # Errors
+///
+/// Returns an actionable error when a repository-controlled configuration
+/// names an absolute, traversing, or symlink-escaping database path, on the
+/// configured path or on any file that stands in for it.
+pub(crate) fn database_path_for(
+    intent: DatabaseUse,
+    root: &Path,
+    flag: Option<&Path>,
+    config: &ResolvedConfig,
+    untrusted: bool,
+) -> Result<PathBuf> {
+    Ok(database_location(root, flag, config, untrusted)?
+        .select(intent)?
+        .announced())
+}
+
+/// Where the configured audit database is, and the boundary every file that
+/// may stand in for it is held to.
 ///
 /// `--db` is an explicit operator instruction and may name storage outside the
 /// scan; a relative one is read against the working directory, and it is never
@@ -60,69 +80,173 @@ pub(crate) enum DatabaseUse {
 /// what every caller resolves before calling. Where a database *nobody*
 /// configured goes is a separate question: see [`configured_database_path`].
 ///
-/// A schema this build does not support is the one recording failure the tool
-/// can settle on its own: nothing about the existing file has to change for a
-/// scan to keep a durable record, so the run writes beside it instead of
-/// finishing with nothing recorded. Every other recording failure — a full
-/// disk, a read-only file, a lease another scan holds — still fails, because
-/// choosing a different file would not fix any of them.
-///
 /// # Errors
 ///
 /// Returns an actionable error when a repository-controlled configuration
 /// names an absolute, traversing, or symlink-escaping database path.
-pub(crate) fn database_path_for(
-    intent: DatabaseUse,
+pub(crate) fn database_location(
     root: &Path,
     flag: Option<&Path>,
     config: &ResolvedConfig,
     untrusted: bool,
-) -> Result<PathBuf> {
+) -> Result<DatabaseLocation> {
     if let Some(path) = flag {
-        return Ok(spelled_natively(path));
+        return Ok(DatabaseLocation {
+            configured: spelled_natively(path),
+            named: true,
+            confinement: None,
+        });
     }
-    let selected_tree = OperatorSupplied::from_command_line(root.to_path_buf());
-    let path = match (configured_paths(config).database, untrusted) {
-        (Authority::Operator(configured), false) => spelled_natively(&configured_database_path(
-            &repository_root(root),
-            &configured,
-        )),
-        (configured, true) => spelled_natively(&confined_database_path(
-            &selected_tree,
-            &configured.distrusted(),
-            "--untrusted",
-        )?),
-        (Authority::Tree(configured), false) => spelled_natively(&confined_database_path(
-            &selected_tree,
-            &configured,
-            "a configuration discovered in the scanned repository",
-        )?),
+    let confine = |written: FromScannedTree<&Path>, authority: &'static str| {
+        let confinement = Confinement {
+            boundary: OperatorSupplied::from_command_line(root.to_path_buf()),
+            written: written.as_written().to_path_buf(),
+            authority,
+        };
+        let configured = spelled_natively(&confined_database_path(
+            &confinement.boundary,
+            &written,
+            authority,
+        )?);
+        Ok::<_, anyhow::Error>(DatabaseLocation {
+            configured,
+            named: false,
+            confinement: Some(confinement),
+        })
     };
-    if intent == DatabaseUse::Literal {
-        return Ok(path);
+    match (configured_paths(config).database, untrusted) {
+        (Authority::Operator(configured), false) => Ok(DatabaseLocation {
+            configured: spelled_natively(&configured_database_path(
+                &repository_root(root),
+                &configured,
+            )),
+            named: false,
+            confinement: None,
+        }),
+        (configured, true) => confine(configured.distrusted(), "--untrusted"),
+        (Authority::Tree(configured), false) => confine(
+            configured,
+            "a configuration discovered in the scanned repository",
+        ),
     }
-    if let Some(replacement) = incompatible_database_replacement(&path) {
-        if intent == DatabaseUse::Reading && !readable_here(&replacement) {
-            return Ok(path);
+}
+
+/// Where the configured audit database is, and what may stand in for it.
+///
+/// Every intent — and `doctor`'s account of each — is answered by
+/// [`Self::select`] on one value, so the fallback rules and the confinement
+/// they owe a tree-supplied path live in one place.
+pub(crate) struct DatabaseLocation {
+    /// The configured database, or the one named with `--db`.
+    configured: PathBuf,
+    /// Whether `--db` named it; a named file is never traded for another.
+    named: bool,
+    /// The boundary a tree-supplied or `--untrusted` path is held to.
+    confinement: Option<Confinement>,
+}
+
+/// The boundary one configured database path is held to.
+struct Confinement {
+    boundary: OperatorSupplied<PathBuf>,
+    written: PathBuf,
+    authority: &'static str,
+}
+
+/// The file one command uses, with the sentence owed when it is not the
+/// configured one.
+pub(crate) struct DatabaseSelection {
+    /// The file to open.
+    pub(crate) path: PathBuf,
+    note: Option<String>,
+}
+
+impl DatabaseSelection {
+    /// Print the note owed for stepping aside, if any, and hand back the path.
+    pub(crate) fn announced(self) -> PathBuf {
+        if let Some(note) = &self.note {
+            eprintln!("{note}");
         }
-        announce_stepping_aside(&path, &replacement);
-        return Ok(replacement);
+        self.path
     }
-    // Once the unreadable default is gone, the history this build kept beside
-    // it is still the one every command has been using; starting over at the
-    // default would leave it behind without a word.
-    if !std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 0)
-        && let Some(sibling) = schema_versioned_sibling(&path)
-        && readable_here(&sibling)
-    {
-        eprintln!(
-            "note: {} holds no audit database; codehelion used {}, where this build has been recording",
-            path.display(),
-            sibling.display()
-        );
-        return Ok(sibling);
+}
+
+impl DatabaseLocation {
+    /// The configured database, before any fallback.
+    pub(crate) fn configured(&self) -> &Path {
+        &self.configured
     }
-    Ok(path)
+
+    /// The file a command with `intent` uses, without printing anything.
+    ///
+    /// A schema this build does not support is the one recording failure the
+    /// tool can settle on its own: nothing about the existing file has to
+    /// change for a scan to keep a durable record, so the run writes beside it
+    /// instead of finishing with nothing recorded. Every other recording
+    /// failure — a full disk, a read-only file, a lease another scan holds —
+    /// still fails, because choosing a different file would not fix any of
+    /// them. A neighbour is held to the configured path's boundary before it
+    /// is opened.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a confined neighbour escapes the selected tree or
+    /// has a sidecar planted as a link.
+    pub(crate) fn select(&self, intent: DatabaseUse) -> Result<DatabaseSelection> {
+        let path = &self.configured;
+        let unchanged = || DatabaseSelection {
+            path: path.clone(),
+            note: None,
+        };
+        if self.named || intent == DatabaseUse::Literal {
+            return Ok(unchanged());
+        }
+        let incompatible = holds_another_schema(path);
+        // Once the unreadable default is gone, the history this build kept
+        // beside it is still the one every command has been using; starting
+        // over at the default would leave it behind without a word.
+        let absent = !std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0);
+        if !incompatible && !absent {
+            return Ok(unchanged());
+        }
+        let Some(sibling) = self.sibling()? else {
+            return Ok(unchanged());
+        };
+        let note = if incompatible {
+            if intent == DatabaseUse::Reading && !readable_here(&sibling) {
+                return Ok(unchanged());
+            }
+            stepping_aside_note(path, &sibling)
+        } else if readable_here(&sibling) {
+            format!(
+                "note: {} holds no audit database; codehelion used {}, where this build has been recording",
+                path.display(),
+                sibling.display()
+            )
+        } else {
+            return Ok(unchanged());
+        };
+        Ok(DatabaseSelection {
+            path: sibling,
+            note: Some(note),
+        })
+    }
+
+    /// The configured path's schema-versioned neighbour, held to the same
+    /// boundary as the configured path itself.
+    fn sibling(&self) -> Result<Option<PathBuf>> {
+        let Some(confinement) = &self.confinement else {
+            return Ok(schema_versioned_sibling(&self.configured));
+        };
+        let Some(written) = schema_versioned_sibling(&confinement.written) else {
+            return Ok(None);
+        };
+        confined_database_path(
+            &confinement.boundary,
+            &FromScannedTree::found(written.as_path()),
+            confinement.authority,
+        )
+        .map(|path| Some(spelled_natively(&path)))
+    }
 }
 
 /// Say which database was used and which was left alone.
@@ -131,12 +255,22 @@ pub(crate) fn database_path_for(
 /// the first one, and the reader is the only one who can decide what becomes
 /// of the file this command did not touch. One wording for every command, so
 /// that meeting the same situation twice does not read as two situations.
-pub(crate) fn announce_stepping_aside(left: &Path, used: &Path) {
-    eprintln!(
+fn stepping_aside_note(left: &Path, used: &Path) -> String {
+    format!(
         "note: {} was written by another schema version and was left unchanged; codehelion used {}",
         left.display(),
         used.display()
-    );
+    )
+}
+
+/// Whether `path` holds a database written by a schema version this build
+/// does not support.
+fn holds_another_schema(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
+        && matches!(
+            codehelion_store::Store::open_existing(path),
+            Err(codehelion_store::StoreError::UnsupportedSchema { .. })
+        )
 }
 
 /// Whether `path` holds a database this build can open.
@@ -152,14 +286,10 @@ pub(crate) fn readable_here(path: &Path) -> bool {
 /// one that cannot be read at all: those belong to the run's own open, which
 /// reports them where they happen.
 pub(crate) fn incompatible_database_replacement(path: &Path) -> Option<PathBuf> {
-    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
-        return None;
-    }
-    match codehelion_store::Store::open_existing(path) {
-        Err(codehelion_store::StoreError::UnsupportedSchema { .. }) => {
-            schema_versioned_sibling(path)
-        }
-        _ => None,
+    if holds_another_schema(path) {
+        schema_versioned_sibling(path)
+    } else {
+        None
     }
 }
 
@@ -543,5 +673,183 @@ mod tests {
                 "the refusal names the selected tree: {message}"
             );
         }
+    }
+
+    /// A configuration found at a subdirectory root that never mentions the
+    /// database leaves it where it is with no configuration at all: under the
+    /// repository, so every subtree scan shares one history.
+    #[test]
+    fn a_subdirectory_configuration_without_a_database_keeps_the_repository_default() {
+        let worktree = tempfile::tempdir().expect("create worktree directory");
+        std::fs::create_dir(worktree.path().join(".git")).expect("create .git marker");
+        let subdirectory = worktree.path().join("crates/inner");
+        std::fs::create_dir_all(&subdirectory).expect("create subdirectory");
+
+        let discovered = ResolvedConfig {
+            config: Config::from_toml("min-clone-tokens = 30\n").expect("parse configuration"),
+            source: ConfigSource::Discovered(subdirectory.join("codehelion.toml")),
+        };
+        let defaults = ResolvedConfig {
+            config: Config::default(),
+            source: ConfigSource::Defaults,
+        };
+        let expected = worktree.path().join(".codehelion/audit.db");
+        for resolved in [&discovered, &defaults] {
+            assert_eq!(
+                database_path_for(DatabaseUse::Recording, &subdirectory, None, resolved, false)
+                    .expect("the default database resolves"),
+                expected
+            );
+        }
+    }
+
+    /// Write a database this build cannot open at `path`.
+    fn database_from_another_schema(path: &Path) {
+        std::fs::create_dir_all(path.parent().expect("database directory"))
+            .expect("create database directory");
+        codehelion_store::Store::open(path).expect("create database");
+        rusqlite::Connection::open(path)
+            .expect("open database")
+            .execute(
+                "UPDATE schema_meta SET version = ?1",
+                [codehelion_store::schema::SCHEMA_VERSION + 1],
+            )
+            .expect("record another schema version");
+    }
+
+    /// Under `--untrusted` or a tree-supplied setting, the neighbour that
+    /// stands in for the configured database is held to the same boundary:
+    /// a planted link at it, or at its lease, is refused on the step-aside
+    /// branch and on the branch that follows a removed default, for every
+    /// intent that may leave the configured file.
+    #[cfg(unix)]
+    #[test]
+    fn a_neighbour_planted_as_a_link_out_of_the_tree_is_refused_on_every_branch() {
+        let outside = tempfile::tempdir().expect("create outside directory");
+        let target = outside.path().join("elsewhere.db");
+        codehelion_store::Store::open(&target).expect("create the outside database");
+        let sibling_name = format!("audit-v{}.db", codehelion_store::schema::SCHEMA_VERSION);
+
+        for planted in [sibling_name.clone(), format!("{sibling_name}.lock")] {
+            for default_present in [true, false] {
+                let tree = tempfile::tempdir().expect("create tree");
+                let root =
+                    codehelion_core::paths::canonical(tree.path()).expect("canonical tree root");
+                let state = root.join(".codehelion");
+                std::fs::create_dir_all(&state).expect("create state directory");
+                if default_present {
+                    database_from_another_schema(&state.join("audit.db"));
+                }
+                std::os::unix::fs::symlink(&target, state.join(&planted))
+                    .expect("plant a link out of the tree");
+
+                let defaults = ResolvedConfig {
+                    config: Config::default(),
+                    source: ConfigSource::Defaults,
+                };
+                for intent in [DatabaseUse::Recording, DatabaseUse::Reading] {
+                    let error = database_path_for(intent, &root, None, &defaults, true)
+                        .expect_err("a neighbour linked out of the tree is refused");
+                    let message = format!("{error:#}");
+                    assert!(
+                        message.contains("refusing database path"),
+                        "{planted} default_present={default_present} {intent:?}: {message}"
+                    );
+                }
+                // The configured file itself passes the same checks and is
+                // still described as configured.
+                assert_eq!(
+                    database_path_for(DatabaseUse::Literal, &root, None, &defaults, true)
+                        .expect("the configured path is inside the tree"),
+                    state.join("audit.db")
+                );
+            }
+        }
+    }
+
+    /// The configured file is refused by the same checks its neighbour gets.
+    #[cfg(unix)]
+    #[test]
+    fn a_configured_database_lease_planted_as_a_link_is_refused_for_every_intent() {
+        let outside = tempfile::tempdir().expect("create outside directory");
+        let tree = tempfile::tempdir().expect("create tree");
+        let root = codehelion_core::paths::canonical(tree.path()).expect("canonical tree root");
+        let state = root.join(".codehelion");
+        std::fs::create_dir_all(&state).expect("create state directory");
+        std::os::unix::fs::symlink(outside.path().join("lease"), state.join("audit.db.lock"))
+            .expect("plant a link out of the tree");
+        let defaults = ResolvedConfig {
+            config: Config::default(),
+            source: ConfigSource::Defaults,
+        };
+        for intent in [
+            DatabaseUse::Recording,
+            DatabaseUse::Reading,
+            DatabaseUse::Literal,
+        ] {
+            let error = database_path_for(intent, &root, None, &defaults, true)
+                .expect_err("a lease linked out of the tree is refused");
+            assert!(
+                format!("{error:#}").contains("refusing database path"),
+                "{intent:?}: {error:#}"
+            );
+        }
+    }
+
+    /// A tree-supplied database setting gets the same check on its neighbour
+    /// without `--untrusted`.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_supplied_database_neighbour_planted_as_a_link_is_refused() {
+        let outside = tempfile::tempdir().expect("create outside directory");
+        let tree = tempfile::tempdir().expect("create tree");
+        let root = codehelion_core::paths::canonical(tree.path()).expect("canonical tree root");
+        let state = root.join("state");
+        database_from_another_schema(&state.join("history.db"));
+        std::os::unix::fs::symlink(
+            outside.path().join("planted.db"),
+            state.join(format!(
+                "history-v{}.db",
+                codehelion_store::schema::SCHEMA_VERSION
+            )),
+        )
+        .expect("plant a link out of the tree");
+        let discovered = ResolvedConfig {
+            config: Config {
+                database: PathBuf::from("state/history.db"),
+                ..Config::default()
+            },
+            source: ConfigSource::Discovered(root.join("codehelion.toml")),
+        };
+        // A dangling link cannot be resolved, which refuses it as well.
+        database_path_for(DatabaseUse::Recording, &root, None, &discovered, false)
+            .expect_err("the neighbour is confined like the configured path");
+        assert!(
+            !outside.path().join("planted.db").exists(),
+            "nothing was created outside the tree"
+        );
+    }
+
+    /// A neighbour inside the tree is still used on every branch under
+    /// confinement.
+    #[test]
+    fn a_confined_neighbour_inside_the_tree_is_used() {
+        let tree = tempfile::tempdir().expect("create tree");
+        let root = codehelion_core::paths::canonical(tree.path()).expect("canonical tree root");
+        let state = root.join(".codehelion");
+        database_from_another_schema(&state.join("audit.db"));
+        let defaults = ResolvedConfig {
+            config: Config::default(),
+            source: ConfigSource::Defaults,
+        };
+        let sibling = state.join(format!(
+            "audit-v{}.db",
+            codehelion_store::schema::SCHEMA_VERSION
+        ));
+        assert_eq!(
+            database_path_for(DatabaseUse::Recording, &root, None, &defaults, true)
+                .expect("the neighbour is inside the tree"),
+            sibling
+        );
     }
 }

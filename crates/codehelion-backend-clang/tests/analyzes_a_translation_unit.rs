@@ -19,7 +19,7 @@ use codehelion_helper::ir::{
     CallSite, CallTarget, FallibleKind, ResolvedType, SemanticConstructKind, TypeCategory,
     Unavailability, UnitRef,
 };
-use codehelion_helper::protocol::{Capability, Execution};
+use codehelion_helper::protocol::{Capability, CompilationDatabase, Execution};
 use codehelion_helper::{Analysis, COMPILER_IR_SCHEMA_VERSION, CompilerIr, Helper};
 
 /// Parsing a translation unit reads every header it includes, which on a cold
@@ -83,6 +83,30 @@ fn helper() -> Helper {
     .expect("the helper should start and shake hands")
 }
 
+/// The database at the root of a tree these tests planted, named the way a scan
+/// rooted there names the one it selected.
+fn database_at(root: &Path) -> CompilationDatabase {
+    CompilationDatabase {
+        path: root.join("compile_commands.json").display().to_string(),
+        root: root.display().to_string(),
+    }
+}
+
+/// A helper reading the database at `root`.
+fn helper_reading(root: &Path) -> Helper {
+    helper().reading_database(Some(database_at(root)))
+}
+
+/// The database a scan would hand the helper for `unit`: every tree here plants
+/// its one database at its root, which is the directory holding it above the
+/// unit's file.
+fn database_for(unit: &UnitRef) -> Option<CompilationDatabase> {
+    Path::new(&unit.file)
+        .ancestors()
+        .find(|directory| directory.join("compile_commands.json").is_file())
+        .map(database_at)
+}
+
 /// A fixture copied somewhere its rendered database can sit beside its sources.
 struct Planted {
     /// Kept so the directory outlives the test that reads it.
@@ -115,7 +139,7 @@ impl Planted {
 }
 
 fn analyze(unit: &UnitRef) -> Analysis {
-    let mut helper = helper();
+    let mut helper = helper().reading_database(database_for(unit));
     let analysis = helper
         .analyze(
             unit,
@@ -197,7 +221,7 @@ fn project_arguments_cannot_reparse_options_from_config_or_response_files() {
             variant: "host".to_string(),
         };
 
-        let mut helper = helper();
+        let mut helper = helper_reading(&root);
         let analysis = helper
             .analyze(&unit, &[Capability::Types, Capability::MirCfg])
             .expect("the helper should reject the command without crashing");
@@ -245,7 +269,7 @@ fn a_unit_that_cannot_be_analysed_says_why_on_standard_error() {
         variant: "host".to_string(),
     };
 
-    // No database anywhere above the file, which is one thing that can be
+    // No database selected for the file, which is one thing that can be
     // wrong with it.
     let mut without_a_database = helper();
     let analysis = without_a_database
@@ -279,7 +303,7 @@ fn a_unit_that_cannot_be_analysed_says_why_on_standard_error() {
     )
     .expect("write database");
 
-    let mut with_a_refused_argument = helper();
+    let mut with_a_refused_argument = helper_reading(&root);
     let analysis = with_a_refused_argument
         .analyze(&unit, &[Capability::Types])
         .expect("the helper should answer without crashing");

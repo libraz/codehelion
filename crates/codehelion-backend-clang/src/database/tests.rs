@@ -568,12 +568,13 @@ fn a_database_is_read_once_however_many_units_ask_about_it() {
     )
     .expect("the database is written");
 
+    let named = named(root);
     let mut databases = Databases::default();
     assert_eq!(
         databases
-            .nearest(&root.join("a.cpp"))
+            .selected(Some(&named))
             .expect("the database is readable")
-            .expect("the database is beside the unit")
+            .expect("the database was named")
             .definitions(),
         ["-DFIRST=1"]
     );
@@ -584,7 +585,7 @@ fn a_database_is_read_once_however_many_units_ask_about_it() {
     for unit in ["a.cpp", "b.cpp", "c.cpp"] {
         assert_eq!(
             databases
-                .nearest(&root.join(unit))
+                .selected(Some(&named))
                 .expect("the database is readable")
                 .expect("the database read for the first unit answers for the rest")
                 .definitions(),
@@ -594,15 +595,20 @@ fn a_database_is_read_once_however_many_units_ask_about_it() {
     }
 }
 
-/// A directory with no database above it is answered without walking the tree
-/// again for every file in it.
+/// The database the client named for a tree rooted at `root`.
+fn named(root: &Path) -> CompilationDatabase {
+    CompilationDatabase {
+        path: root.join("compile_commands.json").display().to_string(),
+        root: root.display().to_string(),
+    }
+}
+
+/// With no database named, none is searched for: one beside the unit or above
+/// the scanned tree is a database the client never selected or checked.
 #[test]
-fn a_tree_with_no_database_is_searched_once_per_directory() {
+fn no_database_is_searched_for_when_none_was_selected() {
     let project = tempfile::tempdir().expect("a directory to hold the project");
     let root = project.path();
-    let mut databases = Databases::default();
-
-    assert!(databases.nearest(&root.join("a.rs")).unwrap().is_none());
     std::fs::write(
         root.join("compile_commands.json"),
         serde_json::to_string(&[serde_json::json!({
@@ -614,10 +620,51 @@ fn a_tree_with_no_database_is_searched_once_per_directory() {
     )
     .expect("the database is written");
 
-    assert!(
-        databases.nearest(&root.join("b.rs")).unwrap().is_none(),
-        "the search from one directory was walked twice"
-    );
+    let mut databases = Databases::default();
+    assert!(databases.selected(None).unwrap().is_none());
+}
+
+/// A database the client named elsewhere than the root is read from there, and
+/// its answers are spelled against the root the client named.
+#[test]
+fn a_named_database_outside_the_usual_locations_is_read_as_named() {
+    let project = tempfile::tempdir().expect("a directory to hold the project");
+    let root = project.path();
+    let build = root.join("build-x");
+    std::fs::create_dir(&build).expect("the build directory is created");
+    std::fs::write(
+        build.join("compile_commands.json"),
+        serde_json::to_string(&[serde_json::json!({
+            "file": "a.cpp",
+            "directory": root,
+            "arguments": ["clang++", "-DVARIANT=2", "-c", "a.cpp"],
+        })])
+        .expect("the database serializes"),
+    )
+    .expect("the database is written");
+
+    let mut databases = Databases::default();
+    let database = databases
+        .selected(Some(&CompilationDatabase {
+            path: build.join("compile_commands.json").display().to_string(),
+            root: root.display().to_string(),
+        }))
+        .expect("the database is readable")
+        .expect("the database was named");
+    assert_eq!(database.definitions(), ["-DVARIANT=2"]);
+    assert_eq!(database.root, canonical(root));
+}
+
+/// A named database over the tree-file ceiling is refused before it is read.
+#[test]
+fn an_oversized_database_is_refused() {
+    let project = tempfile::tempdir().expect("a directory to hold the project");
+    let root = project.path();
+    std::fs::write(root.join("compile_commands.json"), b"[]").expect("the database is written");
+    let error = Database::read_within(&root.join("compile_commands.json"), root, 1)
+        .err()
+        .expect("a database over the ceiling is refused");
+    assert!(error.contains("1-byte limit"), "{error}");
 }
 
 /// A database that is there and unreadable refuses each unit that asks, not
@@ -631,10 +678,11 @@ fn an_unreadable_database_refuses_every_unit_that_asks_about_it() {
     std::fs::write(root.join("compile_commands.json"), b"{ not json")
         .expect("the database is written");
 
+    let named = named(root);
     let mut databases = Databases::default();
     for unit in ["a.cpp", "b.cpp", "c.cpp"] {
         assert!(
-            databases.nearest(&root.join(unit)).is_err(),
+            databases.selected(Some(&named)).is_err(),
             "{unit} was answered from a database that could not be read"
         );
     }

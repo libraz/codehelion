@@ -410,7 +410,7 @@ pub(super) fn evaluate_suppression(
                 variant,
                 pair.rule.id,
                 pair.rule.version,
-                &semantic_group_member_fingerprints(members, analysis),
+                &semantic_group_member_fingerprints(members),
             );
             shared::SuppressionPriority::first(|| rules.rules.clone_id_rule(&fingerprint.to_hex()))
                 .or_else(|| rules.semantic_rule(members.into_iter(), analysis, &local_units))
@@ -432,7 +432,7 @@ pub(super) fn evaluate_suppression(
                 variant,
                 group.rule.id,
                 group.rule.version,
-                &semantic_group_member_fingerprints(group.members.iter(), analysis),
+                &semantic_group_member_fingerprints(group.members.iter()),
             );
             let members = group.members.iter();
             shared::SuppressionPriority::first(|| rules.rules.clone_id_rule(&fingerprint.to_hex()))

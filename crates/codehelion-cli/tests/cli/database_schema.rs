@@ -338,12 +338,10 @@ fn a_reader_does_not_create_the_neighbour_a_scan_would() {
     assert!(stderr.contains("--db"), "{stderr}");
 }
 
-/// `cache clear` and `cache prune` act on the file they were pointed at.
-///
-/// Following the step-aside rule here would delete the history in use while
-/// leaving the stale file the reader meant to be rid of.
+/// `cache prune` and `cache clear` act on the database `cache status`, scans
+/// and reports use, and an older database beside it goes only when named.
 #[test]
-fn clearing_the_cache_does_not_follow_the_step_aside_rule() {
+fn cache_actions_follow_the_database_scans_record_into() {
     let directory = tempfile::tempdir().expect("temp dir");
     let root = resolved_root(&directory);
     let cache = root.join(".codehelion");
@@ -358,25 +356,111 @@ fn clearing_the_cache_does_not_follow_the_step_aside_rule() {
 
     cmd()
         .current_dir(&root)
-        .args(["cache", "clear", "--force"])
-        .assert()
-        .success();
-
-    assert!(
-        !incompatible.exists(),
-        "the database that was named is the one that goes"
-    );
-    assert!(
-        recorded.is_file(),
-        "the history this build actually writes must survive a clear aimed elsewhere"
-    );
-    // And doctor said as much before anyone typed --force.
-    cmd()
-        .current_dir(&root)
         .arg("doctor")
         .assert()
         .success()
-        .stdout(predicate::str::contains("a read would use"));
+        .stdout(predicate::str::contains(
+            "`cache clear` and `cache prune` act on the database a read would use",
+        ));
+    cmd()
+        .current_dir(&root)
+        .args(["cache", "prune", "--force"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "codehelion used {}",
+            recorded.display()
+        )))
+        .stdout(predicate::str::contains("pruned "));
+    cmd()
+        .current_dir(&root)
+        .args(["cache", "clear", "--force"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "removed {}",
+            recorded.display()
+        )));
+    assert!(!recorded.exists(), "the history in use is the one cleared");
+    assert!(
+        incompatible.is_file(),
+        "the older database is left until it is named"
+    );
+
+    cmd()
+        .current_dir(&root)
+        .args(["cache", "clear", "--force", "--db"])
+        .arg(&incompatible)
+        .assert()
+        .success();
+    assert!(
+        !incompatible.exists(),
+        "a named database is removed as named"
+    );
+}
+
+/// Once the old default is gone, `cache prune` and `cache clear` still find
+/// the neighbour scans record into instead of reporting nothing to do.
+#[test]
+fn cache_actions_find_the_neighbour_after_the_old_default_is_removed() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = resolved_root(&directory);
+    let cache = root.join(".codehelion");
+    tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
+    cmd()
+        .args(["scan", root.to_str().expect("scan path")])
+        .assert()
+        .success();
+    let recorded = cache.join(database_name_for_this_schema());
+    std::fs::remove_file(cache.join("audit.db")).expect("remove the old default");
+
+    cmd()
+        .current_dir(&root)
+        .args(["cache", "prune", "--force"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pruned "));
+    cmd()
+        .current_dir(&root)
+        .args(["cache", "clear", "--force"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to remove").not())
+        .stdout(predicate::str::contains(format!(
+            "removed {}",
+            recorded.display()
+        )));
+    assert!(!recorded.exists());
+}
+
+/// doctor names, for each intent, the file the resolver every command uses
+/// returns — including the neighbour a scan keeps using once the old default
+/// is removed.
+#[test]
+fn doctor_names_the_neighbour_once_the_old_default_is_removed() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let root = resolved_root(&directory);
+    let cache = root.join(".codehelion");
+    tree_with_a_database_from_another_schema_version(&root, &cache.join("audit.db"));
+    cmd()
+        .args(["scan", root.to_str().expect("scan path")])
+        .assert()
+        .success();
+    let recorded = cache.join(database_name_for_this_schema());
+    std::fs::remove_file(cache.join("audit.db")).expect("remove the old default");
+
+    cmd()
+        .args(["doctor", "--path", root.to_str().expect("doctor path")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "  a scan would use {}",
+            recorded.display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "  a read would use {}",
+            recorded.display()
+        )));
 }
 
 /// The only recording failure a run steps around is the one it can settle by

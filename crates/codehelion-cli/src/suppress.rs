@@ -643,7 +643,11 @@ impl Rules {
     /// decision recorded in one place, and pointing at that place is what a
     /// reader needs in order to reverse it.
     pub(crate) fn add_baseline(&mut self, file: &str, covered: BTreeMap<String, u64>) -> usize {
-        let index = self.add_rule("baseline", file, "recorded before this baseline");
+        let index = self.add_rule(
+            crate::baseline::BASELINE_SCOPE,
+            file,
+            "recorded before this baseline",
+        );
         self.baseline = Some((covered, index));
         index
     }

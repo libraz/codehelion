@@ -14,7 +14,7 @@ use codehelion_helper::client::ConfiguredHelper;
 use codehelion_store::Store;
 
 use crate::cli::DoctorArgs;
-use crate::{find_git_root, is_git_ignored, resolve_database, scan, scan_lock};
+use crate::{find_git_root, is_git_ignored, locate_database, scan, scan_lock};
 
 /// How long a diagnostic waits for a helper to introduce itself.
 ///
@@ -22,7 +22,7 @@ use crate::{find_git_root, is_git_ignored, resolve_database, scan, scan_lock};
 /// takes longer than this to say its own name is one a person is waiting on,
 /// and reporting it as unusable with the reason beats hanging the command that
 /// exists to explain what is wrong.
-const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Find a helper and ask it what it is.
 ///
@@ -34,7 +34,8 @@ const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 /// The helper is shut down again. `doctor` inspects; it does not leave a
 /// process running behind a command that printed a table and returned. The
 /// caller supplies containment so semantic discovery and later analysis start
-/// under the same policy.
+/// under the same policy, and the handshake deadline: a scan passes its
+/// configured helper timeout, `doctor` its own [`HANDSHAKE_TIMEOUT`].
 ///
 /// `configured` carries operator authority: [`config::helper_paths`](crate::config::helper_paths) is the
 /// only way a location reaches this, and it is what keeps a path written by the
@@ -47,6 +48,7 @@ pub(crate) fn interrogate(
     name: &str,
     configured: Option<&Path>,
     sandbox: codehelion_helper::SandboxRequest,
+    handshake_timeout: std::time::Duration,
 ) -> Option<doctor::HelperFacts> {
     let Some(path) = codehelion_helper::locate(name, configured.map(ConfiguredHelper::operator))
     else {
@@ -58,7 +60,7 @@ pub(crate) fn interrogate(
         });
     };
     let state =
-        match codehelion_helper::Helper::start_with_sandbox(&path, &[], HANDSHAKE_TIMEOUT, sandbox)
+        match codehelion_helper::Helper::start_with_sandbox(&path, &[], handshake_timeout, sandbox)
         {
             Ok(helper) => {
                 let identity = helper.identity();
@@ -156,19 +158,16 @@ pub(crate) fn install_channel(exe: &Path) -> &'static str {
 /// Append the local database's location to the doctor report, with a hint
 /// when the database would be committed to version control.
 pub(crate) fn doctor_database(args: &DoctorArgs, out: &mut impl Write) -> Result<()> {
-    let cwd = codehelion_core::paths::canonical(&args.path)
-        .with_context(|| format!("resolving {}", args.path.display()))?;
-    // Literal on purpose: doctor reports the state of the directory, so it has
-    // to name the database that was configured rather than the one another
-    // command would fall back to. Which file each of them would use is the
-    // next few lines' subject.
-    let (_, _, db) = resolve_database(
-        scan::DatabaseUse::Literal,
-        &cwd,
+    // doctor reports the state of the directory, so it names the database that
+    // was configured; which file each command would use is asked of the same
+    // location further down.
+    let (cwd, _, location) = locate_database(
+        &args.path,
         args.db.as_deref(),
         args.config.as_deref(),
         args.untrusted,
     )?;
+    let db = location.configured().to_path_buf();
     // A relative `--db` names a file against the working directory, as it does
     // for every command that opens it; only the configured default is placed
     // under `--path`, and the resolver has already made that one absolute.
@@ -211,7 +210,7 @@ pub(crate) fn doctor_database(args: &DoctorArgs, out: &mut impl Write) -> Result
         }
     }
     write_lease_status(&db_abs, out)?;
-    doctor_database_directory(&db, &db_abs, args.db.is_some(), out)?;
+    doctor_database_directory(&location, &db_abs, out)?;
     if let Some(repo_root) = find_git_root(&cwd)
         && !is_git_ignored(&repo_root, &db_abs)
     {
@@ -232,11 +231,11 @@ pub(crate) fn doctor_database(args: &DoctorArgs, out: &mut impl Write) -> Result
 /// audit history. Which of them to keep is the reader's decision, and this is
 /// the evidence for it.
 fn doctor_database_directory(
-    db: &Path,
+    location: &scan::runtime::DatabaseLocation,
     db_abs: &Path,
-    explicit: bool,
     out: &mut impl Write,
 ) -> Result<()> {
+    let db = location.configured();
     let Some(directory) = db_abs.parent() else {
         return Ok(());
     };
@@ -244,19 +243,10 @@ fn doctor_database_directory(
     if databases.is_empty() {
         return Ok(());
     }
-    // The selection is made the same way a scan makes it, including the rule
-    // that a named database is used as named however this build reads it.
-    let replacement = if explicit {
-        None
-    } else {
-        scan::incompatible_database_replacement(db_abs)
-    };
-    let recorded_into = replacement.clone().unwrap_or_else(|| db_abs.to_path_buf());
-    // A reader takes a neighbour that is already there and makes none, so the
-    // two answers differ exactly when the scan has not been run yet.
-    let read_from = replacement
-        .filter(|path| scan::readable_here(path))
-        .unwrap_or_else(|| db_abs.to_path_buf());
+    // Asked of the resolver every command uses, so these lines cannot name a
+    // file the command itself would not open.
+    let recorded_into = location.select(scan::DatabaseUse::Recording)?.path;
+    let read_from = location.select(scan::DatabaseUse::Reading)?.path;
     writeln!(
         out,
         "  databases in {}:",
@@ -283,13 +273,13 @@ fn doctor_database_directory(
         "  a read would use {}",
         spelled_beside(db, &read_from).display()
     )?;
-    // `cache clear` and `cache prune` act on the file they were pointed at, so
-    // a second history in the same directory outlives them. Saying so here is
-    // cheaper than discovering it after a --force.
+    // A second history in the same directory outlives `cache clear` and
+    // `cache prune`. Saying so here is cheaper than discovering it after a
+    // --force.
     if databases.len() > 1 {
         writeln!(
             out,
-            "  `cache clear` and `cache prune` act on the configured database alone; the other database(s) here are left as they are"
+            "  `cache clear` and `cache prune` act on the database a read would use; the other database(s) here are left as they are"
         )?;
     }
     Ok(())

@@ -268,7 +268,8 @@ pub(super) fn rust_partition(
             .find(|helper| helper.component.analyses.contains(&Language::Rust))
     });
     let builds = helper
-        .map(|helper| helper.build(root, timeout))
+        // A Rust build has no compilation database.
+        .map(|helper| helper.build(root, None, timeout))
         .transpose()?
         .into_iter()
         .collect();
@@ -295,7 +296,7 @@ pub(super) fn ask_about(
     sources: &[SourceUnit],
     variant: &BuildVariant,
     commands: &BTreeMap<PathBuf, CompileCommandSelector>,
-    read_boundary: Option<&Path>,
+    files: semantic::ProjectFiles<'_>,
     timeout: std::time::Duration,
 ) -> semantic::Answers {
     let backends: Vec<semantic::Backend<'_>> = asking
@@ -305,7 +306,7 @@ pub(super) fn ask_about(
             analyzes: helper.component.analyses,
             permitted: &helper.permitted,
             sandbox: helper.sandbox,
-            read_boundary,
+            files,
         })
         .collect();
     semantic::ask_with_commands(
@@ -331,11 +332,11 @@ pub(super) fn resolve(
     files: &[SourceMeta],
     variant: &BuildVariant,
     commands: &BTreeMap<PathBuf, CompileCommandSelector>,
-    read_boundary: Option<&Path>,
+    project: semantic::ProjectFiles<'_>,
     timeout: std::time::Duration,
 ) -> (Option<semantic::Answers>, structural::ResolvedTypes) {
     let asked =
-        asking.map(|asking| ask_about(asking, sources, variant, commands, read_boundary, timeout));
+        asking.map(|asking| ask_about(asking, sources, variant, commands, project, timeout));
     let resolved = asked
         .as_ref()
         .map_or_else(structural::ResolvedTypes::default, |asked| {
@@ -1118,7 +1119,7 @@ mod occurrence_rank_tests {
             &stable_id_variant(),
             "sequence-pipeline-v1",
             1,
-            &super::semantic_group_member_fingerprints(windows.iter(), &analysis),
+            &super::semantic_group_member_fingerprints(windows.iter()),
         );
         let ids: std::collections::BTreeSet<_> = windows
             .iter()
@@ -1146,16 +1147,16 @@ mod occurrence_rank_tests {
         ]);
         windows[2].content = stable_id::FragmentFingerprint::from_bytes([1; 16]);
         ranked(&mut windows, &analysis);
-        let group_of = |members: &[SemanticUnitGraph], analysis: &StructuralReport| {
+        let group_of = |members: &[SemanticUnitGraph]| {
             stable_id::semantic_clone_group_fingerprint(
                 &stable_id_variant(),
                 "sequence-pipeline-v1",
                 1,
-                &super::semantic_group_member_fingerprints(members.iter(), analysis),
+                &super::semantic_group_member_fingerprints(members.iter()),
             )
         };
         let pair = [windows[0].clone(), windows[2].clone()];
-        let before = group_of(&pair, &analysis);
+        let before = group_of(&pair);
 
         // The other host is edited outside its window, and a second copy of the
         // first window's content joins the group.
@@ -1164,7 +1165,7 @@ mod occurrence_rank_tests {
         let mut grown = windows.clone();
         ranked(&mut grown, &edited);
 
-        assert_eq!(before, group_of(&grown, &edited));
+        assert_eq!(before, group_of(&grown));
     }
 
     fn stable_id_variant() -> codehelion_core::discovery::BuildVariant {
@@ -1210,7 +1211,6 @@ mod occurrence_rank_tests {
 /// through its finding id instead.
 pub(super) fn semantic_group_member_fingerprints<'a>(
     members: impl IntoIterator<Item = &'a SemanticUnitGraph>,
-    _analysis: &StructuralReport,
 ) -> Vec<stable_id::FragmentFingerprint> {
     members.into_iter().map(|member| member.content).collect()
 }

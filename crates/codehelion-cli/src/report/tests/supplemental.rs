@@ -426,21 +426,17 @@ fn supplemental_diagnostics_respect_show_suppressed_in_text() {
 
 #[test]
 fn the_near_miss_text_flag_is_rejected_for_machine_formats() {
-    let error = crate::scan::output::write_report_options(
-        crate::scan::ReportOutput {
-            format: crate::cli::Format::Json,
-            output: None,
-            force: false,
-            view: crate::cli::ViewArgs::default(),
-            show_suppressed: false,
-            show_siblings: false,
-            show_near_misses: true,
-            sort: Sort::Priority,
-            min_identifier_jaccard: None,
-        },
-        &mut Vec::new(),
-        &sample_report(),
-    )
+    let error = crate::scan::validate_report_output(&crate::scan::ReportOutput {
+        format: crate::cli::Format::Json,
+        output: None,
+        force: false,
+        view: crate::cli::ViewArgs::default(),
+        show_suppressed: false,
+        show_siblings: false,
+        show_near_misses: true,
+        sort: Sort::Priority,
+        min_identifier_jaccard: None,
+    })
     .expect_err("machine formats retain near misses without a display flag");
     assert!(format!("{error:#}").contains("--show-near-misses applies only to text reports"));
 }

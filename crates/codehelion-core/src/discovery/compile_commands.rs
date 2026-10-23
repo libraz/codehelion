@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use codehelion_helper_protocol::compile_commands::RecordedCommand;
+use codehelion_helper_protocol::tree_file::{Links, TreeFileError, read_text_bounded};
 
 use super::{BuildConfiguration, CppBuild};
 
@@ -34,6 +35,10 @@ pub enum CompileCommandsError {
     /// The file could not be read.
     #[error("reading compile_commands.json: {0}")]
     Read(#[source] std::io::Error),
+    /// The file is not a regular file, is not text, or grew past the ceiling
+    /// while it was read.
+    #[error("reading compile_commands.json: {0}")]
+    Refused(#[source] TreeFileError),
     /// The file was not valid JSON in the expected shape.
     #[error("parsing compile_commands.json: {0}")]
     Parse(#[source] serde_json::Error),
@@ -90,6 +95,11 @@ impl CompileEntry {
 /// A parsed compilation database with duplicate translation units removed.
 #[derive(Debug, Clone, Default)]
 pub struct CompileCommands {
+    /// The database file this was read from, as discovery selected it.
+    ///
+    /// Handed to the compiler helper so it reads this database rather than
+    /// one it finds on its own.
+    pub path: PathBuf,
     /// Distinct translation units, in the order first seen.
     pub entries: Vec<CompileEntry>,
     /// A hash of the document this was read from, retained as provenance.
@@ -108,33 +118,37 @@ impl CompileCommands {
     /// Returns [`CompileCommandsError`] if the file cannot be read or is not a
     /// JSON array of `{ "file": ..., "directory": ... }` objects.
     pub fn read(path: &Path) -> Result<Self, CompileCommandsError> {
-        let text = std::fs::read_to_string(path).map_err(CompileCommandsError::Read)?;
-        Self::parse(&text)
+        Self::read_with_limit(path, u64::MAX)
     }
 
     /// Read and parse a compilation database after enforcing `max_bytes`.
     ///
+    /// A link is followed, because a database is usually linked to where an
+    /// editor finds it; what it names must be a regular file.
+    ///
     /// # Errors
     ///
     /// Returns [`CompileCommandsError::TooLarge`] before reading an oversized
-    /// file, or the same failures as [`Self::read`] for an otherwise readable
-    /// file.
+    /// file, [`CompileCommandsError::Refused`] for anything that is not a
+    /// regular text file within the ceiling, and the same failures as
+    /// [`Self::read`] for an otherwise readable file.
     pub fn read_with_limit(path: &Path, max_bytes: u64) -> Result<Self, CompileCommandsError> {
         let metadata = std::fs::metadata(path).map_err(CompileCommandsError::Read)?;
-        if metadata.len() > max_bytes {
+        if metadata.is_file() && metadata.len() > max_bytes {
             return Err(CompileCommandsError::TooLarge {
                 actual_bytes: metadata.len(),
                 max_bytes,
             });
         }
-        let text = std::fs::read_to_string(path).map_err(CompileCommandsError::Read)?;
-        if text.len() as u64 > max_bytes {
-            return Err(CompileCommandsError::TooLarge {
-                actual_bytes: text.len() as u64,
-                max_bytes,
-            });
-        }
-        Self::parse(&text)
+        let text =
+            read_text_bounded(path, Links::Follow, max_bytes).map_err(|error| match error {
+                TreeFileError::Io(error) => CompileCommandsError::Read(error),
+                refused => CompileCommandsError::Refused(refused),
+            })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            ..Self::parse(&text)?
+        })
     }
 
     fn parse(text: &str) -> Result<Self, CompileCommandsError> {
@@ -165,6 +179,7 @@ impl CompileCommands {
             }
         }
         Ok(Self {
+            path: PathBuf::new(),
             entries,
             content_hash: Some(super::build_config::content_hash(text)),
         })

@@ -39,6 +39,8 @@ codehelion artifact analyze path/to/binary --untrusted
 
 設定キーではなくフラグである理由も同じです。その設定を載せるファイルは、信頼度が問われている当のツリーが供給するものだからです。
 
+スキャン対象ツリーのコメントは、`--untrusted` の下でもグループを隠せます。`codehelion:ignore` マーカーを含むコメントは、それが及ぶユニットを抑制します（[抑制](suppression.md#インラインマーカーで)を参照）。
+
 `--mode semantic` と併用する場合は、helper プロセスに OS が強制するメモリ上限を追加で要求します。これを課せるのは Linux だけで、ほかの OS では helper を無防備に走らせる代わりにエラーで停止します。メモリ上限をプリセットに含む `artifact --untrusted` も同様です。
 
 helper は専用の process group で動きます。リクエストの途中でスキャナが消えた場合、helper はコンパイラのプロセスも含めてその group を終了させ、走らせたまま残すことはありません。

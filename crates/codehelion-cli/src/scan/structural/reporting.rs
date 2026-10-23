@@ -74,7 +74,7 @@ fn build_semantic_pair(inputs: &ReportInputs<'_>, index: usize) -> report::Group
         inputs.variant,
         pair.rule.id,
         pair.rule.version,
-        &semantic_group_member_fingerprints(members, inputs.analysis),
+        &semantic_group_member_fingerprints(members),
     );
     let test_code_evidence =
         aggregate_test_code_evidence(inputs.analysis, members.iter().map(|member| member.unit));
@@ -135,7 +135,7 @@ fn build_semantic_group(inputs: &ReportInputs<'_>, index: usize) -> report::Grou
         inputs.variant,
         semantic_group.rule.id,
         semantic_group.rule.version,
-        &semantic_group_member_fingerprints(semantic_group.members.iter(), inputs.analysis),
+        &semantic_group_member_fingerprints(semantic_group.members.iter()),
     );
     let test_code_evidence = aggregate_test_code_evidence(
         inputs.analysis,

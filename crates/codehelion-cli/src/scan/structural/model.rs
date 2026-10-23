@@ -186,6 +186,9 @@ pub(super) struct CrossLanguageComparisonUnit {
     pub(super) end_line: u32,
     pub(super) name: Option<String>,
     pub(super) graph: SemanticOperationGraph,
+    /// The window's normalized content, which alone identifies the group.
+    pub(super) content: stable_id::FragmentFingerprint,
+    /// The window as it occurs in its host, which identifies the member.
     pub(super) occurrence: stable_id::FragmentFingerprint,
     pub(super) normalization_confidence: f64,
     pub(super) interactions: BTreeSet<String>,

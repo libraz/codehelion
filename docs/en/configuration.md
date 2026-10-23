@@ -275,6 +275,9 @@ path a run leaves that database exactly where it is, records into
 `--db` is refused instead, since writing somewhere else would ignore the path that
 was asked for. `codehelion doctor` lists every audit database in the directory,
 which of them this build can open, and which one a run would take.
+`cache status`, `cache prune` and `cache clear` act on the database a report would
+read; the older one beside it is removed by naming it, as in
+`codehelion cache clear --force --db .codehelion/audit.db`.
 
 Nothing is lost that a fresh scan does not recreate. The audit database holds
 derived state, so a database an earlier build wrote costs the tree the runs it

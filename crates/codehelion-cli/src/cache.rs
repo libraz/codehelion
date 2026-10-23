@@ -18,17 +18,17 @@ use crate::{Outcome, resolve_database, scan, scan_lock};
 
 /// The database one `cache` action works on.
 ///
-/// The three actions resolve it the same way and differ only in what they are
-/// allowed to do about a default this build cannot open; see
-/// [`scan::DatabaseUse`].
+/// All three actions read: they work on the file a scan records into and a
+/// report reads, so status, prune and clear never describe three different
+/// files. An older database left beside it is removed by naming it with `--db`.
 fn cache_database(
-    intent: scan::DatabaseUse,
     path: &Path,
     db: Option<&Path>,
     config: Option<&Path>,
     untrusted: bool,
 ) -> Result<PathBuf> {
-    resolve_database(intent, path, db, config, untrusted).map(|(_, _, database)| database)
+    resolve_database(scan::DatabaseUse::Reading, path, db, config, untrusted)
+        .map(|(_, _, database)| database)
 }
 
 pub(crate) fn cache_command(action: &CacheAction, out: &mut impl Write) -> Result<Outcome> {
@@ -39,13 +39,7 @@ pub(crate) fn cache_command(action: &CacheAction, out: &mut impl Write) -> Resul
             db,
             untrusted,
         } => cache_status(
-            &cache_database(
-                scan::DatabaseUse::Reading,
-                path,
-                db.as_deref(),
-                config.as_deref(),
-                *untrusted,
-            )?,
+            &cache_database(path, db.as_deref(), config.as_deref(), *untrusted)?,
             out,
         ),
         CacheAction::Prune {
@@ -62,16 +56,8 @@ pub(crate) fn cache_command(action: &CacheAction, out: &mut impl Write) -> Resul
                     "`cache prune` deletes retained local history; pass --force to confirm"
                 );
             }
-            // Literal: a command that deletes acts on the file it was pointed
-            // at, whatever this build can make of it.
             cache_prune(
-                &cache_database(
-                    scan::DatabaseUse::Literal,
-                    path,
-                    db.as_deref(),
-                    config.as_deref(),
-                    *untrusted,
-                )?,
+                &cache_database(path, db.as_deref(), config.as_deref(), *untrusted)?,
                 *keep_artifacts,
                 *keep_comparisons,
                 out,
@@ -90,13 +76,7 @@ pub(crate) fn cache_command(action: &CacheAction, out: &mut impl Write) -> Resul
                 );
             }
             cache_clear(
-                &cache_database(
-                    scan::DatabaseUse::Literal,
-                    path,
-                    db.as_deref(),
-                    config.as_deref(),
-                    *untrusted,
-                )?,
+                &cache_database(path, db.as_deref(), config.as_deref(), *untrusted)?,
                 out,
             )
         }

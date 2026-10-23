@@ -168,7 +168,7 @@ fn found_in(report: &Value, rule: &str, tail: &str) -> Vec<String> {
 /// for a header that is what its readers confirmed about it.
 #[test]
 fn a_pattern_a_header_states_is_found_as_often_as_one_a_source_writes() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let directory = tempfile::tempdir().expect("temp dir");
     let root = plant(directory.path());
     let report = scan(&root);

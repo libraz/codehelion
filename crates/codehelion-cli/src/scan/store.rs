@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use codehelion_core::discovery::{BuildVariant, ContentHash, NORMALIZATION_VERSION, SourceUnit};
 use codehelion_core::engine::{self, EngineReport, LiteralNorm};
 use codehelion_core::stable_id::{self, ContentNorm, FP_SCHEMA_VERSION, FileContext, GroupIds};
+use codehelion_store::compiler::{CompilerHelperRow, CompilerOutcome, CompilerUnitRow};
 use codehelion_store::snapshot::SuppressionRuleRow;
 use codehelion_store::snapshot::{FileRow, GroupRow, MemberRow, Snapshot, SummaryRow, UnitRow};
 use codehelion_store::{Store, path_key};
@@ -85,7 +86,7 @@ pub(crate) fn reuse_config_hash(cfg: &Config, profile: ReuseProfile<'_>) -> Resu
     for rule in profile.rules {
         // A baseline is named by a path as typed; what it hides is compared by
         // its digest when reuse is decided.
-        let pattern = if rule.scope == BASELINE_RULE_SCOPE {
+        let pattern = if rule.scope == crate::baseline::BASELINE_SCOPE {
             ""
         } else {
             rule.pattern.as_str()
@@ -101,9 +102,6 @@ pub(crate) fn reuse_config_hash(cfg: &Config, profile: ReuseProfile<'_>) -> Resu
     }
     Ok(ContentHash::of(config_text.as_bytes()))
 }
-
-/// Suppression scope of the rule a `--baseline` file registers.
-const BASELINE_RULE_SCOPE: &str = "baseline";
 
 /// `cfg` with every setting that changes no scan row reset to its default.
 ///
@@ -154,6 +152,73 @@ pub(crate) struct ReuseIdentity<'a> {
     pub(crate) baseline_digest: Option<&'a str>,
     /// The tree the run read, by relative path and content hash.
     pub(crate) tree: &'a BTreeMap<String, String>,
+    /// The compiler helpers the run would record; empty when none was asked.
+    pub(crate) compiler_helpers: &'a [CompilerHelperRow],
+    /// The per-unit compiler rows the run would record, in recording order.
+    pub(crate) compiler_units: &'a [CompilerUnitRow],
+}
+
+/// One compiler unit row as reuse compares it: the unit, the helper that
+/// answered, and the schema it answered in or the reason it did not.
+type CompilerRowKey = (
+    (String, String, String),
+    Option<(String, String)>,
+    Result<String, &'static str>,
+);
+
+/// One helper row as reuse compares it.
+type CompilerHelperKey = (String, String, Option<u32>);
+
+impl ReuseIdentity<'_> {
+    /// The helpers this run would record, in the name order the store reads
+    /// them back in.
+    fn helper_keys(&self) -> Vec<CompilerHelperKey> {
+        let mut keys: Vec<CompilerHelperKey> = self
+            .compiler_helpers
+            .iter()
+            .map(|helper| {
+                (
+                    helper.identity.name.clone(),
+                    helper.identity.version.clone(),
+                    helper.restarts,
+                )
+            })
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// The unit rows this run would record, as reuse compares them.
+    fn unit_keys(&self) -> Vec<CompilerRowKey> {
+        self.compiler_units
+            .iter()
+            .map(|row| {
+                let helper = row
+                    .helper
+                    .and_then(|index| self.compiler_helpers.get(index))
+                    .map(|helper| {
+                        (
+                            helper.identity.name.clone(),
+                            helper.identity.version.clone(),
+                        )
+                    });
+                compiler_row_key(&row.outcome, helper)
+            })
+            .collect()
+    }
+}
+
+fn compiler_row_key(outcome: &CompilerOutcome, helper: Option<(String, String)>) -> CompilerRowKey {
+    let unit = outcome.unit();
+    let answer = match outcome {
+        CompilerOutcome::Analyzed(ir) => Ok(ir.schema_version.clone()),
+        CompilerOutcome::Unavailable { reason, .. } => Err(reason.name()),
+    };
+    (
+        (unit.unit.clone(), unit.file.clone(), unit.variant.clone()),
+        helper,
+        answer,
+    )
 }
 
 /// Whether the completed run `previous` would record exactly the rows the
@@ -161,8 +226,9 @@ pub(crate) struct ReuseIdentity<'a> {
 ///
 /// The candidate already agrees on root, configuration and build variant.
 /// This compares the rest of what decides the rows: the binary that wrote
-/// them, every detector version, the baseline, and the tree. Every reuse path
-/// asks this one question, so no path can replay a run another would refuse.
+/// them, every detector version, the baseline, the tree, and what each helper
+/// answered about each unit. Every reuse path asks this one question, so no
+/// path can replay a run another would refuse.
 ///
 /// # Errors
 ///
@@ -181,7 +247,37 @@ fn reusable_run(store: &Store, previous: i64, current: &ReuseIdentity<'_>) -> Re
     let same_baseline = store
         .run_summary_row(previous)?
         .is_some_and(|stored| stored.baseline_digest.as_deref() == current.baseline_digest);
-    Ok(same_baseline && store.run_tree(previous)? == *current.tree)
+    if !same_baseline || store.run_tree(previous)? != *current.tree {
+        return Ok(false);
+    }
+    let recorded_helpers: Vec<CompilerHelperKey> = store
+        .run_compiler_helpers(previous)?
+        .into_iter()
+        .map(|helper| {
+            (
+                helper.identity.name,
+                helper.identity.version,
+                helper.restarts,
+            )
+        })
+        .collect();
+    if recorded_helpers != current.helper_keys() {
+        return Ok(false);
+    }
+    let recorded_units: Vec<CompilerRowKey> = store
+        .run_compiler_units(previous)?
+        .iter()
+        .map(|stored| {
+            compiler_row_key(
+                &stored.outcome,
+                stored
+                    .helper
+                    .as_ref()
+                    .map(|helper| (helper.name.clone(), helper.version.clone())),
+            )
+        })
+        .collect();
+    Ok(recorded_units == current.unit_keys())
 }
 
 /// The completed run a new run is recorded against.
@@ -309,6 +405,9 @@ pub(super) fn record_ranked(
             detector_versions: &detector_versions,
             baseline_digest: summary.baseline_digest.as_deref(),
             tree: &current_tree,
+            // A Fast run asks no compiler anything.
+            compiler_helpers: &[],
+            compiler_units: &[],
         },
         inputs.reuse_allowed,
     )?;
@@ -684,6 +783,8 @@ mod tests {
                     detector_versions: detectors,
                     baseline_digest: None,
                     tree: &tree,
+                    compiler_helpers: &[],
+                    compiler_units: &[],
                 },
                 true,
             )

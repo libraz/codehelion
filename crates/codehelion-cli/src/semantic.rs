@@ -53,7 +53,9 @@ use codehelion_helper::ir::{
     CallSite, CompilerIr, EffectSummary, Instantiation, ResolvedExpression, ResolvedSymbol,
     ResolvedType, SemanticConstruct, Unavailability, UnexpandedMacro, UnitRef,
 };
-use codehelion_helper::protocol::{Capability, CompileCommandSelector, Execution, HelperIdentity};
+use codehelion_helper::protocol::{
+    Capability, CompilationDatabase, CompileCommandSelector, Execution, HelperIdentity,
+};
 use codehelion_helper::{Analysis, SandboxRequest, Supervisor};
 
 /// Everything a run can use from a compiler.
@@ -138,8 +140,19 @@ pub(crate) struct Backend<'a> {
     pub(crate) permitted: &'a [Execution],
     /// The containment policy every process for this backend must satisfy.
     pub(crate) sandbox: SandboxRequest,
-    /// Boundary for paths the helper may read from a compilation command.
+    /// Which of the project's files it reads from.
+    pub(crate) files: ProjectFiles<'a>,
+}
+
+/// What every helper of a run is told about the project's files.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ProjectFiles<'a> {
+    /// Boundary for paths the helper may read from a compilation command, set
+    /// only for an untrusted scan.
     pub(crate) read_boundary: Option<&'a Path>,
+    /// The compilation database the scan selected, which a C or C++ helper
+    /// reads instead of searching for one.
+    pub(crate) compilation_database: Option<&'a CompilationDatabase>,
 }
 
 /// One helper that took part, as it described itself.
@@ -182,6 +195,7 @@ pub(crate) fn ask_with_commands(
         .map(|backend| {
             Supervisor::new(backend.program.to_path_buf(), Vec::new(), timeout)
                 .permitting(backend.permitted.to_vec())
+                .reading_database(backend.files.compilation_database.cloned())
                 .sandboxed(backend.sandbox)
         })
         .collect();
@@ -198,7 +212,7 @@ pub(crate) fn ask_with_commands(
             let analysis = helper.analyze_with_command_and_boundary(
                 unit,
                 command,
-                backends[backend].read_boundary,
+                backends[backend].files.read_boundary,
                 &WANTED,
             );
             (analysis, helper.take_diagnostics())

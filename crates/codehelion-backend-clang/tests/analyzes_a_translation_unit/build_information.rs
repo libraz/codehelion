@@ -42,19 +42,23 @@ fn a_tree_with_no_compilation_database_is_said_to_have_no_build_information() {
 #[test]
 fn a_tree_is_described_by_the_conditions_its_units_are_compiled_under() {
     let planted = plant("header-only");
-    let mut helper = helper();
-    let described = helper.describe(&planted.root).expect("it describes");
+    let mut selected = helper_reading(&planted.root);
+    let described = selected.describe(&planted.root).expect("it describes");
     assert_eq!(described.cfgs, vec!["-DACCUM_WIDTH=64".to_string()]);
     assert!(described.features.is_empty(), "a C++ build has no features");
+    selected.shutdown().expect("the helper should stop cleanly");
 
-    // A tree with no database has no C or C++ build to describe, which is an
-    // answer: a project that is entirely Rust is not missing one, and refusing
-    // here would stop a scan of it because this helper happened to be
-    // installed.
-    let empty = tempfile::tempdir().expect("temp dir");
-    let nothing = helper.describe(empty.path()).expect("it describes");
+    // A tree with no database selected has no C or C++ build to describe,
+    // which is an answer: a project that is entirely Rust is not missing one,
+    // and refusing here would stop a scan of it because this helper happened
+    // to be installed. A database beside the tree that nobody selected is not
+    // read.
+    let mut unselected = helper();
+    let nothing = unselected.describe(&planted.root).expect("it describes");
     assert!(nothing.cfgs.is_empty(), "{nothing:?}");
-    helper.shutdown().expect("the helper should stop cleanly");
+    unselected
+        .shutdown()
+        .expect("the helper should stop cleanly");
 }
 
 /// A database that is there and cannot be read leaves the conditions of the
@@ -64,7 +68,7 @@ fn a_tree_is_described_by_the_conditions_its_units_are_compiled_under() {
 fn a_database_that_cannot_be_read_stops_the_description() {
     let broken = tempfile::tempdir().expect("temp dir");
     std::fs::write(broken.path().join("compile_commands.json"), b"{ not json").unwrap();
-    let mut helper = helper();
+    let mut helper = helper_reading(broken.path());
 
     let error = helper
         .describe(broken.path())
@@ -97,8 +101,9 @@ fn a_refusal_is_not_carried_into_the_answer_to_a_later_request() {
         file: lonely.path().join("lonely.cpp").display().to_string(),
         variant: "host".to_string(),
     };
-    let mut helper = helper();
+    let mut helper = helper_reading(broken.path());
     let _ = helper.describe(broken.path());
+    let mut helper = helper.reading_database(None);
 
     let analysis = helper
         .analyze(&unit, &[Capability::Types])
@@ -111,7 +116,7 @@ fn a_refusal_is_not_carried_into_the_answer_to_a_later_request() {
     let said = helper.take_answer_diagnostics();
     assert_eq!(said.len(), 1, "{said:?}");
     assert!(
-        said[0].contains("no compilation database above"),
+        said[0].contains("no compilation database was selected"),
         "{said:?}"
     );
     helper.shutdown().expect("the helper should stop cleanly");
@@ -130,7 +135,7 @@ fn a_unit_clang_reads_with_errors_is_a_helper_failure_carrying_the_error() {
     )
     .unwrap();
     let unit = planted.unit("src/narrow.cpp", "src/narrow.cpp");
-    let mut helper = helper();
+    let mut helper = helper_reading(&planted.root);
 
     let analysis = helper
         .analyze(&unit, &[Capability::Types])
@@ -159,7 +164,7 @@ fn a_recorded_command_clang_cannot_read_is_a_helper_failure() {
     std::fs::remove_file(&source).unwrap();
     std::fs::create_dir(&source).unwrap();
     let unit = planted.unit("src/wide.cpp", "src/wide.cpp");
-    let mut helper = helper();
+    let mut helper = helper_reading(&planted.root);
 
     let analysis = helper
         .analyze(&unit, &[Capability::Types])

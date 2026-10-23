@@ -21,16 +21,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
 
-use codehelion_helper::CompileCommandSelector;
+use codehelion_helper::{CompilationDatabase, CompileCommandSelector};
 use codehelion_helper_protocol::compile_commands::RecordedCommand;
 use codehelion_helper_protocol::tree_file::{Links, read_text_bounded};
-
-/// Where a database can sit relative to the directory a project is rooted at.
-///
-/// The build directory is listed because that is where the generator writes it
-/// and it is the usual arrangement; the root is listed because that is where
-/// people symlink it to so their editor finds it.
-const LOCATIONS: [&str; 2] = ["compile_commands.json", "build/compile_commands.json"];
 
 /// One translation unit, as the database describes it.
 pub(crate) struct Entry {
@@ -409,8 +402,8 @@ fn explicitly_forbidden(argument: &str) -> bool {
 /// A compilation database, and the directory a project rooted at it spells its
 /// files against.
 pub(crate) struct Database {
-    /// The directory the search found the database from, which is the project
-    /// root rather than wherever the file itself landed: a database under
+    /// The scan root the client named, which is where the project is spelled
+    /// from rather than wherever the file itself landed: a database under
     /// `build/` describes the tree above it, and anchoring the answers at the
     /// build directory would spell every source file as `../src/...`.
     pub(crate) root: PathBuf,
@@ -422,104 +415,61 @@ pub(crate) struct Database {
     by_file: HashMap<PathBuf, Vec<usize>>,
 }
 
-/// Where a search for a compilation database ended.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct Location {
-    /// The database file itself.
-    file: PathBuf,
-    /// The directory it was found from, which the project spells its files
-    /// against.
-    root: PathBuf,
-}
-
-/// The compilation databases one helper process has looked for.
+/// The compilation databases one helper process has read.
 ///
 /// A helper answers about every unit of a project, and every unit of a project
-/// is governed by the same database. Searching and parsing it per request would
-/// make the cost of analysing a tree grow with the square of its size, all of
-/// it inside a process whose caller can see only how long it took.
+/// is governed by the same database. Parsing it per request would make the
+/// cost of analysing a tree grow with the square of its size, all of it inside
+/// a process whose caller can see only how long it took.
 ///
-/// Both halves of the answer are kept: where the search ended for a directory,
-/// and what reading that file produced. Failures are kept too, but as the
-/// sentence that explains them rather than as silence — a unit refused because
-/// its database is unreadable has to be told so, whether it is the first unit
-/// to ask or the thousandth.
+/// Failures are kept too, but as the sentence that explains them rather than
+/// as silence — a unit refused because its database is unreadable has to be
+/// told so, whether it is the first unit to ask or the thousandth.
 #[derive(Default)]
 pub(crate) struct Databases {
-    /// Where the search from one directory ended, or that it ended nowhere.
-    located: BTreeMap<PathBuf, Option<Location>>,
-    /// What reading each located file produced.
-    read: BTreeMap<Location, Result<Database, String>>,
+    /// What reading each named database, spelled from each root, produced.
+    read: BTreeMap<(PathBuf, PathBuf), Result<Database, String>>,
 }
 
 impl Databases {
-    /// The database governing `path`, found by walking up from it.
+    /// The database the client selected, read once.
     ///
-    /// `Ok(None)` when there is none, which is a tree this helper has nothing
-    /// to say about rather than a failure: a project that is entirely Rust has
-    /// no compilation database and is not missing one.
+    /// `Ok(None)` when the client selected none, which is a tree this helper
+    /// has nothing to say about rather than a failure: a project that is
+    /// entirely Rust has no compilation database and is not missing one. No
+    /// database is searched for: one found above a source could lie outside the
+    /// scanned tree, and the client never checked it.
     ///
-    /// `Err` carries why a database that is there could not be read. That is
-    /// not the same silence as a project with no database: one is fixed by
-    /// writing a database and the other by repairing the one that is there, so
-    /// the caller says it for every unit that asks and refuses to describe the
-    /// tree.
-    pub(crate) fn nearest(&mut self, path: &Path) -> Result<Option<&Database>, &str> {
-        let Some(start) = (if path.is_dir() {
-            Some(path)
-        } else {
-            path.parent()
-        }) else {
-            return Ok(None);
-        };
-        let Some(location) = self.locate(start) else {
+    /// `Err` carries why the named database could not be read. That is not the
+    /// same silence as a project with no database: one is fixed by writing a
+    /// database and the other by repairing the one that is there, so the caller
+    /// says it for every unit that asks and refuses to describe the tree.
+    pub(crate) fn selected(
+        &mut self,
+        named: Option<&CompilationDatabase>,
+    ) -> Result<Option<&Database>, &str> {
+        let Some(named) = named else {
             return Ok(None);
         };
         self.read
-            .entry(location)
-            .or_insert_with_key(|location| Database::read(&location.file, &location.root))
+            .entry((PathBuf::from(&named.path), PathBuf::from(&named.root)))
+            .or_insert_with_key(|(path, root)| Database::read(path, root))
             .as_ref()
             .map(Some)
             .map_err(String::as_str)
     }
-
-    /// Where the search from `start` ends, walking up only the first time.
-    fn locate(&mut self, start: &Path) -> Option<Location> {
-        if let Some(known) = self.located.get(start) {
-            return known.clone();
-        }
-        let found = search(start);
-        self.located.insert(start.to_path_buf(), found.clone());
-        found
-    }
-}
-
-/// Walk up from `start` for the database that governs it.
-///
-/// A database that is there stops the search rather than letting it walk
-/// further up, readable or not: the answer for this project is the file that
-/// was found, and finding somebody else's higher up would analyse this tree
-/// under another project's commands.
-fn search(start: &Path) -> Option<Location> {
-    for ancestor in start.ancestors() {
-        for location in LOCATIONS {
-            let candidate = ancestor.join(location);
-            if candidate.is_file() {
-                return Some(Location {
-                    file: candidate,
-                    root: ancestor.to_path_buf(),
-                });
-            }
-        }
-    }
-    None
 }
 
 impl Database {
     /// Read the database at `path`, spelling its answers against `root`.
     fn read(path: &Path, root: &Path) -> Result<Self, String> {
+        Self::read_within(path, root, codehelion_helper::tree_file_ceiling())
+    }
+
+    /// Read the database at `path` under a `max_bytes` ceiling.
+    fn read_within(path: &Path, root: &Path, max_bytes: u64) -> Result<Self, String> {
         // Followed through a link, the usual way a database is put at the root.
-        let text = read_text_bounded(path, Links::Follow, codehelion_helper::tree_file_ceiling())
+        let text = read_text_bounded(path, Links::Follow, max_bytes)
             .map_err(|error| format!("reading {}: {error}", path.display()))?;
         let raw: Vec<RecordedCommand> = serde_json::from_str(&text)
             .map_err(|error| format!("parsing {}: {error}", path.display()))?;

@@ -197,6 +197,13 @@ fn protocol_unit() -> UnitRef {
     }
 }
 
+fn ledger_database() -> codehelion_helper::protocol::CompilationDatabase {
+    codehelion_helper::protocol::CompilationDatabase {
+        path: "/projects/ledger/build/compile_commands.json".to_string(),
+        root: "/projects/ledger".to_string(),
+    }
+}
+
 /// Every envelope variant with each of its fields occupied, so changing a
 /// field or wire spelling cannot pass merely because compiler IR is pinned.
 fn protocol_envelope() -> ProtocolEnvelope {
@@ -217,6 +224,7 @@ fn protocol_envelope() -> ProtocolEnvelope {
                 id: 2,
                 body: RequestBody::DescribeBuild(codehelion_helper::protocol::DescribeBuild {
                     root: "/projects/ledger".to_string(),
+                    compilation_database: Some(ledger_database()),
                 }),
             },
             Request {
@@ -234,6 +242,7 @@ fn protocol_envelope() -> ProtocolEnvelope {
                         ],
                     }),
                     read_boundary: None,
+                    compilation_database: Some(ledger_database()),
                     want: Capability::ALL.into(),
                     permitted: vec![Execution::BuildScript, Execution::GeneratedSource],
                 }),
@@ -324,6 +333,19 @@ fn protocol_envelopes_match_the_document_for_this_version() {
 fn protocol_envelope_document_reads_back_as_what_produced_it() {
     let parsed: ProtocolEnvelope = serde_json::from_str(PROTOCOL_GOLDEN).unwrap();
     assert_eq!(parsed, protocol_envelope());
+}
+
+/// A request from a client that names no compilation database reads back with
+/// none, and one that names none writes no field for it.
+#[test]
+fn a_request_without_a_compilation_database_omits_it_both_ways() {
+    let frame = r#"{"protocol_version":1,"id":2,"body":{"kind":"describe_build","root":"/p"}}"#;
+    let parsed: Request = serde_json::from_str(frame).unwrap();
+    let RequestBody::DescribeBuild(described) = &parsed.body else {
+        panic!("a description request: {parsed:?}");
+    };
+    assert_eq!(described.compilation_database, None);
+    assert_eq!(serde_json::to_string(&parsed).unwrap(), frame);
 }
 
 /// Resource categories are optional for older producers, but when a current

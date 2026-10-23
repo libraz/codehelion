@@ -32,6 +32,9 @@ pub use settings::{
 
 pub(crate) use paths::configured_paths;
 
+/// Where the audit database goes when no configuration says otherwise.
+pub(crate) const DEFAULT_DATABASE: &str = ".codehelion/audit.db";
+
 /// Effective analysis configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
@@ -96,7 +99,7 @@ impl Default for Config {
             limits: Limits::default(),
             semantic: SemanticRules::default(),
             helpers: Helpers::default(),
-            database: PathBuf::from(".codehelion/audit.db"),
+            database: PathBuf::from(DEFAULT_DATABASE),
             seam: Vec::new(),
             seam_tracking: SeamTracking::default(),
             report: ReportSettings::default(),

@@ -252,6 +252,7 @@ fn dispatch(command: &Command, out: &mut impl Write) -> Result<Outcome> {
                         name,
                         configured_helper_path(name, &helpers),
                         codehelion_helper::SandboxRequest::unrestricted(),
+                        doctor_command::HANDSHAKE_TIMEOUT,
                     )
                 }),
                 out,
@@ -302,8 +303,12 @@ fn configured_helper_path<'a>(name: &str, helpers: &'a config::Helpers) -> Optio
     }
 }
 
-fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
+/// Refuse what the scan command line alone decides is unusable, before
+/// anything is read or recorded.
+fn validate_args(args: &ScanArgs) -> Result<()> {
     scan::check_mode_flags(args.mode.into(), scan::ModeBoundFlags::of_scan(args))?;
+    // Output choices that would only fail once the report is rendered.
+    scan::validate_report_output(&scan::ReportOutput::of_scan(args))?;
     // Only semantic analysis starts a compiler helper. Pinning one for a mode
     // that starts none reads as pinning the run, so it is refused with the mode
     // named rather than accepted and ignored.
@@ -314,6 +319,11 @@ fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
             args.mode.name()
         );
     }
+    Ok(())
+}
+
+fn scan_command(args: &ScanArgs, out: &mut impl Write) -> Result<Outcome> {
+    validate_args(args)?;
     // Resolved before the mode is dispatched on, because a permission that
     // nothing in the chosen mode could act on is refused rather than accepted:
     // Fast and Structural run nothing whatever they are told, and somebody who
@@ -353,7 +363,8 @@ use report_command::{explain, report_command};
 /// Every command that does not already hold its canonical root and loaded
 /// configuration goes through this, so an explicit database, a named
 /// configuration, and a discovered configuration receive identical handling;
-/// the file itself is chosen by [`scan::database_path_for`]. A command with no
+/// the file itself is chosen by [`scan::runtime::DatabaseLocation::select`],
+/// the same choice [`scan::database_path_for`] makes. A command with no
 /// `--path` passes `.`, the working directory.
 /// What the command then does with the file decides whether a default this
 /// build cannot open is stepped around; see [`scan::DatabaseUse`].
@@ -364,11 +375,29 @@ fn resolve_database(
     config_path: Option<&Path>,
     untrusted: bool,
 ) -> Result<(PathBuf, config::ResolvedConfig, PathBuf)> {
+    let (root, resolved_config, location) = locate_database(path, flag, config_path, untrusted)?;
+    let database = location.select(intent)?.announced();
+    Ok((root, resolved_config, database))
+}
+
+/// The canonical root, configuration and database location behind
+/// [`resolve_database`], for a command that has to describe more than one
+/// intent's answer, as `doctor` does.
+fn locate_database(
+    path: &Path,
+    flag: Option<&Path>,
+    config_path: Option<&Path>,
+    untrusted: bool,
+) -> Result<(
+    PathBuf,
+    config::ResolvedConfig,
+    scan::runtime::DatabaseLocation,
+)> {
     let root = codehelion_core::paths::canonical(path)
         .with_context(|| format!("resolving path {}", path.display()))?;
     let resolved_config = config::load(config_path, &root)?;
-    let database = scan::database_path_for(intent, &root, flag, &resolved_config, untrusted)?;
-    Ok((root, resolved_config, database))
+    let location = scan::runtime::database_location(&root, flag, &resolved_config, untrusted)?;
+    Ok((root, resolved_config, location))
 }
 
 mod baseline_command;

@@ -34,9 +34,9 @@ use std::time::{Duration, Instant};
 
 use crate::ir::{Unavailability, UnitRef};
 use crate::protocol::{
-    Absence, Analyze, BuildDescription, Capability, ClientIdentity, CompileCommandSelector,
-    DescribeBuild, Execution, FrameError, HelperIdentity, PROTOCOL_VERSION, Request, RequestBody,
-    Response, ResponseBody,
+    Absence, Analyze, BuildDescription, Capability, ClientIdentity, CompilationDatabase,
+    CompileCommandSelector, DescribeBuild, Execution, FrameError, HelperIdentity, PROTOCOL_VERSION,
+    Request, RequestBody, Response, ResponseBody,
 };
 use crate::sandbox::{HelperProcess, SandboxRequest, spawn};
 
@@ -90,6 +90,8 @@ pub struct Helper {
     /// still be waiting in the channel for a later request.
     poisoned_after_timeout: bool,
     permitted: Vec<Execution>,
+    /// The compilation database the caller selected for every request.
+    compilation_database: Option<CompilationDatabase>,
     /// What the most recent answer said about the unit it was about.
     ///
     /// Kept apart from [`Self::stderr`] because it arrives with the answer:
@@ -164,6 +166,7 @@ impl Helper {
             next_id: 0,
             poisoned_after_timeout: false,
             permitted: Vec::new(),
+            compilation_database: None,
             answer_diagnostics: Vec::new(),
         };
         helper.shake_hands()?;
@@ -202,6 +205,16 @@ impl Helper {
     #[must_use]
     pub fn permitting(mut self, permitted: Vec<Execution>) -> Self {
         self.permitted = permitted;
+        self
+    }
+
+    /// Name the compilation database every description and analysis reads.
+    ///
+    /// Selected by the caller, which decides which database governs a scan; a
+    /// C or C++ helper reads this one rather than searching for its own.
+    #[must_use]
+    pub fn reading_database(mut self, database: Option<CompilationDatabase>) -> Self {
+        self.compilation_database = database;
         self
     }
 
@@ -355,6 +368,7 @@ impl Helper {
             unit: unit.clone(),
             compile_command: compile_command.cloned(),
             read_boundary: read_boundary.map(|boundary| boundary.display().to_string()),
+            compilation_database: self.compilation_database.clone(),
             want,
             // Not narrowed to what the helper said it acts on. A permission it
             // will not act on has to be refused where somebody can be told
@@ -399,6 +413,7 @@ impl Helper {
     pub fn describe(&mut self, root: &Path) -> Result<BuildDescription, HelperError> {
         let answer = self.exchange(RequestBody::DescribeBuild(DescribeBuild {
             root: root.display().to_string(),
+            compilation_database: self.compilation_database.clone(),
         }))?;
         match answer {
             ResponseBody::Build(build) => Ok(*build),

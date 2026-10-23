@@ -81,7 +81,7 @@ fn entropy_bits(files: &[InputFile<'_>], instance: &Instance, config: &EngineCon
 /// Instances are deduplicated across pairs, members are sorted, and the
 /// canonical instance is the first member under `(file, token range)` order.
 /// Groups come back sorted by their canonical instance, so output order does
-/// not depend on input order. Every group passes [`admissible_members`], so no
+/// not depend on input order. Every group passes the admission check, so no
 /// two members overlap in one file.
 #[must_use]
 pub fn group_pairs(

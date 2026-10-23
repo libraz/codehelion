@@ -91,12 +91,6 @@ fn write_report_options_internal(
     model: &Report,
     include_artifact_guidance: bool,
 ) -> Result<()> {
-    validate_presentation_options(
-        options.format,
-        options.show_suppressed,
-        options.show_siblings,
-        options.show_near_misses,
-    )?;
     let text = match options.format {
         Format::Json => model.to_json().context("serializing the JSON report")?,
         Format::Sarif => model.to_sarif().context("serializing the SARIF report")?,
@@ -659,12 +653,6 @@ fn write_partitioned_reports_internal(
     cross_language_not_run: Option<&report::CrossLanguageComparisonNotRun>,
     include_artifact_guidance: bool,
 ) -> Result<()> {
-    validate_presentation_options(
-        options.format,
-        options.show_suppressed,
-        options.show_siblings,
-        options.show_near_misses,
-    )?;
     if let ([model], None, None, None, None) = (
         models,
         cross_variant,

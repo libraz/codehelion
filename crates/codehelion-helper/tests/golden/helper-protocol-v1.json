@@ -16,7 +16,11 @@
       "id": 2,
       "body": {
         "kind": "describe_build",
-        "root": "/projects/ledger"
+        "root": "/projects/ledger",
+        "compilation_database": {
+          "path": "/projects/ledger/build/compile_commands.json",
+          "root": "/projects/ledger"
+        }
       }
     },
     {
@@ -39,6 +43,10 @@
           ]
         },
         "read_boundary": null,
+        "compilation_database": {
+          "path": "/projects/ledger/build/compile_commands.json",
+          "root": "/projects/ledger"
+        },
         "want": [
           "types",
           "name_resolution",

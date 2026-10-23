@@ -39,6 +39,14 @@ const MAX_ATTEMPTS: usize = 3;
 /// the private `SQLite` connection creates its own private shared-memory file.
 const SNAPSHOT_SIDECARS: &[&str] = &["-wal", "-journal"];
 
+/// The most bytes of any one member a private copy hashes and copies.
+///
+/// The private copy is the only route on which preflight reads the database's
+/// bytes itself, so this bounds what a planted database can cost in time and
+/// temporary disk. The scan's per-file ceiling does not apply: the database is
+/// the tool's own accumulating output, not a source file.
+const MAX_SNAPSHOT_MEMBER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Time one private validation connection waits for a writer to finish.
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -91,7 +99,7 @@ pub(super) fn validate_existing(path: &Path) -> Result<(), StoreError> {
         result @ (Ok(()) | Err(StoreError::UnsupportedSchema { .. })) => result,
         // Anything else means the database could not be read this way, which a
         // private copy can still settle.
-        Err(_) => validate_private_copy(path),
+        Err(_) => validate_private_copy(path, MAX_SNAPSHOT_MEMBER_BYTES),
     }
 }
 
@@ -109,22 +117,23 @@ fn validate_in_place(path: &Path) -> Result<(), StoreError> {
     schema::validate_existing(&conn)
 }
 
-/// Validate a private copy of the database and its sidecars.
-fn validate_private_copy(path: &Path) -> Result<(), StoreError> {
+/// Validate a private copy of the database and its sidecars, refusing any
+/// member over `ceiling` bytes before it is copied.
+fn validate_private_copy(path: &Path, ceiling: u64) -> Result<(), StoreError> {
     record_private_copy();
     for _attempt in 0..MAX_ATTEMPTS {
-        let before = stamp_members(path)?;
+        let before = stamp_members(path, ceiling)?;
         let snapshot = tempfile::tempdir().map_err(|error| io_error(&error))?;
         let snapshot_path = snapshot_path(snapshot.path(), path);
 
-        copy_snapshot_members(path, &snapshot_path)?;
-        let after_copy = stamp_members(path)?;
+        copy_snapshot_members(path, &snapshot_path, ceiling)?;
+        let after_copy = stamp_members(path, ceiling)?;
         if before != after_copy {
             continue;
         }
 
         let result = validate_snapshot(&snapshot_path);
-        let after_validation = stamp_members(path)?;
+        let after_validation = stamp_members(path, ceiling)?;
         if before != after_validation {
             continue;
         }
@@ -223,21 +232,25 @@ fn snapshot_path(directory: &Path, original: &Path) -> PathBuf {
     directory.join(name)
 }
 
-fn stamp_members(path: &Path) -> Result<Vec<(String, FileStamp)>, StoreError> {
+fn stamp_members(path: &Path, ceiling: u64) -> Result<Vec<(String, FileStamp)>, StoreError> {
     let mut members = Vec::with_capacity(1 + SNAPSHOT_SIDECARS.len());
-    members.push(("main".to_string(), stamp(path, links_for(None))?));
+    members.push(("main".to_string(), stamp(path, links_for(None), ceiling)?));
     for suffix in SNAPSHOT_SIDECARS {
         members.push((
             (*suffix).to_string(),
-            stamp(&sidecar_path(path, suffix), links_for(Some(suffix)))?,
+            stamp(
+                &sidecar_path(path, suffix),
+                links_for(Some(suffix)),
+                ceiling,
+            )?,
         ));
     }
     Ok(members)
 }
 
-fn stamp(path: &Path, links: Links) -> Result<FileStamp, StoreError> {
+fn stamp(path: &Path, links: Links, ceiling: u64) -> Result<FileStamp, StoreError> {
     let mut hasher = blake3::Hasher::new();
-    match read_regular_bounded(path, links, u64::MAX, &mut hasher) {
+    match read_regular_bounded(path, links, ceiling, &mut hasher) {
         Ok(len) => Ok(FileStamp {
             exists: true,
             len,
@@ -252,21 +265,26 @@ fn stamp(path: &Path, links: Links) -> Result<FileStamp, StoreError> {
     }
 }
 
-fn copy_snapshot_members(original: &Path, snapshot: &Path) -> Result<(), StoreError> {
-    copy_one(original, snapshot, links_for(None))?;
+fn copy_snapshot_members(original: &Path, snapshot: &Path, ceiling: u64) -> Result<(), StoreError> {
+    copy_one(original, snapshot, links_for(None), ceiling)?;
     for suffix in SNAPSHOT_SIDECARS {
         let source = sidecar_path(original, suffix);
         let links = links_for(Some(suffix));
-        if stamp(&source, links)?.exists {
-            copy_one(&source, &sidecar_path(snapshot, suffix), links)?;
+        if stamp(&source, links, ceiling)?.exists {
+            copy_one(&source, &sidecar_path(snapshot, suffix), links, ceiling)?;
         }
     }
     Ok(())
 }
 
-fn copy_one(source: &Path, destination: &Path, links: Links) -> Result<(), StoreError> {
+fn copy_one(
+    source: &Path,
+    destination: &Path,
+    links: Links,
+    ceiling: u64,
+) -> Result<(), StoreError> {
     let mut destination_file = File::create(destination).map_err(|error| io_error(&error))?;
-    match read_regular_bounded(source, links, u64::MAX, &mut destination_file) {
+    match read_regular_bounded(source, links, ceiling, &mut destination_file) {
         Ok(_) => {}
         Err(error) if error.is_not_found() => {
             return Err(StoreError::DatabaseChangedDuringPreflight);
@@ -407,12 +425,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("audit.db");
         populated(&path);
-        let before = stamp(&path, links_for(None)).unwrap();
+        let before = stamp(&path, links_for(None), u64::MAX).unwrap();
 
         validate_existing(&path).expect("the baseline is the one this build writes");
 
         assert_eq!(
-            stamp(&path, links_for(None)).unwrap(),
+            stamp(&path, links_for(None), u64::MAX).unwrap(),
             before,
             "the database was written to"
         );
@@ -421,7 +439,12 @@ mod tests {
             // the empty write-ahead file that closing it removed. What must
             // not appear is content: a byte in either sidecar would mean
             // something was recovered or checkpointed to answer a question.
-            let sidecar = stamp(&sidecar_path(&path, suffix), links_for(Some(suffix))).unwrap();
+            let sidecar = stamp(
+                &sidecar_path(&path, suffix),
+                links_for(Some(suffix)),
+                u64::MAX,
+            )
+            .unwrap();
             assert_eq!(sidecar.len, 0, "{suffix} carries content after validating");
         }
     }
@@ -480,5 +503,21 @@ mod tests {
             "{error:?}"
         );
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A member over the private-copy ceiling is refused when it is first
+    /// fingerprinted, before anything is copied.
+    #[test]
+    fn a_member_over_the_private_copy_ceiling_is_refused_before_it_is_copied() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.db");
+        populated(&path);
+
+        let error = validate_private_copy(&path, 16).expect_err("the database exceeds 16 bytes");
+
+        assert!(
+            matches!(&error, StoreError::PreflightIo { message } if message.contains("16-byte limit")),
+            "{error:?}"
+        );
     }
 }

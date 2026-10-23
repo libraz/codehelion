@@ -8,7 +8,7 @@ fn build_description_uses_the_configured_helper_timeout() {
     let mut config = Config::default();
     config.limits.helper_timeout_ms = 17;
     assert_eq!(
-        helper_timeout(&config),
+        helper_timeout(&config.limits),
         std::time::Duration::from_millis(17)
     );
 }
@@ -23,6 +23,7 @@ fn a_run_that_needs_a_compiler_says_which_program_supplies_it() {
         &ExecutionPolicy::deny_all(),
         SandboxRequest::unrestricted(),
         &crate::config::Helpers::default(),
+        helper_timeout(&Config::default().limits),
     ) {
         Err(error) => {
             let text = format!("{error:#}");
@@ -119,38 +120,8 @@ fn denied_build_scripts_keep_their_cost_and_exact_permission() {
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn untrusted_semantic_requires_an_enforceable_memory_limit() {
-    let args = ScanArgs {
-        sort: SortAxis::default(),
-        min_identifier_jaccard: None,
-        path: PathBuf::from("."),
-        mode: Mode::Semantic,
-        format: Format::Text,
-        output: None,
-        force: false,
-        config: None,
-        helpers: Vec::new(),
-        no_ignore: false,
-        follow_links: false,
-        compile_commands: None,
-        jobs: None,
-        db: None,
-        baseline: None,
-        baseline_mode: crate::cli::BaselineMode::Suppress,
-        allow_execution: None,
-        compare_build_variants: false,
-        compare_languages: false,
-        show_suppressed: false,
-        show_siblings: false,
-        siblings_by_signature: false,
-        show_near_misses: false,
-        include_trivial: false,
-        no_reuse: false,
-        include_vendored: false,
-        view: crate::cli::ViewArgs::default(),
-        fail_on_findings: false,
-        untrusted: true,
-    };
-    let error = semantic_sandbox(&args).expect_err("portable build cannot enforce it");
+    let limits = helper_limits(&Config::default(), true);
+    let error = semantic_sandbox(true, &limits).expect_err("portable build cannot enforce it");
     assert!(
         format!("{error:#}").contains("OS memory containment is unavailable"),
         "{error:#}"
@@ -160,38 +131,8 @@ fn untrusted_semantic_requires_an_enforceable_memory_limit() {
 #[cfg(target_os = "linux")]
 #[test]
 fn untrusted_semantic_requires_a_linux_memory_limit() {
-    let args = ScanArgs {
-        sort: SortAxis::default(),
-        min_identifier_jaccard: None,
-        path: PathBuf::from("."),
-        mode: Mode::Semantic,
-        format: Format::Text,
-        output: None,
-        force: false,
-        config: None,
-        helpers: Vec::new(),
-        no_ignore: false,
-        follow_links: false,
-        compile_commands: None,
-        jobs: None,
-        db: None,
-        baseline: None,
-        baseline_mode: crate::cli::BaselineMode::Suppress,
-        allow_execution: None,
-        compare_build_variants: false,
-        compare_languages: false,
-        show_suppressed: false,
-        show_siblings: false,
-        siblings_by_signature: false,
-        show_near_misses: false,
-        include_trivial: false,
-        no_reuse: false,
-        include_vendored: false,
-        view: crate::cli::ViewArgs::default(),
-        fail_on_findings: false,
-        untrusted: true,
-    };
-    let request = semantic_sandbox(&args).expect("Linux can enforce the requested ceiling");
+    let limits = helper_limits(&Config::default(), true);
+    let request = semantic_sandbox(true, &limits).expect("Linux can enforce the requested ceiling");
     assert_eq!(
         request.max_memory_bytes(),
         codehelion_core::execution::Limits::untrusted().max_subprocess_bytes
@@ -204,19 +145,15 @@ fn untrusted_semantic_requires_a_linux_memory_limit() {
 /// depending on what happens to be installed beside the scanner.
 #[test]
 fn a_helper_that_reads_nothing_in_this_tree_is_not_part_of_the_run() {
-    let Ok(compilers) = Compilers::found(
-        &ExecutionPolicy::deny_all(),
-        SandboxRequest::unrestricted(),
-        &crate::config::Helpers::default(),
-    ) else {
-        return;
-    };
+    let compilers = fixture_compilers();
     let rust_only = LanguageSelection {
         rust: true,
         c: false,
         cpp: false,
     };
-    for helper in compilers.at_work(rust_only) {
+    let at_work = compilers.at_work(rust_only);
+    assert_eq!(at_work.len(), 1, "only the Rust helper reads this tree");
+    for helper in at_work {
         assert!(
             helper.component.analyses.contains(&Language::Rust),
             "{} was asked about a tree it reads nothing in",
@@ -262,13 +199,71 @@ fn an_empty_tree_is_not_reported_as_a_missing_compiler() {
         fail_on_findings: false,
         untrusted: false,
     };
-    let Ok(compilers) = Compilers::found(
-        &ExecutionPolicy::deny_all(),
-        SandboxRequest::unrestricted(),
-        &crate::config::Helpers::default(),
-    ) else {
-        return;
-    };
+    let compilers = fixture_compilers();
     let mut out = Vec::new();
     run_with(&args, &mut out, Some(&compilers)).expect("an empty tree scans");
+}
+
+/// Both helpers described by fixture facts, so these cases run whatever is
+/// installed on the machine.
+fn fixture_compilers() -> Compilers {
+    let answering = |component: codehelion_core::doctor::HelperComponent, path: &str| {
+        installed_helper(
+            component,
+            HelperFacts {
+                path: PathBuf::from(path),
+                state: HelperState::Answered(Greeting {
+                    version: "1.0.0".to_owned(),
+                    protocol: 2,
+                    toolchains: vec!["fixture".to_owned()],
+                    capabilities: vec!["types".to_owned()],
+                    executes: Vec::new(),
+                }),
+            },
+            &ExecutionPolicy::deny_all(),
+            SandboxRequest::unrestricted(),
+        )
+        .expect("an answering fixture helper is admitted")
+    };
+    Compilers {
+        installed: vec![
+            answering(RUST_HELPER, "/tool/codehelion-backend-rust"),
+            answering(CLANG_HELPER, "/tool/codehelion-backend-clang"),
+        ],
+    }
+}
+
+/// Helpers read the tree's own files, so every semantic run hands them the
+/// file ceiling the scanner reads the same tree under; an untrusted run hands
+/// them the lowered one.
+#[test]
+fn helpers_are_held_to_the_scanners_file_ceiling() {
+    let mut config = Config::default();
+    config.limits.max_file_bytes = 4096;
+    let trusted = semantic_sandbox(false, &helper_limits(&config, false))
+        .expect("a trusted run needs no OS containment");
+    assert_eq!(trusted.max_file_bytes(), Some(4096));
+    assert_eq!(trusted.max_memory_bytes(), None);
+
+    config.limits.max_file_bytes = u64::MAX;
+    let untrusted = helper_limits(&config, true);
+    assert_eq!(
+        untrusted.max_file_bytes,
+        codehelion_core::execution::Limits::untrusted().max_file_bytes
+    );
+}
+
+#[test]
+fn the_handshake_deadline_is_the_configured_helper_timeout() {
+    let mut config = Config::default();
+    config.limits.helper_timeout_ms = 60_000;
+    assert_eq!(
+        helper_timeout(&helper_limits(&config, false)),
+        std::time::Duration::from_secs(60)
+    );
+    assert!(
+        helper_timeout(&helper_limits(&config, true))
+            <= codehelion_core::execution::Limits::untrusted().helper_timeout,
+        "an untrusted run lowers the handshake deadline with the rest"
+    );
 }

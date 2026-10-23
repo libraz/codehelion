@@ -30,8 +30,8 @@ use std::path::Path;
 mod database;
 
 pub(crate) use database::{
-    DatabaseUse, database_path_for, incompatible_database_advice,
-    incompatible_database_replacement, readable_here,
+    DatabaseLocation, DatabaseUse, database_location, database_path_for,
+    incompatible_database_advice,
 };
 
 /// Maximum parser workers accepted from either the command line or config.

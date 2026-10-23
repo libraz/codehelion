@@ -239,7 +239,32 @@ fn scanned<'a>(group: &'a str, tokens: u64, sites: &[(&'a str, &'a str)]) -> Sca
             .iter()
             .map(|(file, unit)| (*file, Some(*unit)))
             .collect(),
+        freezable: true,
     }
+}
+
+/// A group another rule hid was never the baseline's to take, so a scan of the
+/// tree the baseline was made from reports nothing new because of it.
+#[test]
+fn a_group_hidden_by_another_rule_is_not_new_against_a_baseline() {
+    let mut hidden = group("cc33");
+    hidden.suppressed_by = Some(StoredSuppressionRef {
+        scope: "path_glob".to_string(),
+        pattern: "vendor/**".to_string(),
+        reason: None,
+        active: Some(true),
+    });
+    let baseline = Baseline::from_run(&origin(), &[group("aa11"), hidden], "2026-07-27T01:00:00Z");
+    let still_hidden = ScanGroup {
+        freezable: could_be_frozen(false, Some("path_glob")),
+        ..scanned("cc33", 30, &[("vendor/a.rs", "parse")])
+    };
+    let delta = only_partition(&baseline)
+        .delta(&[scanned("aa11", 40, &[("src/a.rs", "parse")]), still_hidden]);
+    assert!(delta.appeared.is_empty(), "{:?}", delta.appeared);
+    assert!(delta.gone.is_empty(), "gone: {:?}", delta.gone);
+    assert!(could_be_frozen(false, Some(BASELINE_SCOPE)));
+    assert!(!could_be_frozen(true, None));
 }
 
 #[test]

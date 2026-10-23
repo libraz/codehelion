@@ -99,6 +99,23 @@ pub(crate) fn load_baseline(
     }))
 }
 
+/// Whether a baseline made from this run would freeze `group`, decided by the
+/// rule [`crate::baseline::could_be_frozen`] that freezing itself uses.
+fn freezable(group: &report::Group) -> bool {
+    let suppressed = group.suppressed.as_ref();
+    crate::baseline::could_be_frozen(
+        suppressed.is_some_and(|reason| reason.kind == report::SuppressionKind::Noise),
+        suppressed
+            .filter(|reason| reason.kind == report::SuppressionKind::Rule)
+            .map(|reason| reason.scope.as_deref().unwrap_or_default()),
+    )
+}
+
+/// Whether the baseline froze `group`.
+fn covered_by(baseline: &ScanBaseline, group: &report::Group) -> bool {
+    baseline.covered.contains_key(group.fingerprint.as_str())
+}
+
 /// Count this run against the baseline, and mark each group with where it
 /// stands relative to it.
 ///
@@ -120,6 +137,7 @@ pub(crate) fn apply_baseline(
                 .iter()
                 .map(|member| (member.file.as_str(), member.unit.as_deref()))
                 .collect(),
+            freezable: freezable(group),
         })
         .collect();
     let delta = baseline.entries.delta(&scanned);
@@ -137,6 +155,11 @@ pub(crate) fn apply_baseline(
     for group in groups.iter_mut() {
         let appeared = derived.get(group.fingerprint.as_str());
         let expansion = expanded.get(group.fingerprint.as_str());
+        // Hidden by another rule and never frozen: the baseline has no say.
+        if appeared.is_none() && !covered_by(baseline, group) && !freezable(group) {
+            group.baseline = None;
+            continue;
+        }
         group.baseline = Some(report::GroupBaseline {
             state: if expansion.is_some() {
                 report::GROUP_EXPANDED

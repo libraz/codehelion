@@ -3,7 +3,7 @@ use rusqlite::Connection;
 
 #[test]
 fn a_cpp_tree_is_answered_about_rather_than_reported_as_unreadable() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
 
@@ -62,7 +62,7 @@ fn a_cpp_tree_is_answered_about_rather_than_reported_as_unreadable() {
 
 #[test]
 fn semantic_partition_persistence_failure_publishes_unrecorded_partitions() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant fixture");
     let initial = cmd()
@@ -142,7 +142,7 @@ fn semantic_partition_persistence_failure_publishes_unrecorded_partitions() {
 
 #[test]
 fn invalid_semantic_test_path_glob_is_a_configuration_error_without_an_analysis_hint() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant fixture");
     std::fs::write(
@@ -167,7 +167,7 @@ fn invalid_semantic_test_path_glob_is_a_configuration_error_without_an_analysis_
 
 #[test]
 fn shared_discovery_exclusions_are_counted_once_across_semantic_partitions() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let dir = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("header-only", dir.path()).expect("plant the fixture");
     std::fs::write(
@@ -191,7 +191,7 @@ fn shared_discovery_exclusions_are_counted_once_across_semantic_partitions() {
 
 #[test]
 fn a_semantic_baseline_freezes_and_reapplies_every_completed_build_variant() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let directory = tempfile::tempdir().expect("temp dir");
     let root =
         codehelion_fixtures::copy_cpp("header-only", directory.path()).expect("plant fixture");
@@ -252,7 +252,7 @@ fn a_semantic_baseline_freezes_and_reapplies_every_completed_build_variant() {
 /// rule used for other SOGs without recovering names from Clang USRs.
 #[test]
 fn cplusplus_standard_api_calls_form_a_restricted_semantic_finding() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -312,7 +312,7 @@ fn cplusplus_standard_api_calls_form_a_restricted_semantic_finding() {
 
 #[test]
 fn cplusplus_semantic_scan_requires_a_helper_that_reads_cpp() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -342,7 +342,7 @@ fn cplusplus_semantic_scan_requires_a_helper_that_reads_cpp() {
 
 #[test]
 fn cplusplus_plain_range_loops_match_as_closed_collections() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -395,7 +395,7 @@ fn cplusplus_plain_range_loops_match_as_closed_collections() {
 /// one before accumulating is a different sequence and stays outside.
 #[test]
 fn cplusplus_plain_range_loops_match_as_closed_reductions() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -412,7 +412,7 @@ fn cplusplus_plain_range_loops_match_as_closed_reductions() {
 /// lifetime, including the explicit resource edge persisted with the SOG.
 #[test]
 fn cplusplus_direct_lock_guard_lifetimes_form_a_restricted_semantic_finding() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -457,7 +457,7 @@ fn cplusplus_direct_lock_guard_lifetimes_form_a_restricted_semantic_finding() {
 /// collects without transforming stays out of it.
 #[test]
 fn cplusplus_standard_algorithm_calls_match_across_transformations() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -475,7 +475,7 @@ fn cplusplus_standard_algorithm_calls_match_across_transformations() {
 /// stays outside.
 #[test]
 fn cplusplus_standard_filter_calls_match_across_predicates() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");
@@ -554,7 +554,7 @@ fn assert_sequence_family(
 /// offsets measured against a different copy of the file.
 #[test]
 fn a_cpp_answer_is_about_the_bytes_the_scan_read() {
-    require_clang_helper();
+    require_prerequisite(&CLANG_HELPER, &doctor());
     let directory = tempfile::tempdir().expect("temp dir");
     let root = codehelion_fixtures::copy_cpp("overload-resolution", directory.path())
         .expect("plant fixture");

@@ -205,7 +205,7 @@ fn record_evaluation(
     // tree, if there is one, and the run recorded is the first of them: any
     // one partition names the invocation. Without a scan there is nothing to
     // map, and every count stays zero beside a run id that says why.
-    let invocation = store.latest_completed_invocation(&root_path)?;
+    let invocation = crate::report_command::invocation_partitions(&store, Some(&root_path))?;
     let scan_run_id = invocation.first().map(|origin| origin.id);
     let mut locations = Vec::new();
     for origin in &invocation {

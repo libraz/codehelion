@@ -101,10 +101,23 @@ pub(crate) fn produce(
 }
 
 fn compiler_for(path: &Path) -> Option<&'static str> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    driver_for(path).filter(|driver| compiler_available(driver))
+}
+
+/// The driver that compiles `path` in the language discovery classified it as.
+///
+/// A single letter's case is meaningful, as in discovery: `.c` is C and `.C`
+/// is C++. Longer extensions mean the same in any case.
+fn driver_for(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?;
+    let extension = if extension.len() > 1 {
+        extension.to_ascii_lowercase()
+    } else {
+        extension.to_string()
+    };
     match extension.as_str() {
-        "c" => compiler_available("clang").then_some("clang"),
-        "cc" | "cp" | "cpp" | "cxx" | "c++" => compiler_available("clang++").then_some("clang++"),
+        "c" => Some("clang"),
+        "cc" | "cp" | "cpp" | "cxx" | "c++" | "C" => Some("clang++"),
         _ => None,
     }
 }
@@ -309,6 +322,14 @@ mod tests {
     use super::*;
     use codehelion_helper::ir::{Anchor, SourceRange};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_capital_c_extension_is_compiled_as_cpp_like_discovery_reads_it() {
+        assert_eq!(driver_for(Path::new("a.C")), Some("clang++"));
+        assert_eq!(driver_for(Path::new("a.c")), Some("clang"));
+        assert_eq!(driver_for(Path::new("a.CPP")), Some("clang++"));
+        assert_eq!(driver_for(Path::new("a.h")), None);
+    }
 
     #[test]
     fn compiler_availability_is_probed_once_per_executable() {

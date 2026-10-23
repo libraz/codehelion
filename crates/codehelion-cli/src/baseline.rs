@@ -369,11 +369,13 @@ impl BaselinePartition {
         let entries = groups
             .iter()
             .filter(|group| {
-                group.suppress_reason.is_none()
-                    && group
+                could_be_frozen(
+                    group.suppress_reason.is_some(),
+                    group
                         .suppressed_by
                         .as_ref()
-                        .is_none_or(|suppression| suppression.scope == "baseline")
+                        .map(|suppression| suppression.scope.as_str()),
+                )
             })
             .map(Entry::from_group)
             .collect();
@@ -460,6 +462,26 @@ fn is_baseline_detector_component(component: &str) -> bool {
     component != "ranking" && component != codehelion_store::compiler::IR_SCHEMA_COMPONENT
 }
 
+/// The suppression-rule scope a baseline applied in suppress mode registers.
+pub(crate) const BASELINE_SCOPE: &str = "baseline";
+
+/// Whether a group with this suppression would be frozen by a baseline made
+/// from its run: hidden by neither engine noise nor a rule other than a
+/// baseline.
+///
+/// A group outside this set was never the baseline's to take, so it can be
+/// neither carried by one nor new against one.
+#[must_use]
+pub(crate) fn could_be_frozen(noise: bool, rule_scope: Option<&str>) -> bool {
+    !noise && rule_scope.is_none_or(|scope| scope == BASELINE_SCOPE)
+}
+
+/// Whether `group` is new against the frozen set: one a baseline made from its
+/// run would have frozen, and that this baseline did not.
+fn is_new_against_baseline(frozen: &BTreeMap<&str, &Entry>, group: &ScanGroup<'_>) -> bool {
+    group.freezable && !frozen.contains_key(group.group)
+}
+
 /// One group of the scan a baseline is being read against.
 #[derive(Debug, Clone)]
 pub struct ScanGroup<'a> {
@@ -472,6 +494,9 @@ pub struct ScanGroup<'a> {
     pub duplicated_tokens: u64,
     /// Where each occurrence sits.
     pub sites: BTreeSet<Site<'a>>,
+    /// Whether a baseline made from this run would freeze the group: it is
+    /// not noise, and no rule other than a baseline hides it.
+    pub freezable: bool,
 }
 
 /// What a scan found relative to the baseline it was given.
@@ -484,8 +509,8 @@ pub struct ScanGroup<'a> {
 pub struct Delta {
     /// Entries the scan no longer reports, in baseline order.
     pub gone: Vec<Gone>,
-    /// Groups the scan reports that the baseline did not freeze, in scan
-    /// order.
+    /// Groups the scan reports that the baseline did not freeze and a
+    /// baseline made from this run would have, in scan order.
     pub appeared: Vec<Appeared>,
     /// Frozen groups that now have more occurrences than the baseline froze.
     pub expanded: Vec<Expanded>,
@@ -580,7 +605,7 @@ impl BaselinePartition {
                 .collect(),
             appeared: reported
                 .iter()
-                .filter(|group| !frozen.contains_key(group.group))
+                .filter(|group| is_new_against_baseline(&frozen, group))
                 .map(|group| Appeared {
                     group: group.group.to_string(),
                     duplicated_tokens: group.duplicated_tokens,

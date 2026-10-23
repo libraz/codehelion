@@ -80,8 +80,8 @@ fn output_flag_preserves_an_existing_file_unless_forced() {
     );
     assert_database_hint_lines(&failed.stderr, None, 0);
     assert!(
-        dir.path().join(".codehelion").is_dir(),
-        "database directory is created before report output is attempted",
+        !dir.path().join(".codehelion").exists(),
+        "an existing destination is refused before anything is read or recorded",
     );
     assert_eq!(
         std::fs::read_to_string(&destination).expect("read preserved report"),

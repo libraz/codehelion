@@ -50,7 +50,7 @@ pub(crate) fn baseline(action: &BaselineAction, out: &mut impl Write) -> Result<
     }
     let store = scan::open_recorded_store(&db_path)?;
     let root_path = scan::path_key(&root);
-    let invocation = store.latest_completed_invocation(&root_path)?;
+    let invocation = crate::report_command::invocation_partitions(&store, Some(&root_path))?;
     if invocation.is_empty() {
         bail!(
             "{} holds no completed scan of {}; run `codehelion scan` first",
@@ -150,6 +150,10 @@ pub(crate) fn config_command(action: &ConfigAction, out: &mut impl Write) -> Res
                     writeln!(out, "# source: {}", path.display())?;
                 }
                 ConfigSource::Defaults => writeln!(out, "# source: built-in defaults")?,
+            }
+            // What a scan from here would disregard is said beside what it shows.
+            if let Some(note) = config::disregarded_helpers_note(&resolved) {
+                writeln!(out, "# note: {note}")?;
             }
             write!(out, "{}", resolved.config.to_display_toml()?)?;
         }

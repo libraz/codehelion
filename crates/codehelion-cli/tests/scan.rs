@@ -14,6 +14,7 @@ use assert_cmd::Command;
 use codehelion_core::discovery::{BuildVariant, Language, LanguageSelection};
 use codehelion_eval::detected;
 use codehelion_eval::metrics::stability;
+use codehelion_fixtures::{RUST_HELPER, require_prerequisite};
 use codehelion_store::artifact::{
     ARTIFACT_ANALYSIS_CLONE_GROUP_SAVINGS_SCHEMA_VERSION,
     ARTIFACT_ANALYSIS_CORRELATION_SCHEMA_VERSION, ArtifactAnalysisCloneGroupSavings,
@@ -128,21 +129,10 @@ fn structural_json_with_jobs(root: &Path, jobs: usize, database: &Path) -> serde
     serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
 }
 
-/// Require the helper that answers about Rust.
-///
-/// The helper is a workspace binary, so a suite run that cannot find it has an
-/// environment to fix; a semantic test that passed without a scan having run
-/// would say nothing about semantic mode.
-fn require_rust_helper() {
+/// What `doctor` says this machine has, which the semantic tests require.
+fn doctor() -> String {
     let output = cmd().arg("doctor").output().expect("doctor should run");
-    let report = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        report
-            .lines()
-            .any(|line| line.contains("rust-compiler-helper") && line.contains("available")),
-        "the Rust semantic helper is unavailable, so these tests cannot answer about Rust.\n\
-         Run `cargo build -p codehelion-backend-rust` to build it.\n{report}"
-    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn open_store(root: &Path) -> Store {
@@ -322,3 +312,32 @@ mod semantic;
 mod sorting_and_comparison;
 #[path = "scan/suppression.rs"]
 mod suppression;
+
+/// Output choices decidable from the command line are refused before the scan
+/// reads or records anything: no database directory is created.
+#[test]
+fn output_choices_are_refused_before_any_scan_work() {
+    for mode in ["fast", "structural", "semantic"] {
+        let dir = fixture();
+        cmd()
+            .current_dir(dir.path())
+            .args([
+                "scan",
+                ".",
+                "--mode",
+                mode,
+                "--format",
+                "json",
+                "--show-suppressed",
+            ])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(
+                "--show-suppressed applies only to text reports",
+            ));
+        assert!(
+            !dir.path().join(".codehelion").exists(),
+            "{mode}: nothing was recorded"
+        );
+    }
+}

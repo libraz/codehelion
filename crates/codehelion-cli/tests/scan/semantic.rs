@@ -54,7 +54,7 @@ fn a_scan_below_the_workspace_root_still_gets_what_the_compiler_resolved() {
     std::fs::write(root.join("member/src/other.rs"), CHECKSUM_RS).unwrap();
     write_lockfile(root, &[("member", &[])]);
 
-    require_rust_helper();
+    require_prerequisite(&RUST_HELPER, &doctor());
     let output = cmd()
         .current_dir(root.join("member"))
         .args(["scan", ".", "--mode", "semantic", "--format", "json"])
@@ -122,7 +122,7 @@ fn one_tree_read_with_different_features_is_not_reported_as_the_other() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout)
             .expect("stdout is one JSON document")
     };
-    require_rust_helper();
+    require_prerequisite(&RUST_HELPER, &doctor());
     let first = scan();
     // The same reading twice: reported from what was recorded, which is what
     // makes the third scan below say something.
@@ -194,7 +194,7 @@ fn a_direct_dependency_feature_change_gets_its_own_semantic_variant() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout)
             .expect("stdout is one JSON document")
     };
-    require_rust_helper();
+    require_prerequisite(&RUST_HELPER, &doctor());
     let first = scan();
     let lockfile_before = std::fs::read_to_string(root.join("Cargo.lock")).unwrap_or_default();
     let again = scan();
@@ -303,7 +303,7 @@ fn a_run_allowed_to_build_reads_more_and_is_filed_apart_from_one_that_was_not() 
         serde_json::from_slice::<serde_json::Value>(&output.stdout)
             .expect("stdout is one JSON document")
     };
-    require_rust_helper();
+    require_prerequisite(&RUST_HELPER, &doctor());
     let refused = scan(&[]);
     // Refused before any file was put to the compiler, so the file is one
     // nobody asked about, for the reason the refusal names.
@@ -348,7 +348,7 @@ fn a_semantic_run_reported_again_still_says_what_the_compiler_answered() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout)
             .expect("stdout is one JSON document")
     };
-    require_rust_helper();
+    require_prerequisite(&RUST_HELPER, &doctor());
     let first = scan();
     let second = scan();
     let first_partitions = first["partitions"].as_array().expect("semantic partitions");
@@ -420,7 +420,7 @@ fn a_semantic_fresh_report_matches_report_run_for_persisted_evidence() {
     let database = tempfile::tempdir().expect("database directory");
     let database_path = database.path().join("audit.db");
     let database_text = database_path.to_str().expect("database path is utf-8");
-    require_rust_helper();
+    require_prerequisite(&RUST_HELPER, &doctor());
     let first = cmd()
         .current_dir(fixture.path())
         .args([
@@ -563,7 +563,7 @@ fn write_pipeline_bucket_fixture(root: &Path, count: u64) {
 
 /// One semantic scan of a tree, which has to succeed.
 fn semantic_scan(root: &Path) -> serde_json::Value {
-    require_rust_helper();
+    require_prerequisite(&RUST_HELPER, &doctor());
     let output = cmd()
         .current_dir(root)
         .args(["scan", ".", "--mode", "semantic", "--format", "json"])

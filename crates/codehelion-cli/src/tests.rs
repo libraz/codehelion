@@ -485,6 +485,7 @@ fn interrogating_a_helper_honours_the_requested_containment() {
         "placeholder-helper",
         Some(program.path()),
         codehelion_helper::SandboxRequest::require_memory_limit(4096),
+        doctor_command::HANDSHAKE_TIMEOUT,
     )
     .expect("configured file is considered for interrogation");
     let doctor::HelperState::Silent(why) = facts.state else {

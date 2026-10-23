@@ -31,8 +31,8 @@ pub use codehelion_helper_protocol::ir::{
     COMPILER_IR_SCHEMA_VERSION, CompilerIr, Unavailability, UnitRef,
 };
 pub use codehelion_helper_protocol::protocol::{
-    Absence, BuildDescription, Capability, CompileCommandSelector, Execution, HelperIdentity,
-    PROTOCOL_VERSION,
+    Absence, BuildDescription, Capability, CompilationDatabase, CompileCommandSelector, Execution,
+    HelperIdentity, PROTOCOL_VERSION,
 };
 pub use codehelion_helper_protocol::{ir, protocol, tree_file};
 pub use sandbox::{

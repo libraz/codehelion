@@ -15,6 +15,7 @@
 //! mock-helper untyped           # cannot resolve types
 //! mock-helper unnamed           # cannot resolve names
 //! mock-helper slow              # answers, eventually
+//! mock-helper slow-handshake    # takes a second and a half to introduce itself
 //! mock-helper deaf              # never answers
 //! mock-helper deaf-after-setup  # establishes the run, then hangs on analysis
 //! mock-helper deaf-on-poison    # hangs only for a unit named `poison`
@@ -118,6 +119,9 @@ fn main() {
                 park();
             }
             "slow" => std::thread::sleep(Duration::from_secs(30)),
+            "slow-handshake" if matches!(&request.body, RequestBody::Handshake(_)) => {
+                std::thread::sleep(Duration::from_millis(1500));
+            }
             _ => {}
         }
         let id = if behaviour == "confused" {

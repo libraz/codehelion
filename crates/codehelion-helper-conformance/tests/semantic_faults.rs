@@ -235,7 +235,8 @@ fn a_crashing_helper_leaves_a_persisted_partial_semantic_run() {
 
 #[test]
 fn a_timed_out_helper_leaves_a_persisted_partial_semantic_run() {
-    assert_fault_is_partial("deaf-on-poison", Unavailability::HelperTimedOut, Some(25));
+    // Long enough for the handshake, which the same deadline bounds.
+    assert_fault_is_partial("deaf-on-poison", Unavailability::HelperTimedOut, Some(1000));
 }
 
 #[test]
@@ -245,4 +246,78 @@ fn a_protocol_mismatch_leaves_a_persisted_partial_semantic_run() {
         Unavailability::ToolchainMismatch,
         None,
     );
+}
+
+/// Run a semantic scan whose helper deadline is `timeout_ms`, returning the
+/// process output whatever its status.
+#[allow(clippy::disallowed_types)]
+fn scan_under_deadline(behaviour: &str, timeout_ms: u64) -> std::process::Output {
+    let fixture = fixture();
+    std::fs::write(
+        fixture.path().join("codehelion.toml"),
+        format!("[limits]\nhelper-timeout-ms = {timeout_ms}\n"),
+    )
+    .expect("write the helper deadline");
+    let bin = fixture.path().join("mock-bin");
+    std::fs::create_dir(&bin).expect("create helper directory");
+    helper_path(&bin);
+    let mut command = Command::new(cli_path(&bin));
+    command
+        .current_dir(fixture.path())
+        .env("CODEHELION_MOCK_HELPER_BEHAVIOUR", behaviour)
+        .args(["scan", ".", "--mode", "semantic", "--format", "json"]);
+    run(&mut command, "run the semantic CLI wrapper")
+}
+
+#[test]
+fn the_scan_handshake_is_bounded_by_the_configured_helper_deadline() {
+    let short = scan_under_deadline("slow-handshake", 300);
+    let stderr = String::from_utf8_lossy(&short.stderr);
+    assert!(!short.status.success(), "{stderr}");
+    assert!(stderr.contains("codehelion-backend-rust"), "{stderr}");
+
+    let long = scan_under_deadline("slow-handshake", 5000);
+    assert!(
+        long.status.success(),
+        "{}",
+        String::from_utf8_lossy(&long.stderr)
+    );
+    let report: Value = serde_json::from_slice(&long.stdout).expect("semantic scan emits JSON");
+    assert!(
+        report["summary"]["compiler"]["answered"]
+            .as_u64()
+            .is_some_and(|answered| answered > 0),
+        "{report}"
+    );
+}
+
+/// A run that recorded a helper failure does not stand in for a rescan of the
+/// unchanged tree whose helper now answers every unit.
+#[test]
+fn a_run_with_a_helper_failure_is_not_reused_once_the_helper_answers() {
+    let fixture = fixture();
+    let bin = fixture.path().join("mock-bin");
+    std::fs::create_dir(&bin).expect("create helper directory");
+    helper_path(&bin);
+
+    let failed = scan(fixture.path(), "allergic", &bin);
+    assert!(
+        unavailable(&failed)
+            .get(Unavailability::HelperDied.name())
+            .copied()
+            .unwrap_or(0)
+            >= 1,
+        "{failed}"
+    );
+
+    let healthy = scan(fixture.path(), "well-behaved", &bin);
+    assert_ne!(healthy["run"]["reused"], Value::Bool(true), "{healthy}");
+    assert_ne!(
+        healthy["run"]["run_id"], failed["run"]["run_id"],
+        "{healthy}"
+    );
+    assert!(unavailable(&healthy).is_empty(), "{healthy}");
+
+    let again = scan(fixture.path(), "well-behaved", &bin);
+    assert_eq!(again["run"]["reused"], Value::Bool(true), "{again}");
 }

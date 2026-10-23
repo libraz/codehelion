@@ -9,10 +9,12 @@
 //! answered about nothing.
 //!
 //! Whether either helper is installed is a property of the machine, so these
-//! read what `doctor` says and leave rather than fail when the answer is no.
+//! read what `doctor` says and fail, naming what to install, when the answer
+//! is no.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use assert_cmd::Command;
+use codehelion_fixtures::{CLANG_HELPER, require_prerequisite};
 use codehelion_helper::ir::CallTarget;
 use codehelion_store::Store;
 use codehelion_store::compiler::CompilerOutcome;
@@ -22,25 +24,14 @@ fn cmd() -> Command {
     Command::cargo_bin("codehelion").expect("binary should build")
 }
 
-/// Require the helper that answers about C and C++.
+/// What `doctor` says this machine has, which these tests require.
 ///
-/// This used to return a boolean each test branched on, which made a machine
-/// without the helper report every C++ semantic test as passing. The helper is
-/// a workspace binary and libclang is loaded at run time, so a suite run that
-/// cannot find it has an environment to fix, and saying which is more use than
-/// a silent success.
-fn require_clang_helper() {
+/// The C/C++ helper is a workspace binary and libclang is loaded at run time,
+/// so a suite run that cannot find it has an environment to fix, and saying
+/// which is more use than a silent success.
+fn doctor() -> String {
     let output = cmd().arg("doctor").output().expect("doctor should run");
-    let report = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        report
-            .lines()
-            .any(|line| line.contains("clang-helper") && line.contains("available")),
-        "the C/C++ semantic helper is unavailable, so these tests cannot answer about C++.\n\
-         It is built by a workspace test run and loads libclang at run time; install a libclang \
-         shared library, or run `cargo build -p codehelion-backend-clang` if only the binary is \
-         missing.\n{report}"
-    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 /// A scan of `root` in semantic mode, as the report puts it.

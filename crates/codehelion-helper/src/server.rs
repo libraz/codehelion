@@ -389,6 +389,7 @@ mod tests {
                     },
                     compile_command: None,
                     read_boundary: None,
+                    compilation_database: None,
                     want: vec![Capability::Types],
                     permitted: Vec::new(),
                 })
@@ -562,6 +563,7 @@ mod tests {
                 unit: unit(),
                 compile_command: None,
                 read_boundary: None,
+                compilation_database: None,
                 want: vec![Capability::Types],
                 permitted: Vec::new(),
             }),
@@ -581,6 +583,7 @@ mod tests {
             unit: unit(),
             compile_command: None,
             read_boundary: None,
+            compilation_database: None,
             want: vec![Capability::Types],
             permitted: Vec::new(),
         })]);
@@ -619,6 +622,7 @@ mod tests {
                 unit: unit(),
                 compile_command: None,
                 read_boundary: None,
+                compilation_database: None,
                 want: vec![Capability::Types],
                 permitted: Vec::new(),
             }),
@@ -643,6 +647,7 @@ mod tests {
                     unit: unit(),
                     compile_command: None,
                     read_boundary: None,
+                    compilation_database: None,
                     want: vec![Capability::Types],
                     permitted: Vec::new(),
                 }),
@@ -675,6 +680,7 @@ mod tests {
     fn a_description_says_what_the_backend_reads_the_tree_under() {
         let (responses, _) = conversation(&[RequestBody::DescribeBuild(DescribeBuild {
             root: "/repo".to_string(),
+            compilation_database: None,
         })]);
         match &responses[0].body {
             ResponseBody::Build(build) => {
@@ -695,6 +701,7 @@ mod tests {
                 unit: unit(),
                 compile_command: None,
                 read_boundary: None,
+                compilation_database: None,
                 want: vec![Capability::Types],
                 permitted: Vec::new(),
             }),

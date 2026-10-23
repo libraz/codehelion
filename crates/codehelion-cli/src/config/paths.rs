@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::{Config, ConfigSource, Helpers, ResolvedConfig};
+use super::{Config, ConfigSource, DEFAULT_DATABASE, Helpers, ResolvedConfig};
 use crate::provenance::{Authority, FromScannedTree, OperatorSupplied};
 
 /// Resolve configured helper paths with command-line overrides taking priority.
@@ -120,8 +120,17 @@ pub(crate) fn configured_paths(resolved: &ResolvedConfig) -> ConfiguredPaths<'_>
         helpers: Helpers { rust, clang },
     } = &resolved.config;
     let source = &resolved.source;
+    // A discovered file that leaves the database alone has chosen nothing
+    // about it, so the default stays this build's and keeps its placement.
+    let database = if matches!(source, ConfigSource::Discovered(_))
+        && database.as_path() == Path::new(DEFAULT_DATABASE)
+    {
+        Authority::Operator(OperatorSupplied::from_this_build(database.as_path()))
+    } else {
+        attributed(source, database)
+    };
     ConfiguredPaths {
-        database: attributed(source, database),
+        database,
         rust_helper: rust.as_deref().map(|path| attributed(source, path)),
         clang_helper: clang.as_deref().map(|path| attributed(source, path)),
     }
@@ -192,7 +201,8 @@ mod tests {
         );
     }
 
-    /// A configuration holding both helper locations, as one provenance or another.
+    /// A configuration holding a database and both helper locations, as one
+    /// provenance or another.
     fn resolved_with_helpers(source: ConfigSource) -> ResolvedConfig {
         ResolvedConfig {
             config: Config {
@@ -200,6 +210,7 @@ mod tests {
                     rust: Some(PathBuf::from("/configured/rust")),
                     clang: Some(PathBuf::from("/configured/clang")),
                 },
+                database: PathBuf::from("state/audit.db"),
                 ..Config::default()
             },
             source,
@@ -256,6 +267,20 @@ mod tests {
         assert!(matches!(places.database, Authority::Operator(_)));
         assert!(places.rust_helper.is_none());
         assert!(places.clang_helper.is_none());
+    }
+
+    /// A discovered file that never mentions the database has not chosen one,
+    /// so the default keeps the placement it has with no file at all.
+    #[test]
+    fn a_discovered_configuration_that_leaves_the_database_alone_chose_nothing_about_it() {
+        let found = ResolvedConfig {
+            config: Config::from_toml("min-clone-tokens = 30\n").unwrap(),
+            source: ConfigSource::Discovered(PathBuf::from("/repository/sub/codehelion.toml")),
+        };
+        assert!(matches!(
+            configured_paths(&found).database,
+            Authority::Operator(_)
+        ));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Cross-build-variant and cross-language semantic comparisons.
 
-use super::helpers::Installed;
+use super::helpers::{Installed, helper_timeout};
 use super::inputs::ReportInputs;
 use super::model::{
     CrossComparisonUnit, CrossLanguageComparisonUnit, PartitionOutcome, SemanticDetection,
@@ -33,6 +33,7 @@ use codehelion_core::semantic::{
 };
 use codehelion_core::stable_id;
 use codehelion_core::structural::{self, CrossVariantUnit, StructuralReport};
+use codehelion_helper::protocol::CompilationDatabase;
 use codehelion_store::path_key;
 use codehelion_store::snapshot::{
     CrossLanguageComparisonSnapshot, CrossLanguageSemanticGroupRow, CrossLanguageSemanticMemberRow,
@@ -83,6 +84,8 @@ pub(super) struct ProgramContext<'a> {
     pub(super) started_at: &'a str,
     /// The helpers this run asks about its sources, if any.
     pub(super) asking: Option<&'a [&'a Installed]>,
+    /// The compilation database discovery selected, as the helpers are told it.
+    pub(super) compilation_database: Option<&'a CompilationDatabase>,
     pub(super) glob_excluded: usize,
     /// The analysis a failure here belongs to.
     pub(super) mode: crate::cli::Mode,
@@ -114,6 +117,7 @@ pub(super) fn run_program(
         configuration,
         started_at,
         asking,
+        compilation_database,
         glob_excluded,
         mode,
         whole_run,
@@ -143,8 +147,11 @@ pub(super) fn run_program(
         &files,
         program.variant,
         program.commands,
-        args.untrusted.then_some(root),
-        std::time::Duration::from_millis(cfg.limits.helper_timeout_ms),
+        crate::semantic::ProjectFiles {
+            read_boundary: args.untrusted.then_some(root),
+            compilation_database,
+        },
+        helper_timeout(&cfg.limits),
     );
     let structural_cfg = structural_config(cfg);
     let mut analysis = if args.siblings_by_signature {
@@ -348,6 +355,7 @@ pub(super) fn maybe_cross_language_comparison_units(
                 end_line: semantic_unit.end_line,
                 name: unit.name.as_ref().map(ToString::to_string),
                 graph: semantic_unit.graph.clone(),
+                content: semantic_unit.content,
                 occurrence: stable_id::semantic_occurrence_fingerprint(
                     semantic_unit.content,
                     &unit.fingerprint,
@@ -612,7 +620,7 @@ pub(super) fn prepare_cross_language_comparison(
             &comparison_id,
             matched.rule.id,
             matched.rule.version,
-            &[left.occurrence, right.occurrence],
+            &[left.content, right.content],
         );
         let semantic_confidence = semantic_confidence(
             matched.rule.confidence,
@@ -784,7 +792,7 @@ pub(super) fn enabled_cross_language_matches(
 mod posting_ceiling_tests {
     use super::{
         BTreeSet, BuildVariant, Config, CrossLanguageComparisonUnit, Language, Path,
-        prepare_cross_language_comparison, report, stable_id,
+        PreparedCrossLanguage, prepare_cross_language_comparison, report, stable_id,
     };
     use codehelion_core::discovery::LanguageSelection;
     use codehelion_core::semantic::{
@@ -824,6 +832,7 @@ mod posting_ceiling_tests {
                 start_line: 1,
                 end_line: 3,
                 name: None,
+                content: stable_id::semantic_fragment_fingerprint(&variant, &graph),
                 occurrence: stable_id::semantic_fragment_fingerprint(&variant, &graph),
                 graph,
                 normalization_confidence: 1.0,
@@ -876,6 +885,59 @@ mod posting_ceiling_tests {
         assert_eq!(buckets_over_the_ceiling(&cut.funnel), 1);
         assert!(cut.search_truncated);
         assert!(cut.groups.is_empty());
+    }
+
+    /// A group's id is its members' window content: moving a window within its
+    /// host (an edit elsewhere in the function, or an identical copy shifting
+    /// its rank) changes each member's occurrence and member id, never the
+    /// group id.
+    #[test]
+    fn a_cross_language_group_id_stands_through_host_edits_and_rank_shifts() {
+        let cfg = Config::default();
+        let prepare = |units: &[CrossLanguageComparisonUnit]| {
+            prepare_cross_language_comparison(
+                Path::new("/tree"),
+                "2026-01-01T00:00:00Z",
+                units,
+                &cfg,
+            )
+            .expect("the comparison prepares")
+            .expect("two origins holding both languages compare")
+        };
+        let units = one_bucket_of_three();
+        let before = prepare(&units);
+
+        let host = stable_id::UnitFingerprint::from_bytes([3; 16]);
+        let mut moved = one_bucket_of_three();
+        for (rank, unit) in (1..).zip(moved.iter_mut()) {
+            unit.occurrence = stable_id::semantic_occurrence_fingerprint(unit.content, &host, rank);
+        }
+        let after = prepare(&moved);
+
+        let ids = |prepared: &PreparedCrossLanguage| -> Vec<String> {
+            prepared
+                .report
+                .groups
+                .iter()
+                .map(|group| group.id.clone())
+                .collect()
+        };
+        let member_ids = |prepared: &PreparedCrossLanguage| -> Vec<String> {
+            prepared
+                .groups
+                .iter()
+                .flat_map(|group| group.members.iter().map(|member| member.member_id.to_hex()))
+                .collect()
+        };
+        assert_ne!(ids(&before), Vec::<String>::new());
+        assert_eq!(ids(&before), ids(&after));
+        assert_ne!(member_ids(&before), member_ids(&after));
+        let distinct: BTreeSet<String> = member_ids(&after).into_iter().collect();
+        assert_eq!(
+            distinct.len(),
+            member_ids(&after).len(),
+            "members stay distinct"
+        );
     }
 
     /// The same tree under no configured ceiling pairs the bucket, which is what
