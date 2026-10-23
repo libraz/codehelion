@@ -270,8 +270,10 @@ impl Store {
     /// Record one controlled before/after measurement for a saved estimate.
     ///
     /// Recording is idempotent: a measurement is identified by the analysis,
-    /// source group, and the two artifacts and build variants it compared, so
-    /// re-measuring the same pair updates that row instead of failing. Taking
+    /// source group, and the two artifact slices and build variants it
+    /// compared, so re-measuring the same pair updates that row instead of
+    /// failing. The caller supplies the after artifact's slice identity, so
+    /// measurements of different slices of one container stay apart. Taking
     /// the measurement again is the first thing anyone does when a number
     /// looks wrong, and it is what makes the number reproducible.
     ///

@@ -220,6 +220,11 @@ none. Given a
 source run and a clone group as well, it also records a calibration measurement —
 see [Calibration](calibration.md).
 
+When both artifacts record an architecture and the two differ, every rendering of
+the comparison says so. A calibration is refused outright for artifacts of
+different formats or architectures, and for an architecture selected from a
+universal Mach-O, whose observed byte counts cover the whole container.
+
 ## Limits and isolation
 
 `artifact analyze` and `artifact compare` reject inputs above 512 MiB by default

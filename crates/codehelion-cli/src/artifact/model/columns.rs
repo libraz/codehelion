@@ -81,6 +81,16 @@ pub(in crate::artifact) const ARTIFACT_CSV_HEADER: &[&str] = &[
     "shared_symbols",
     "shared_absorbed_bytes",
     "shared_absorbed_symbols",
+    "architecture",
+    "skipped_architectures",
+    "analysis_id",
+    "sections",
+    "imports",
+    "entry_points",
+    "calls",
+    "relocations",
+    "source_mappings",
+    "data_segments",
 ];
 
 /// The columns one kind of record in the artifact CSV carries.
@@ -134,6 +144,16 @@ pub(in crate::artifact) const RECORD_COLUMNS: &[RecordColumns] = &[
             column::CLONE_CONFIDENCE,
             column::SAVINGS_CONFIDENCE,
             column::ARTIFACT_SYMBOLS,
+            column::ARCHITECTURE,
+            column::SKIPPED_ARCHITECTURES,
+            column::ANALYSIS_ID,
+            column::SECTIONS,
+            column::IMPORTS,
+            column::ENTRY_POINTS,
+            column::CALLS,
+            column::RELOCATIONS,
+            column::SOURCE_MAPPINGS,
+            column::DATA_SEGMENTS,
         ],
     },
     RecordColumns {
@@ -394,9 +414,6 @@ pub(in crate::artifact) const RECORD_COLUMNS: &[RecordColumns] = &[
     },
 ];
 
-// Columns are only ever appended, so the published width never shrinks.
-const _: () = assert!(ARTIFACT_CSV_HEADER.len() >= crate::artifact::ARTIFACT_CSV_COLUMNS);
-
 /// Column positions in [`ARTIFACT_CSV_HEADER`], named as the header names them.
 pub(in crate::artifact) mod column {
     pub(in crate::artifact) const RECORD_TYPE: usize = 0;
@@ -471,6 +488,28 @@ pub(in crate::artifact) mod column {
     pub(in crate::artifact) const SHARED_SYMBOLS: usize = 69;
     pub(in crate::artifact) const SHARED_ABSORBED_BYTES: usize = 70;
     pub(in crate::artifact) const SHARED_ABSORBED_SYMBOLS: usize = 71;
+    // Written through `ARTIFACT_FACTS`, which names its columns; only the
+    // record-column check refers to them by position.
+    #[cfg(test)]
+    pub(in crate::artifact) const ARCHITECTURE: usize = 72;
+    #[cfg(test)]
+    pub(in crate::artifact) const SKIPPED_ARCHITECTURES: usize = 73;
+    #[cfg(test)]
+    pub(in crate::artifact) const ANALYSIS_ID: usize = 74;
+    #[cfg(test)]
+    pub(in crate::artifact) const SECTIONS: usize = 75;
+    #[cfg(test)]
+    pub(in crate::artifact) const IMPORTS: usize = 76;
+    #[cfg(test)]
+    pub(in crate::artifact) const ENTRY_POINTS: usize = 77;
+    #[cfg(test)]
+    pub(in crate::artifact) const CALLS: usize = 78;
+    #[cfg(test)]
+    pub(in crate::artifact) const RELOCATIONS: usize = 79;
+    #[cfg(test)]
+    pub(in crate::artifact) const SOURCE_MAPPINGS: usize = 80;
+    #[cfg(test)]
+    pub(in crate::artifact) const DATA_SEGMENTS: usize = 81;
 }
 
 /// Every comparison CSV column, in the order they are written, under the same
@@ -516,6 +555,17 @@ pub(in crate::artifact) const COMPARE_CSV_HEADER: &[&str] = &[
     "owner",
     "ownership",
     "outside_symbols_delta_bytes",
+    "before_architecture",
+    "after_architecture",
+    "before_skipped_architectures",
+    "after_skipped_architectures",
+    "before_build_variant_manifest_path",
+    "before_build_variant_fingerprint",
+    "after_build_variant_manifest_path",
+    "after_build_variant_fingerprint",
+    "symbols_added",
+    "symbols_removed",
+    "modified_named_symbols",
 ];
 
 /// Column positions in [`COMPARE_CSV_HEADER`].

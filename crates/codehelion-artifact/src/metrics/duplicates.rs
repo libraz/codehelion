@@ -3,11 +3,14 @@
 //! Exact and normalized equality are equivalence relations, so their groups are
 //! keyed directly by content rather than by a transitive similarity graph.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ArtifactDataSegment, ArtifactFingerprint, ArtifactIr, ArtifactSymbol};
+use crate::{
+    ArtifactDataSegment, ArtifactFingerprint, ArtifactIr, ArtifactRelocation, ArtifactSymbol,
+};
 
 /// The smallest data region that duplicate-data analysis reports by default.
 ///
@@ -51,23 +54,85 @@ pub struct DuplicateMember {
 }
 
 /// Find exact and normalized duplicate groups in `artifact`.
+///
+/// Exact equality covers the relocations inside a symbol as well as its
+/// bytes: a relocated field holds a placeholder until link time, so two
+/// symbols calling different functions can carry identical bytes.
 #[must_use]
 pub fn find_duplicates(artifact: &ArtifactIr) -> DuplicateReport {
-    let exact = groups(&artifact.symbols, |symbol| {
-        Some(("exact", symbol.code.as_slice()))
-    });
+    let exact_keys = exact_keys(&artifact.symbols, &artifact.relocations);
+    let exact = groups(
+        artifact
+            .symbols
+            .iter()
+            .zip(&exact_keys)
+            .map(|(symbol, (version, content))| (symbol, Some((*version, content.as_ref())))),
+    );
     let normalized = if artifact.capabilities.normalized_duplicates {
-        groups(&artifact.symbols, |symbol| {
-            symbol.normalized.as_ref().map(|normalized| {
+        groups(artifact.symbols.iter().map(|symbol| {
+            let key = symbol.normalized.as_ref().map(|normalized| {
                 // One byte separator is unambiguous because the version gets a
                 // length prefix in `group_fingerprint` below.
                 (normalized.version.as_str(), normalized.bytes.as_slice())
-            })
-        })
+            });
+            (symbol, key)
+        }))
     } else {
         Vec::new()
     };
     DuplicateReport { exact, normalized }
+}
+
+/// Each symbol's exact-equality key: its bytes, followed by the relocations
+/// whose offsets fall inside it under a distinct version when there are any.
+fn exact_keys<'a>(
+    symbols: &'a [ArtifactSymbol],
+    relocations: &'a [ArtifactRelocation],
+) -> Vec<(&'static str, Cow<'a, [u8]>)> {
+    let mut sorted: Vec<_> = relocations.iter().collect();
+    sorted.sort_by_key(|relocation| (relocation.section, relocation.offset));
+    symbols
+        .iter()
+        .map(|symbol| {
+            let end = symbol.offset.saturating_add(symbol.size);
+            let first = sorted.partition_point(|relocation| {
+                (relocation.section, relocation.offset) < (symbol.section, symbol.offset)
+            });
+            let inside: Vec<_> = sorted
+                .get(first..)
+                .unwrap_or_default()
+                .iter()
+                .take_while(|relocation| {
+                    relocation.section == symbol.section && relocation.offset < end
+                })
+                .collect();
+            if inside.is_empty() || symbol.code.is_empty() {
+                return ("exact", Cow::Borrowed(symbol.code.as_slice()));
+            }
+            let mut key = Vec::with_capacity(symbol.code.len());
+            append_field(&mut key, &symbol.code);
+            for relocation in inside {
+                key.extend(
+                    relocation
+                        .offset
+                        .saturating_sub(symbol.offset)
+                        .to_le_bytes(),
+                );
+                append_field(&mut key, relocation.kind.as_bytes());
+                key.push(u8::from(relocation.target.is_some()));
+                append_field(
+                    &mut key,
+                    relocation.target.as_deref().unwrap_or_default().as_bytes(),
+                );
+            }
+            ("exact-relocated", Cow::Owned(key))
+        })
+        .collect()
+}
+
+fn append_field(key: &mut Vec<u8>, value: &[u8]) {
+    key.extend((value.len() as u64).to_le_bytes());
+    key.extend(value);
 }
 
 /// Find exact duplicate data regions at or above `min_bytes`.
@@ -83,12 +148,11 @@ pub fn find_duplicate_data(artifact: &ArtifactIr, min_bytes: u64) -> Vec<Duplica
 }
 
 fn groups<'a>(
-    symbols: &'a [ArtifactSymbol],
-    key: impl Fn(&'a ArtifactSymbol) -> Option<(&'a str, &'a [u8])>,
+    keyed: impl IntoIterator<Item = (&'a ArtifactSymbol, Option<(&'a str, &'a [u8])>)>,
 ) -> Vec<DuplicateGroup> {
     let mut buckets: BTreeMap<(&str, &[u8]), Vec<&ArtifactSymbol>> = BTreeMap::new();
-    for symbol in symbols {
-        let Some((version, content)) = key(symbol) else {
+    for (symbol, key) in keyed {
+        let Some((version, content)) = key else {
             continue;
         };
         buckets.entry((version, content)).or_default().push(symbol);

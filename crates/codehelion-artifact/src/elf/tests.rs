@@ -1098,7 +1098,7 @@ fn x86_call_opcode_inside_an_immediate_does_not_make_a_call_edge() {
 
 #[test]
 fn entry_address_becomes_a_stable_entry_point_without_becoming_an_id() {
-    let addresses = HashMap::from([(0x0040_1000, 3)]);
+    let addresses = SymbolIndex::with_image_addresses([(0x0040_1000, 3)]);
 
     assert_eq!(entry_root(0x0040_1000, &addresses), Some(3));
     assert_eq!(entry_root(0, &addresses), None);
@@ -1121,7 +1121,8 @@ fn init_array_relocation_becomes_a_conservative_entry_point() {
 #[test]
 fn linked_init_array_pointers_become_conservative_entry_points() {
     let (first, second) = (0, 1);
-    let addresses = HashMap::from([(0x0040_1000, first), (0x0040_2000, second)]);
+    let addresses =
+        SymbolIndex::with_image_addresses([(0x0040_1000, first), (0x0040_2000, second)]);
 
     assert_eq!(
         pointer_roots(
@@ -1233,5 +1234,343 @@ fn dwarf_relative_paths_keep_their_declared_directory_context_without_reading_so
     assert_eq!(
         crate::dwarf::resolve_source_path("header.hpp", Some("include/"), Some("/work/tree/")),
         "/work/tree/include/header.hpp"
+    );
+}
+
+/// Where a relocation of [`relocated_fixture`] points.
+#[derive(Clone, Copy)]
+enum FixtureTarget<'a> {
+    /// A named function symbol.
+    Named(&'a str),
+    /// The text section symbol plus this addend.
+    TextSection(i64),
+}
+
+/// A relocation `(section, offset, target, kind)`. A relocation outside
+/// `.text` gets its own pointer slot in that section and ignores `offset`.
+type FixtureRelocation<'a> = (&'a str, u64, FixtureTarget<'a>, RelocationKind);
+
+/// A relocatable object holding `functions` back to back in one text section.
+fn relocated_fixture(
+    functions: &[(&str, &[u8], SymbolScope)],
+    relocations: &[FixtureRelocation<'_>],
+) -> Vec<u8> {
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let text = object.section_id(StandardSection::Text);
+    let mut symbols = HashMap::new();
+    for (name, code, scope) in functions {
+        let offset = object.append_section_data(text, code, 1);
+        let symbol = object.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: offset,
+            size: code.len() as u64,
+            kind: SymbolKind::Text,
+            scope: *scope,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+        symbols.insert(*name, symbol);
+    }
+    let text_section_symbol = object.section_symbol(text);
+    let mut data_sections = HashMap::new();
+    for (section, offset, target, kind) in relocations {
+        let (symbol, addend) = match target {
+            FixtureTarget::Named(name) => (
+                symbols[name],
+                if *kind == RelocationKind::Relative {
+                    -4
+                } else {
+                    0
+                },
+            ),
+            FixtureTarget::TextSection(addend) => (text_section_symbol, *addend),
+        };
+        let (section, offset, size) = if *section == ".text" {
+            (text, *offset, 32)
+        } else {
+            let id = *data_sections.entry(*section).or_insert_with(|| {
+                object.add_section(Vec::new(), section.as_bytes().to_vec(), SectionKind::Data)
+            });
+            (id, object.append_section_data(id, &[0; 8], 8), 64)
+        };
+        object
+            .add_relocation(
+                section,
+                Relocation {
+                    offset,
+                    symbol,
+                    addend,
+                    flags: RelocationFlags::Generic {
+                        kind: *kind,
+                        encoding: RelocationEncoding::Generic,
+                        size,
+                    },
+                },
+            )
+            .expect("add fixture relocation");
+    }
+    object.write().expect("write relocated fixture")
+}
+
+/// A call to an address two equal-size symbols share, one through the bare
+/// displacement and one relocated against the symbol listed second.
+fn shared_address_fixture(first: &str, second: &str) -> Vec<u8> {
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let text = object.section_id(StandardSection::Text);
+    // call +6 lands on the shared address 12.
+    let direct = object.append_section_data(text, &[0xe8, 0x07, 0, 0, 0, 0xc3], 1);
+    let relocated = object.append_section_data(text, &[0xe8, 0, 0, 0, 0, 0xc3], 1);
+    let shared = object.append_section_data(text, &[0x90, 0xc3], 1);
+    let mut add = |name: &str, value: u64, size: u64| {
+        object.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value,
+            size,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Linkage,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        })
+    };
+    add("direct", direct, 6);
+    add("relocated", relocated, 6);
+    add(first, shared, 2);
+    let later = add(second, shared, 2);
+    object
+        .add_relocation(
+            text,
+            Relocation {
+                offset: relocated + 1,
+                symbol: later,
+                addend: -4,
+                flags: RelocationFlags::Generic {
+                    kind: RelocationKind::Relative,
+                    encoding: RelocationEncoding::Generic,
+                    size: 32,
+                },
+            },
+        )
+        .expect("add relocation against the later symbol");
+    object.write().expect("write shared-address fixture")
+}
+
+#[test]
+fn a_call_to_a_shared_address_reaches_the_symbol_owning_the_bytes_in_either_order() {
+    for (first, second) in [("complete", "base"), ("base", "complete")] {
+        let artifact = ElfBackend
+            .parse(&shared_address_fixture(first, second))
+            .expect("shared-address fixture parses");
+        let owner = named(&artifact, first)[0];
+        let alias = named(&artifact, second)[0];
+        assert_eq!(
+            owner.code,
+            vec![0x90, 0xc3],
+            "{first} listed first owns the bytes"
+        );
+        assert_eq!(alias.code, Vec::<u8>::new());
+
+        for caller in ["direct", "relocated"] {
+            let caller = named(&artifact, caller)[0].fingerprint;
+            assert!(
+                artifact
+                    .calls
+                    .iter()
+                    .any(|call| call.caller == caller && call.target == Some(owner.fingerprint)),
+                "{first}/{second}: {:#?}",
+                artifact.calls
+            );
+        }
+        assert!(
+            artifact
+                .calls
+                .iter()
+                .all(|call| call.target != Some(alias.fingerprint)),
+            "the alias receives no edge: {:#?}",
+            artifact.calls
+        );
+    }
+}
+
+#[test]
+fn a_call_through_the_section_symbol_is_an_edge_to_the_static_function() {
+    // helper starts at 6; the field at 1 ends at 5, so the addend is 6 - 4.
+    let artifact = ElfBackend
+        .parse(&relocated_fixture(
+            &[
+                ("caller", &[0xe8, 0, 0, 0, 0, 0xc3], SymbolScope::Linkage),
+                ("helper", &[0x90, 0xc3], SymbolScope::Compilation),
+            ],
+            &[(
+                ".text",
+                1,
+                FixtureTarget::TextSection(2),
+                RelocationKind::Relative,
+            )],
+        ))
+        .expect("section-symbol call fixture parses");
+    let caller = named(&artifact, "caller")[0];
+    let helper = named(&artifact, "helper")[0];
+
+    assert_eq!(artifact.calls.len(), 1, "{:#?}", artifact.calls);
+    assert_eq!(artifact.calls[0].caller, caller.fingerprint);
+    assert_eq!(artifact.calls[0].target, Some(helper.fingerprint));
+    assert_eq!(artifact.calls[0].unresolved, None);
+    assert_eq!(artifact.relocations[0].target.as_deref(), Some("helper"));
+}
+
+#[test]
+fn a_table_entry_through_the_section_symbol_roots_the_static_function() {
+    let artifact = ElfBackend
+        .parse(&relocated_fixture(
+            &[
+                ("caller", &[0xe8, 0, 0, 0, 0, 0xc3], SymbolScope::Linkage),
+                ("callee", &[0xc3], SymbolScope::Compilation),
+                ("handler", &[0x90, 0xc3], SymbolScope::Compilation),
+                ("unused", &[0x90, 0x90, 0xc3], SymbolScope::Compilation),
+            ],
+            &[
+                (
+                    ".text",
+                    1,
+                    FixtureTarget::Named("callee"),
+                    RelocationKind::Relative,
+                ),
+                (
+                    ".data.rel.ro",
+                    0,
+                    FixtureTarget::TextSection(7),
+                    RelocationKind::Absolute,
+                ),
+            ],
+        ))
+        .expect("section-symbol table fixture parses");
+    let handler = named(&artifact, "handler")[0];
+
+    assert_eq!(artifact.indirect_references, vec![handler.fingerprint]);
+    assert_eq!(
+        dead_symbol_names(&artifact),
+        (vec!["unused".to_owned()], true)
+    );
+}
+
+#[test]
+fn an_init_array_entry_through_the_section_symbol_roots_the_constructor() {
+    let artifact = ElfBackend
+        .parse(&relocated_fixture(
+            &[
+                ("other", &[0x90, 0xc3], SymbolScope::Compilation),
+                ("constructor", &[0xc3], SymbolScope::Compilation),
+            ],
+            &[(
+                ".init_array",
+                0,
+                FixtureTarget::TextSection(2),
+                RelocationKind::Absolute,
+            )],
+        ))
+        .expect("section-symbol init-array fixture parses");
+    let constructor = named(&artifact, "constructor")[0];
+
+    assert_eq!(artifact.entry_points, vec![constructor.fingerprint]);
+}
+
+#[test]
+fn a_section_target_no_function_covers_roots_every_function_of_that_section() {
+    let artifact = ElfBackend
+        .parse(&relocated_fixture(
+            &[
+                ("caller", &[0xe8, 0, 0, 0, 0, 0xc3], SymbolScope::Linkage),
+                ("callee", &[0xc3], SymbolScope::Compilation),
+                ("first", &[0x90, 0xc3], SymbolScope::Compilation),
+            ],
+            &[
+                (
+                    ".text",
+                    1,
+                    FixtureTarget::Named("callee"),
+                    RelocationKind::Relative,
+                ),
+                (
+                    ".data.rel.ro",
+                    0,
+                    FixtureTarget::TextSection(64),
+                    RelocationKind::Absolute,
+                ),
+            ],
+        ))
+        .expect("uncovered section target fixture parses");
+
+    assert_eq!(artifact.indirect_references.len(), 3);
+    assert_eq!(dead_symbol_names(&artifact), (Vec::new(), true));
+}
+
+/// Two byte-identical callers relocated to different callees.
+fn callers_of(first: FixtureTarget<'_>, second: FixtureTarget<'_>) -> Vec<u8> {
+    relocated_fixture(
+        &[
+            ("a", &[0xe8, 0, 0, 0, 0, 0xc3], SymbolScope::Linkage),
+            ("b", &[0xe8, 0, 0, 0, 0, 0xc3], SymbolScope::Linkage),
+            ("f", &[0x90, 0xc3], SymbolScope::Compilation),
+            ("g", &[0x90, 0x90, 0xc3], SymbolScope::Compilation),
+        ],
+        &[
+            (".text", 1, first, RelocationKind::Relative),
+            (".text", 7, second, RelocationKind::Relative),
+        ],
+    )
+}
+
+#[test]
+fn callers_of_different_functions_are_not_exact_duplicates() {
+    use FixtureTarget::{Named, TextSection};
+    // f starts at 12 and g at 14; a PC-relative addend is the target less
+    // the field width.
+    for (first, second) in [
+        (Named("f"), Named("g")),
+        (TextSection(12 - 4), TextSection(14 - 4)),
+    ] {
+        let artifact = ElfBackend
+            .parse(&callers_of(first, second))
+            .expect("callers fixture parses");
+        let report = crate::metrics::find_duplicates(&artifact);
+        assert!(report.exact.is_empty(), "{report:#?}");
+        assert_eq!(
+            artifact
+                .relocations
+                .iter()
+                .map(|relocation| relocation.target.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("f"), Some("g")]
+        );
+    }
+
+    let same = ElfBackend
+        .parse(&callers_of(Named("f"), Named("f")))
+        .expect("callers fixture parses");
+    let report = crate::metrics::find_duplicates(&same);
+    assert_eq!(report.exact.len(), 1, "{report:#?}");
+    assert_eq!(report.exact[0].members.len(), 2);
+}
+
+#[test]
+fn a_changed_callee_changes_the_caller_fingerprint() {
+    use FixtureTarget::Named;
+    let fingerprint_of_a = |bytes: Vec<u8>| {
+        named(
+            &ElfBackend.parse(&bytes).expect("callers fixture parses"),
+            "a",
+        )[0]
+        .content_identity()
+    };
+
+    assert_ne!(
+        fingerprint_of_a(callers_of(Named("f"), Named("f"))),
+        fingerprint_of_a(callers_of(Named("g"), Named("f")))
+    );
+    assert_eq!(
+        fingerprint_of_a(callers_of(Named("f"), Named("f"))),
+        fingerprint_of_a(callers_of(Named("f"), Named("g")))
     );
 }

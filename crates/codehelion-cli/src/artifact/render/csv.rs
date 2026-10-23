@@ -4,12 +4,12 @@ use codehelion_artifact::ownership::Ownership;
 
 use super::{
     artifact_import_kind_label, attribution_basis_field, attribution_column, optional_bytes,
-    stated_bytes, summary_column,
+    stated_bytes, summary_column, write_fact_columns,
 };
 use crate::artifact::correlation::AttributionBasis;
 use crate::artifact::model::{
-    ARTIFACT_CSV_HEADER, ArtifactReport, SourceMapResolutionStatus, column, family_label,
-    ownership_label, report_assumptions,
+    ARTIFACT_CSV_HEADER, ARTIFACT_FACTS, ArtifactReport, SourceMapResolutionStatus, column,
+    family_label, ownership_label, report_assumptions,
 };
 use crate::artifact::{Context, Result, Write, csv};
 
@@ -18,7 +18,7 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
     writeln!(out, "{}", ARTIFACT_CSV_HEADER.join(","))?;
     let correlation = report.correlation.as_ref();
     let mut summary = artifact_csv_row("summary", report);
-    summary[column::FINGERPRINT].clone_from(&report.fingerprint);
+    write_fact_columns(ARTIFACT_FACTS, report, ARTIFACT_CSV_HEADER, &mut summary)?;
     // Every size category the classification states, written to the column
     // that carries it. Walking the same list the text and JSON renderings walk
     // is what keeps a category from being reachable in two formats out of

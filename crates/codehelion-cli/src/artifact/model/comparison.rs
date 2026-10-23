@@ -192,6 +192,10 @@ impl SymbolContent {
     }
 }
 
+/// How a name whose content identity changed is classified, which is not as
+/// [`symbol_change::MODIFIED`].
+pub(in crate::artifact) const SYMBOL_IDENTITY_CHANGED: &str = "symbol identity is content-derived; a name whose identity changed is listed as one removed and one added symbol, and counted in modified_named_symbols";
+
 /// One equality-group change. `kind` identifies the independent equality
 /// relation so a normalized match is never presented as an exact-byte match.
 #[derive(Debug, Serialize)]
@@ -240,8 +244,7 @@ impl ArtifactComparisonReport {
             &after_data,
         );
         let mut assumptions = vec![
-            "symbol identity is content-derived; an equal name with a changed fingerprint is reported as modified"
-                .to_owned(),
+            SYMBOL_IDENTITY_CHANGED.to_owned(),
             "symbol identity drops instruction immediates, so a symbol found on both sides whose bytes still differ is reported as resized or modified rather than as unchanged"
                 .to_owned(),
             "observed_size_reduction_bytes is a measured artifact-byte difference, not a refactoring estimate"
@@ -250,11 +253,20 @@ impl ArtifactComparisonReport {
             DEFINING_PATH.to_owned(),
             NO_OWN_DECLARED.to_owned(),
         ];
-        if before.format != after.format {
+        let (before_key, after_key) = (before.slice_key(), after.slice_key());
+        if before_key.format != after_key.format {
             assumptions.push(
                 "the artifact formats differ; size and symbol changes may reflect format changes"
                     .to_owned(),
             );
+        }
+        if let (Some(before_architecture), Some(after_architecture)) =
+            (before_key.architecture, after_key.architecture)
+            && before_architecture != after_architecture
+        {
+            assumptions.push(format!(
+                "the artifact architectures differ (before {before_architecture}, after {after_architecture}); size and symbol changes may reflect the target change rather than a source change"
+            ));
         }
         if !before.skipped_architectures.is_empty() || !after.skipped_architectures.is_empty() {
             assumptions.push(CONTAINER_WIDE_OBSERVED_BYTES.to_owned());

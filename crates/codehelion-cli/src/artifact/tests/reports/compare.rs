@@ -993,3 +993,78 @@ fn an_archive_comparison_excludes_unchanged_sibling_functions() {
     assert_eq!(report.symbol_changes.removed, 1);
     assert_eq!(report.symbol_changes.modified_named_symbols, 1);
 }
+
+/// A thin artifact of `format` built for `architecture`.
+fn built_for(format: BinaryFormat, bytes: &[u8], architecture: &str) -> ArtifactIr {
+    let mut artifact = ArtifactIr::empty(format, bytes);
+    artifact.architecture = Some(architecture.to_owned());
+    artifact
+}
+
+#[test]
+fn comparison_states_differing_architectures_in_every_rendering() {
+    let statement = "the artifact architectures differ (before x86_64, after aarch64)";
+    let report = ArtifactComparisonReport::new(
+        std::path::Path::new("before.so"),
+        &built_for(BinaryFormat::Elf, b"before", "x86_64"),
+        None,
+        std::path::Path::new("after.so"),
+        &built_for(BinaryFormat::Elf, b"after", "aarch64"),
+        None,
+    );
+    let mut text = Vec::new();
+    render_compare_text(&report, &mut text).unwrap();
+    assert!(String::from_utf8(text).unwrap().contains(statement));
+    let mut csv = Vec::new();
+    render_compare_csv(&report, &mut csv).unwrap();
+    assert!(String::from_utf8(csv).unwrap().contains(statement));
+    let json = serde_json::to_value(&report).unwrap();
+    assert!(
+        json["assumptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|assumption| assumption.as_str().unwrap().starts_with(statement)),
+        "{json}"
+    );
+
+    let same = ArtifactComparisonReport::new(
+        std::path::Path::new("before.so"),
+        &built_for(BinaryFormat::Elf, b"before", "x86_64"),
+        None,
+        std::path::Path::new("after.so"),
+        &built_for(BinaryFormat::Elf, b"after", "x86_64"),
+        None,
+    );
+    assert!(
+        !same
+            .assumptions
+            .iter()
+            .any(|assumption| assumption.contains("architectures differ"))
+    );
+}
+
+/// The statement about a changed identity has to describe the rows the
+/// comparison actually wrote for it.
+#[test]
+fn a_changed_identity_is_described_as_the_removal_and_addition_it_is_listed_as() {
+    let report = symbol_comparison(
+        vec![comparison_symbol(Some("same_name"), b"before", 4)],
+        vec![comparison_symbol(Some("same_name"), b"after", 4)],
+    );
+    let mut kinds: Vec<_> = report
+        .symbol_deltas
+        .iter()
+        .map(|delta| delta.kind)
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(kinds, [symbol_change::ADDED, symbol_change::REMOVED]);
+    assert_eq!(report.symbol_changes.modified_named_symbols, 1);
+    assert!(
+        report
+            .assumptions
+            .iter()
+            .any(|assumption| assumption == SYMBOL_IDENTITY_CHANGED)
+    );
+    assert!(SYMBOL_IDENTITY_CHANGED.contains("one removed and one added symbol"));
+}

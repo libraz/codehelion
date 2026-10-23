@@ -2,9 +2,11 @@
 
 use codehelion_artifact::ownership::Ownership;
 
+use super::{render_fact_lines, write_fact_columns};
 use crate::artifact::model::{
-    ArtifactComparisonReport, AssumptionScope, COMPARE_CSV_HEADER, OwnershipDeltaReport,
-    compare_column, comparison_assumptions, ownership_label, pairs_both_artifacts,
+    ArtifactComparisonReport, AssumptionScope, COMPARE_CSV_HEADER, COMPARISON_FACTS,
+    OwnershipDeltaReport, compare_column, comparison_assumptions, ownership_label,
+    pairs_both_artifacts,
 };
 use crate::artifact::{Result, Write, csv, optional_f64};
 
@@ -14,6 +16,7 @@ pub(in crate::artifact) fn render_compare_csv(
 ) -> Result<()> {
     writeln!(out, "{}", COMPARE_CSV_HEADER.join(","))?;
     let mut summary = compare_csv_row(report, "summary");
+    write_fact_columns(COMPARISON_FACTS, report, COMPARE_CSV_HEADER, &mut summary)?;
     summary[compare_column::OUTSIDE_SYMBOLS_DELTA_BYTES] = report
         .ownership_deltas
         .outside_symbols_delta_bytes
@@ -139,32 +142,7 @@ pub(in crate::artifact) fn render_compare_text(
     report: &ArtifactComparisonReport,
     out: &mut impl Write,
 ) -> Result<()> {
-    writeln!(
-        out,
-        "before: {} ({})",
-        report.before.path, report.before.format
-    )?;
-    render_selected_architecture("before", &report.before, out)?;
-    writeln!(
-        out,
-        "after: {} ({})",
-        report.after.path, report.after.format
-    )?;
-    render_selected_architecture("after", &report.after, out)?;
-    if let Some(variant) = &report.before.build_variant {
-        writeln!(
-            out,
-            "before build variant: {} (digest {})",
-            variant.manifest_path, variant.fingerprint
-        )?;
-    }
-    if let Some(variant) = &report.after.build_variant {
-        writeln!(
-            out,
-            "after build variant: {} (digest {})",
-            variant.manifest_path, variant.fingerprint
-        )?;
-    }
+    render_fact_lines(COMPARISON_FACTS, report, out)?;
     if let Some(containment) = &report.containment {
         writeln!(
             out,
@@ -249,13 +227,9 @@ pub(in crate::artifact) fn render_compare_text(
         report.after.data_segment_bytes,
         signed_bytes(report.data_segment_delta_bytes, "smaller", "larger")
     )?;
-    writeln!(
-        out,
-        "symbols: {} added, {} removed, {} named modified",
-        report.symbol_changes.added,
-        report.symbol_changes.removed,
-        report.symbol_changes.modified_named_symbols,
-    )?;
+    if !report.symbol_deltas.is_empty() {
+        writeln!(out, "symbol changes:")?;
+    }
     render_symbol_deltas(&report.symbol_deltas, out)?;
     for delta in &report.duplicate_group_deltas {
         writeln!(
@@ -366,22 +340,4 @@ fn signed_bytes(delta: i128, decreased: &str, increased: &str) -> String {
         _ => "no change",
     };
     format!("{delta:+} bytes ({direction})")
-}
-
-fn render_selected_architecture(
-    label: &str,
-    artifact: &super::model::ComparisonArtifact,
-    out: &mut impl Write,
-) -> Result<()> {
-    if let Some(architecture) = &artifact.architecture {
-        writeln!(out, "{label} architecture: {architecture}")?;
-    }
-    if !artifact.skipped_architectures.is_empty() {
-        writeln!(
-            out,
-            "{label} skipped architectures: {}",
-            artifact.skipped_architectures.join(", ")
-        )?;
-    }
-    Ok(())
 }

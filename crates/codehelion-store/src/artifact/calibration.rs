@@ -103,7 +103,7 @@ pub struct ArtifactAnalysisSavingsCalibration {
     pub source_build_variant_fingerprint: BuildVariantFingerprint,
     /// Build variant of the analyzed before artifact.
     pub before_artifact_build_variant_fingerprint: BuildVariantFingerprint,
-    /// Content-derived identity of the measured after artifact.
+    /// Content-derived identity of the measured after artifact slice.
     pub after_artifact_fingerprint: [u8; 16],
     /// Build variant of the measured after artifact.
     pub after_artifact_build_variant_fingerprint: BuildVariantFingerprint,

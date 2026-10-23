@@ -267,3 +267,153 @@ fn a_comparison_without_calibration_selectors_opens_no_database() {
             .is_none()
     );
 }
+
+/// The build-condition evidence both sides of a calibration share.
+fn shared_variant() -> BuildVariantEvidence {
+    BuildVariantEvidence {
+        manifest_path: "build-variant.json".to_owned(),
+        fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("variant", b"one"),
+    }
+}
+
+/// A Mach-O IR built for `architecture`, skipping `skipped` from its container.
+fn macho_slice(bytes: &[u8], architecture: &str, skipped: &[&str]) -> ArtifactIr {
+    let mut artifact = ArtifactIr::empty(BinaryFormat::MachO, bytes);
+    artifact.architecture = Some(architecture.to_owned());
+    artifact.skipped_architectures = skipped.iter().map(|&label| label.to_owned()).collect();
+    artifact
+}
+
+/// Attempt a calibration between `before` and `after` against a database that
+/// does not exist, so any refusal has to come before the store is opened.
+fn refused_calibration(before: &ArtifactIr, after: &ArtifactIr) -> String {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("audit.db");
+    let variant = shared_variant();
+    let error = record_comparison_calibration(
+        &calibration_request(Some(1), Some(&"ab".repeat(16)), Some(&database)),
+        Some(&"ab".repeat(16)),
+        before,
+        after,
+        Some(&variant),
+        Some(&variant),
+        Some(&database),
+    )
+    .expect_err("the calibration must be refused");
+    assert!(!database.exists(), "the refusal opened the store");
+    error.to_string()
+}
+
+#[test]
+fn calibration_refuses_artifacts_built_for_different_architectures() {
+    let error = refused_calibration(
+        &macho_slice(b"before", "arm64", &[]),
+        &macho_slice(b"after", "x86_64", &[]),
+    );
+    assert!(
+        error
+            .contains("same format and architecture: before is macho arm64, after is macho x86_64"),
+        "{error}"
+    );
+}
+
+#[test]
+fn calibration_refuses_a_slice_of_a_universal_container() {
+    let error = refused_calibration(
+        &macho_slice(b"before", "x86_64", &["arm64"]),
+        &macho_slice(b"after", "x86_64", &["arm64"]),
+    );
+    assert!(
+        error.contains("calibration requires whole artifacts"),
+        "{error}"
+    );
+    let error = refused_calibration(
+        &macho_slice(b"before", "x86_64", &["arm64"]),
+        &macho_slice(b"after", "x86_64", &[]),
+    );
+    assert!(error.contains("same format and architecture"), "{error}");
+}
+
+#[test]
+fn a_clone_group_id_that_is_not_a_prefix_is_refused_by_naming_the_accepted_form() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("audit.db");
+    for typed in ["abc", "not-hex!", &"a".repeat(33)] {
+        let error = calibration_clone_group(
+            &calibration_request(Some(1), Some(typed), Some(&database)),
+            Some(&database),
+        )
+        .expect_err("a malformed id is refused");
+        assert!(error.to_string().contains("at least 8"), "{typed}: {error}");
+    }
+    assert!(!database.exists(), "a malformed id opened the store");
+    let full = "AB".repeat(16);
+    assert_eq!(
+        calibration_clone_group(
+            &calibration_request(Some(1), Some(&full), Some(&database)),
+            Some(&database),
+        )
+        .unwrap(),
+        Some("ab".repeat(16))
+    );
+}
+
+#[test]
+fn a_clone_group_prefix_resolves_to_the_one_recorded_group_it_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    fs::create_dir(&root).unwrap();
+    let body = "    let mut total = 0;\n    for value in values {\n        if *value > limit {\n            total += value * 2;\n        } else {\n            total -= value;\n        }\n    }\n    total\n}\n";
+    fs::write(
+        root.join("lib.rs"),
+        format!(
+            "pub fn first(values: &[i64], limit: i64) -> i64 {{\n{body}\npub fn second(values: &[i64], limit: i64) -> i64 {{\n{body}"
+        ),
+    )
+    .unwrap();
+    let database = directory.path().join("audit.db");
+    let parsed = <crate::cli::Cli as clap::Parser>::try_parse_from([
+        "codehelion",
+        "scan",
+        root.to_str().unwrap(),
+        "--db",
+        database.to_str().unwrap(),
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let crate::cli::Command::Scan(scan) = parsed.command else {
+        unreachable!("a scan command line parses as a scan");
+    };
+    crate::scan::run(&scan, &mut Vec::new()).unwrap();
+    let store = codehelion_store::Store::open_existing(&database).unwrap();
+    let groups: Vec<String> = store
+        .ids_starting_with("")
+        .unwrap()
+        .into_iter()
+        .filter(|found| found.kind == codehelion_store::query::IdKind::CloneGroup)
+        .map(|found| found.id)
+        .collect();
+    drop(store);
+    assert_eq!(
+        groups.len(),
+        1,
+        "the fixture records one clone group: {groups:?}"
+    );
+    let group = &groups[0];
+    let resolved = calibration_clone_group(
+        &calibration_request(Some(1), Some(&group[..8]), Some(&database)),
+        Some(&database),
+    )
+    .unwrap();
+    assert_eq!(resolved.as_deref(), Some(group.as_str()));
+    let error = calibration_clone_group(
+        &calibration_request(Some(1), Some(&"f".repeat(9)), Some(&database)),
+        Some(&database),
+    )
+    .expect_err("an unrecorded prefix names no group");
+    assert!(
+        error.to_string().contains("no clone group with id"),
+        "{error}"
+    );
+}

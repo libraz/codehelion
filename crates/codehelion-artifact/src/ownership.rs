@@ -2,10 +2,11 @@
 //!
 //! A symbol's key is the first element of its defining path: a Rust crate, a
 //! C++ top-level namespace, or a fixed label for an unqualified name. The key
-//! is toolchain code when it names the Rust sysroot or C++ `std`, a C17
-//! Annex B function, a reserved identifier (C17 §7.1.3), or runtime support;
-//! it is own only when the `[artifact] own` declaration lists it, and other
-//! otherwise. Toolchain classification never depends on that declaration.
+//! is toolchain code when it names a Rust sysroot crate in a Rust-shaped name
+//! or C++ `std`, a C17 Annex B function, a reserved identifier (C17 §7.1.3),
+//! or runtime support; it is own only when the `[artifact] own` declaration
+//! lists it, and other otherwise. Toolchain classification never depends on
+//! that declaration.
 //!
 //! A Rust `<Type as Trait>` impl is keyed by the orphan rule: when one side is
 //! the standard library, the impl lives in the other side's crate.
@@ -64,6 +65,9 @@ const CLONE_ANNOTATION: &str = " [clone ";
 const ABI_TAG: &str = "[abi:";
 /// Trailing qualifiers that do not name the function, longest spelling first.
 const TRAILING_QUALIFIERS: &[&str] = &[" const", " volatile", " &&", " &"];
+/// Most whole-name `{…}` wrappers opened before a name is judged by the
+/// fallback key instead; real special names nest one or two deep.
+const MAX_SPECIAL_NAME_DEPTH: usize = 16;
 /// Namespace spelling of a C++ unnamed namespace.
 const ANONYMOUS_NAMESPACE: &str = "(anonymous namespace)::";
 /// Pointer and reference forms stripped from the type side of a Rust impl.
@@ -153,10 +157,24 @@ pub fn owner_of(
         };
     };
     let name = judging_name(name, strip_platform_underscore);
-    let normalized = normalize(name);
-    let (key, family) = derive_key(function_name(head(&normalized)));
+    let Some((normalized, special)) = normalize(name) else {
+        return SymbolOwner {
+            ownership: if own.contains(GLOBAL_KEY) {
+                Ownership::Own
+            } else {
+                Ownership::Other
+            },
+            key: GLOBAL_KEY.to_owned(),
+            family: None,
+        };
+    };
+    let head = head(&normalized);
+    // A demangled C++ function carries a parameter list or a special-name
+    // wrapper; a demangled Rust path carries neither.
+    let rust_shaped = !special && head.len() == normalized.len();
+    let (key, family) = derive_key(function_name(head));
     let family = family.or_else(|| {
-        if is_language_std_key(&key) {
+        if is_language_std_key(&key, rust_shaped) {
             Some(ToolchainFamily::LanguageStd)
         } else if is_reserved_identifier(&key) {
             Some(ToolchainFamily::Reserved)
@@ -276,28 +294,28 @@ pub fn is_static_initializer_spelling(name: &str) -> bool {
 }
 
 /// Judging form of a name: decorations removed, special-name braces opened,
-/// and unnamed namespaces dropped.
-fn normalize(name: &str) -> String {
+/// and unnamed namespaces dropped, beside whether a special name was opened.
+///
+/// `None` for a name wrapped deeper than [`MAX_SPECIAL_NAME_DEPTH`]: each
+/// opening rescans the name, so the bound is what keeps judging linear.
+fn normalize(name: &str) -> Option<(String, bool)> {
     let mut current = strip_decorations(name);
+    let mut depth = 0;
     while let Some(inner) = special_name_target(&current) {
+        depth += 1;
+        if depth > MAX_SPECIAL_NAME_DEPTH {
+            return None;
+        }
         current = strip_decorations(&inner);
     }
-    drop_anonymous_namespaces(&current)
+    Some((drop_anonymous_namespaces(&current), depth > 0))
 }
 
 /// Remove a binaryen clone suffix, ABI tags, clone annotations, and trailing
-/// cv- and ref-qualifiers.
+/// cv- and ref-qualifiers, in time linear in the name.
 fn strip_decorations(name: &str) -> String {
-    let mut text = name
-        .find(BINARYEN_SUFFIX)
-        .map_or(name, |at| &name[..at])
-        .to_owned();
-    while let Some(start) = text.find(ABI_TAG) {
-        let Some(length) = text[start..].find(']') else {
-            break;
-        };
-        text.replace_range(start..=start + length, "");
-    }
+    let text = strip_abi_tags(name.find(BINARYEN_SUFFIX).map_or(name, |at| &name[..at]));
+    let mut text = text.as_str();
     loop {
         let trimmed = text.trim_end();
         let stripped = TRAILING_QUALIFIERS
@@ -309,10 +327,31 @@ fn strip_decorations(name: &str) -> String {
                     .then(|| &trimmed[..start])
             });
         match stripped {
-            Some(rest) => text = rest.to_owned(),
+            Some(rest) => text = rest,
             None => return trimmed.to_owned(),
         }
     }
+}
+
+/// Remove every ABI tag through its closing `]`, leftmost first, including a
+/// tag that only forms once an earlier one is removed. A tag without a closing
+/// `]` ends the removal.
+fn strip_abi_tags(name: &str) -> String {
+    let mut text = String::with_capacity(name.len());
+    let mut rest = name;
+    while let Some(character) = rest.chars().next() {
+        text.push(character);
+        rest = &rest[character.len_utf8()..];
+        if text.ends_with(ABI_TAG) {
+            let Some(close) = rest.find(']') else {
+                break;
+            };
+            text.truncate(text.len() - ABI_TAG.len());
+            rest = &rest[close + 1..];
+        }
+    }
+    text.push_str(rest);
+    text
 }
 
 /// For a name wholly wrapped in `{…}` (thunk, vtable, typeinfo), the name it
@@ -556,9 +595,10 @@ fn is_operator_keyword(name: &str, at: usize) -> bool {
     preceded && followed
 }
 
-/// Whether `key` names a Rust sysroot crate or the C++ standard library.
-fn is_language_std_key(key: &str) -> bool {
-    key == STD_KEY || is_sysroot_crate(key)
+/// Whether `key` names the C++ standard library, or a Rust sysroot crate in a
+/// name that is Rust-shaped rather than a C++ namespace sharing the spelling.
+fn is_language_std_key(key: &str, rust_shaped: bool) -> bool {
+    key == STD_KEY || (rust_shaped && is_sysroot_crate(key))
 }
 
 /// Whether `key` is a crate a Rust toolchain ships in its sysroot.
@@ -805,7 +845,62 @@ mod tests {
             own: &["std"],
             ..language_std(Demangled("std::foo()"), "std")
         });
+        for name in ["core::x::f()", "test::run()"] {
+            rows.push(Row {
+                own: &["core", "test"],
+                ..row(
+                    Demangled(name),
+                    name.split("::").next().unwrap_or_default(),
+                    Ownership::Own,
+                    None,
+                )
+            });
+        }
+        rows.push(other(Demangled("object::Foo::bar()"), "object"));
+        rows.push(other(Mangled("_ZN6unwind2goEv"), "unwind"));
+        rows.push(other(Mangled("_ZTVN4core6WidgetE"), "core"));
+        rows.push(Row {
+            own: &["core"],
+            ..language_std(Mangled("_ZN4core3fmt5write17h0123456789abcdefE"), "core")
+        });
+        rows.push(other(Demangled("{{{vtable(my::Widget)}}}"), "my"));
+        rows.push(other(Demangled("my[ab[abi:x]i:y]::f()"), "my"));
         rows
+    }
+
+    /// Names built to make judging rescan the whole name once per repetition.
+    #[test]
+    fn deeply_repeated_decorations_are_judged_in_linear_time() {
+        let repeats = 100_000;
+        let own = OwnDeclaration::default();
+        let judged = |name: String| owner_of(Some(&name), false, &own).key;
+
+        assert_eq!(judged(format!("my::f(){}", " const".repeat(repeats))), "my");
+        assert_eq!(
+            judged(format!("my::f{}()", "[abi:a]".repeat(repeats))),
+            "my"
+        );
+        assert_eq!(
+            judged(format!("my::f(){}", " [clone .cold]".repeat(repeats))),
+            "my"
+        );
+    }
+
+    #[test]
+    fn a_name_wrapped_beyond_the_depth_bound_takes_the_fallback_key() {
+        let depth = 100_000;
+        let name = format!("{}core::f(){}", "{".repeat(depth), "}".repeat(depth));
+
+        let owner = owner_of(Some(&name), false, &OwnDeclaration::default());
+
+        assert_eq!(
+            owner,
+            SymbolOwner {
+                key: "<global>".to_owned(),
+                ownership: Ownership::Other,
+                family: None,
+            }
+        );
     }
 
     #[test]

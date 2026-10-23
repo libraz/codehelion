@@ -64,12 +64,6 @@ pub const ARTIFACT_CALIBRATION_REPORT_JSON_SCHEMA: &str =
 /// JSON report schema emitted by artifact calibration.
 const ARTIFACT_CALIBRATION_REPORT_SCHEMA_VERSION: &str = "artifact-calibration-report-v1";
 
-/// Number of fields in every artifact CSV record.
-///
-/// Columns are only ever appended, so a consumer that reads by position keeps
-/// reading the same values after a release adds one.
-const ARTIFACT_CSV_COLUMNS: usize = 36;
-
 /// A direct before-minus-after artifact-size observation.
 ///
 /// This is deliberately distinct from [`EstimatedRefactorSavingsBytes`] and
@@ -97,7 +91,10 @@ mod output;
 mod recorded;
 
 use crate::scan::write_output;
-use calibration_report::{calibration_database, read_build_variant, record_comparison_calibration};
+use calibration_report::{
+    calibration_clone_group, calibration_database, read_build_variant,
+    record_comparison_calibration,
+};
 use input::{
     compare_untrusted_containment, inspect, read_artifact_input, resolve_wasm_source_maps,
     untrusted_containment,
@@ -210,7 +207,9 @@ use calibration::{csv, optional_f64};
 /// Everything the analysis stated is read back from its own rows — the
 /// correlation, the outcome of each declared source-map reference, and the
 /// ceilings an untrusted run installed — so this re-render says what that
-/// analysis said rather than what re-deriving it today would say.
+/// analysis said rather than what re-deriving it today would say. Owner labels
+/// are the exception: nothing about ownership is stored, so they are derived
+/// again from the current `[artifact] own` declaration.
 ///
 /// # Errors
 ///
@@ -330,6 +329,7 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
         .as_deref()
         .map(crate::scan_lock::acquire)
         .transpose()?;
+    let clone_group = calibration_clone_group(args, database.as_deref())?;
     worker::set_stage("parsing before artifact");
     let before = inspect(
         &args.before,
@@ -365,6 +365,7 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
     worker::set_stage("calibration persistence");
     report.calibration = record_comparison_calibration(
         args,
+        clone_group.as_deref(),
         &before,
         &after,
         before_variant.as_ref(),

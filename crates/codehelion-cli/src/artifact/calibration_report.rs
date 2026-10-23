@@ -9,6 +9,7 @@ use codehelion_store::artifact::{
     ARTIFACT_ANALYSIS_SAVINGS_CALIBRATION_SCHEMA_VERSION, ArtifactAnalysisSavingsCalibration,
     ArtifactSavingsCalibrationStatistics,
 };
+use codehelion_store::query::IdKind;
 use codehelion_store::{BuildVariantFingerprint, CalibrationRecord, Store};
 use serde::{Deserialize, Serialize};
 
@@ -115,8 +116,57 @@ pub(super) fn calibration_database(
     }
 }
 
+/// The full clone-group id `--clone-group` names, resolved in the calibration
+/// database before either artifact is parsed.
+///
+/// The report heading prints an 8-digit prefix, so any unambiguous prefix of
+/// at least that length is accepted; a full id is taken as typed.
+pub(super) fn calibration_clone_group(
+    args: &ArtifactCompareArgs,
+    database: Option<&FilePath>,
+) -> Result<Option<String>> {
+    let (Some(typed), Some(db)) = (args.clone_group.as_deref(), database) else {
+        return Ok(None);
+    };
+    let prefix = typed.to_ascii_lowercase();
+    if !prefix.chars().all(|c| c.is_ascii_hexdigit()) || prefix.len() > crate::FULL_ID_CHARS {
+        usage_bail!(
+            "--clone-group {typed} is not a clone group id: give at least {} and at most {} hexadecimal digits of the id the report prints",
+            crate::suppress::MIN_CLONE_ID_CHARS,
+            crate::FULL_ID_CHARS
+        );
+    }
+    if prefix.len() == crate::FULL_ID_CHARS {
+        return Ok(Some(prefix));
+    }
+    if prefix.len() < crate::suppress::MIN_CLONE_ID_CHARS {
+        usage_bail!(
+            "--clone-group {typed} is too short to identify one clone group; give at least {} of the {} digits",
+            crate::suppress::MIN_CLONE_ID_CHARS,
+            crate::FULL_ID_CHARS
+        );
+    }
+    let store = Store::open_existing(db)
+        .with_context(|| format!("opening calibration database {}", db.display()))?;
+    let mut groups: Vec<String> = store
+        .ids_starting_with(&prefix)?
+        .into_iter()
+        .filter(|found| found.kind == IdKind::CloneGroup)
+        .map(|found| found.id)
+        .collect();
+    match groups.len() {
+        1 => Ok(groups.pop()),
+        0 => usage_bail!("no clone group with id {typed} in {}", db.display()),
+        count => usage_bail!(
+            "--clone-group {typed} names {count} clone groups; give more of one of them: {}",
+            groups.join(", ")
+        ),
+    }
+}
+
 pub(super) fn record_comparison_calibration(
     args: &ArtifactCompareArgs,
+    clone_group: Option<&str>,
     before: &ArtifactIr,
     after: &ArtifactIr,
     before_variant: Option<&BuildVariantEvidence>,
@@ -126,16 +176,23 @@ pub(super) fn record_comparison_calibration(
     let Some(source_run) = args.source_run else {
         return Ok(None);
     };
-    let clone_group = args
-        .clone_group
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("calibration clone group is absent"))?;
+    let clone_group =
+        clone_group.ok_or_else(|| anyhow::anyhow!("calibration clone group is absent"))?;
     let before_variant = before_variant
         .ok_or_else(|| crate::UsageError::new("calibration requires --before-build-variant"))?;
     let after_variant = after_variant
         .ok_or_else(|| crate::UsageError::new("calibration requires --after-build-variant"))?;
-    if before.format != after.format {
-        bail!("calibration requires before and after artifacts of the same format");
+    let (before_key, after_key) = (before.slice_key(), after.slice_key());
+    if before_key != after_key {
+        bail!(
+            "calibration requires before and after artifacts of the same format and architecture: before is {before_key}, after is {after_key}"
+        );
+    }
+    // A container-wide byte difference cannot verify one slice's saving.
+    if before_key.universal_slice {
+        bail!(
+            "calibration requires whole artifacts: the observed byte counts of a slice selected from a universal container include its skipped architectures"
+        );
     }
     if before_variant.fingerprint != after_variant.fingerprint {
         bail!("calibration requires equal before and after build variants");
@@ -151,7 +208,7 @@ pub(super) fn record_comparison_calibration(
         .select_clone_group_estimate(
             source_run,
             clone_group,
-            before.fingerprint.as_bytes(),
+            before.slice_fingerprint().as_bytes(),
             before_variant.fingerprint.as_bytes(),
         )?
         .ok_or_else(|| {
@@ -184,7 +241,7 @@ pub(super) fn record_comparison_calibration(
         before_artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes(
             before_variant.fingerprint.as_bytes(),
         ),
-        after_artifact_fingerprint: after.fingerprint.as_bytes(),
+        after_artifact_fingerprint: after.slice_fingerprint().as_bytes(),
         after_artifact_build_variant_fingerprint: BuildVariantFingerprint::from_bytes(
             after_variant.fingerprint.as_bytes(),
         ),

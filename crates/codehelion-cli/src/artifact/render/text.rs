@@ -5,12 +5,12 @@ use codehelion_artifact::ownership::Ownership;
 
 use super::{
     artifact_import_kind_label, attribution_basis_label, optional_bytes,
-    refactor_savings_assumption_text, stated_bytes,
+    refactor_savings_assumption_text, render_fact_lines, stated_bytes,
 };
 use crate::artifact::model::{
-    ArtifactReport, AssumptionScope, DuplicateGroupReport, OwnershipReport, ReportAssumption,
-    SourceMapResolutionStatus, ToolchainHoldingsReport, dead_code_unavailability, family_label,
-    ownership_label, report_assumptions, retained_size_unavailability,
+    ARTIFACT_FACTS, ArtifactReport, AssumptionScope, DuplicateGroupReport, OwnershipReport,
+    ReportAssumption, SourceMapResolutionStatus, ToolchainHoldingsReport, dead_code_unavailability,
+    family_label, ownership_label, report_assumptions, retained_size_unavailability,
 };
 use crate::artifact::{Result, Write};
 
@@ -20,19 +20,7 @@ pub(in crate::artifact) fn render_text(
     verbose: bool,
     out: &mut impl Write,
 ) -> Result<()> {
-    writeln!(out, "artifact: {}", report.path)?;
-    writeln!(out, "format: {}", report.format)?;
-    if let Some(architecture) = &report.architecture {
-        writeln!(out, "architecture: {architecture}")?;
-    }
-    if !report.skipped_architectures.is_empty() {
-        writeln!(
-            out,
-            "skipped architectures: {}",
-            report.skipped_architectures.join(", ")
-        )?;
-    }
-    writeln!(out, "fingerprint: {}", report.fingerprint)?;
+    render_fact_lines(ARTIFACT_FACTS, report, out)?;
     if let Some(variant) = &report.build_variant {
         writeln!(
             out,
@@ -54,7 +42,6 @@ pub(in crate::artifact) fn render_text(
     writeln!(out, "observed bytes: {}", report.observed_bytes)?;
     writeln!(out, "code section bytes: {}", report.code_section_bytes)?;
     writeln!(out, "data segment bytes: {}", report.data_segment_bytes)?;
-    writeln!(out, "sections: {}", report.sections)?;
     if !report.section_details.is_empty() {
         writeln!(out, "section sizes:")?;
         for section in &report.section_details {
@@ -72,16 +59,11 @@ pub(in crate::artifact) fn render_text(
             )?;
         }
     }
-    writeln!(out, "imports: {}", report.imports)?;
     // Every rendering takes its qualifying statements from one description of
     // the report, so a reader of any one format sees the same set.
     let assumptions = report_assumptions(report);
     writeln!(out, "symbols: {}", report.symbols.len())?;
     render_assumptions(&assumptions, AssumptionScope::Symbols, out)?;
-    writeln!(out, "entry points: {}", report.entry_points)?;
-    writeln!(out, "calls: {}", report.calls)?;
-    writeln!(out, "relocations: {}", report.relocations)?;
-    writeln!(out, "source mappings: {}", report.source_mappings)?;
     if !report.archive_members.is_empty() {
         let failed = report
             .archive_members
@@ -292,7 +274,6 @@ pub(in crate::artifact) fn render_text(
             }
         }
     }
-    writeln!(out, "data segments: {}", report.data_segments)?;
     if report.capabilities.normalized_duplicates {
         writeln!(
             out,

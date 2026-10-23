@@ -158,7 +158,7 @@ pub(super) fn record(
         schema_version: &artifact.schema_version,
         path: &args.path.display().to_string(),
         format: artifact.format.name(),
-        content_fingerprint: artifact.fingerprint.as_bytes(),
+        content_fingerprint: artifact.slice_fingerprint().as_bytes(),
         observed_bytes: artifact.observed_bytes,
         ir_json: &ir_json,
         build_variant_manifest_path: build_variant.map(|value| value.manifest_path.as_str()),

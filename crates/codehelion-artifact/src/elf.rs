@@ -6,7 +6,8 @@
 use crate::dwarf::{DwarfBudget, attach_dwarf_frames};
 use crate::identity::{PositionalCall, assign_identities};
 use crate::native::{
-    collect_sections, collect_text_symbol_ranges, collect_undefined_imports, join_addresses,
+    ResolvedRelocation, ResolvedTarget, SymbolIndex, collect_sections, collect_text_symbol_ranges,
+    collect_undefined_imports, join_addresses,
 };
 use crate::support::format_support;
 use crate::x86::X86_NORMALIZATION_VERSION;
@@ -16,8 +17,7 @@ use crate::{
 };
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 use object::{
-    Architecture, Endianness, Object, ObjectKind, ObjectSection, RelocationKind, RelocationTarget,
-    SectionKind,
+    Architecture, Endianness, Object, ObjectSection, RelocationKind, RelocationTarget, SectionKind,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -110,34 +110,16 @@ impl ElfBackend {
             })
             .transpose()?;
         let mut ir = ArtifactIr::empty(ArtifactFormat::Elf, bytes);
-        // Joins resolve to symbol positions, so copies sharing a fingerprint
-        // stay apart until identities are assigned.
-        let mut symbol_positions = HashMap::new();
-        let mut symbol_addresses = HashMap::new();
-        let mut symbol_addresses_by_section = HashMap::new();
         collect_sections(&file, &mut ir).map_err(|error| malformed(error.to_string()))?;
         collect_undefined_imports(file.symbols().chain(file.dynamic_symbols()), &mut ir);
-        let supports_global_address_join = file.kind() != ObjectKind::Relocatable;
+        // Joins resolve to symbol positions, so copies sharing a fingerprint
+        // stay apart until identities are assigned.
         let text = collect_text_symbol_ranges(&file, &mut ir)
             .map_err(|error| malformed(error.to_string()))?;
-        for symbol in &text.symbols {
-            symbol_positions.insert(symbol.index, symbol.position);
-            symbol_addresses_by_section.insert((symbol.section, symbol.address), symbol.position);
-            if supports_global_address_join {
-                symbol_addresses
-                    .entry(symbol.address)
-                    .or_insert(symbol.position);
-            }
-        }
-        let entry = entry_root(file.entry(), &symbol_addresses);
-        let init_fini = init_fini_roots(&file, &symbol_positions, &symbol_addresses);
-        let transfers = x86_transfers(
-            &file,
-            &ir.symbols,
-            &symbol_positions,
-            &symbol_addresses_by_section,
-            &symbol_addresses,
-        );
+        let index = &text.index;
+        let entry = entry_root(file.entry(), index);
+        let init_fini = init_fini_roots(&file, index);
+        let transfers = x86_transfers(&file, &ir.symbols, index);
         let roots: BTreeSet<usize> = entry
             .iter()
             .chain(&init_fini)
@@ -202,9 +184,9 @@ fn matching_build_id(artifact: &object::File<'_>, companion: &object::File<'_>) 
 /// A zero entry address is the conventional absence marker for relocatable
 /// objects. Addresses are lookup evidence only and never become part of IR
 /// identity.
-fn entry_root(entry_address: u64, addresses: &HashMap<u64, usize>) -> Option<usize> {
+fn entry_root(entry_address: u64, index: &SymbolIndex) -> Option<usize> {
     (entry_address != 0)
-        .then(|| addresses.get(&entry_address).copied())
+        .then(|| index.at_image_address(entry_address))
         .flatten()
 }
 
@@ -213,30 +195,17 @@ fn entry_root(entry_address: u64, addresses: &HashMap<u64, usize>) -> Option<usi
 /// A relocation in either array is loader evidence that the target can run
 /// even without a normal call edge or external export. The section and symbol
 /// indexes are used only while parsing; the IR records the stable fingerprint.
-fn init_fini_roots(
-    file: &object::File<'_>,
-    positions: &HashMap<object::SymbolIndex, usize>,
-    addresses: &HashMap<u64, usize>,
-) -> BTreeSet<usize> {
+fn init_fini_roots(file: &object::File<'_>, index: &SymbolIndex) -> BTreeSet<usize> {
     let mut roots = BTreeSet::new();
     for section in file.sections() {
         if !matches!(section.name().ok(), Some(".init_array" | ".fini_array")) {
             continue;
         }
-        for (_, relocation) in section.relocations() {
-            if let RelocationTarget::Symbol(index) = relocation.target()
-                && let Some(position) = positions.get(&index)
-            {
-                roots.insert(*position);
-            }
+        for relocation in index.relocations_in(section.index()) {
+            note_relocation_target(relocation.target, index, &mut roots);
         }
         if let Ok(data) = section.data() {
-            roots.extend(pointer_roots(
-                data,
-                file.is_64(),
-                file.endianness(),
-                addresses,
-            ));
+            roots.extend(pointer_roots(data, file.is_64(), file.endianness(), index));
         }
     }
     roots
@@ -247,13 +216,13 @@ fn pointer_roots(
     bytes: &[u8],
     is_64: bool,
     endianness: Endianness,
-    addresses: &HashMap<u64, usize>,
+    index: &SymbolIndex,
 ) -> BTreeSet<usize> {
     let width = if is_64 { 8 } else { 4 };
     bytes
         .chunks_exact(width)
         .filter_map(|chunk| pointer_value(chunk, endianness))
-        .filter_map(|address| addresses.get(&address).copied())
+        .filter_map(|address| index.at_image_address(address))
         .collect()
 }
 
@@ -288,14 +257,6 @@ struct X86Transfers {
     address_taken: BTreeSet<usize>,
 }
 
-/// Where one function lies in its section's address space.
-#[derive(Debug, Clone, Copy)]
-struct FunctionRange {
-    start: u64,
-    end: u64,
-    position: usize,
-}
-
 /// A function by its position in the symbol list, beside its record.
 type Positioned<'a> = (usize, &'a ArtifactSymbol);
 
@@ -311,12 +272,9 @@ fn holds_function_pointers<'data>(section: &impl ObjectSection<'data>) -> bool {
 struct SectionBranches<'a> {
     section: object::SectionIndex,
     address: u64,
-    /// Rel32 branch operands the object relocates, by section offset.
-    relocation_targets: HashMap<u64, RelocationTarget>,
-    /// Functions of the section sorted by start address.
-    ranges: Vec<FunctionRange>,
-    positions: &'a HashMap<object::SymbolIndex, usize>,
-    addresses: &'a HashMap<(object::SectionIndex, u64), usize>,
+    /// The section's relocations with their targets, by section offset.
+    relocations: &'a [ResolvedRelocation],
+    index: &'a SymbolIndex,
 }
 
 impl SectionBranches<'_> {
@@ -334,18 +292,15 @@ impl SectionBranches<'_> {
         consumed: &mut BTreeSet<u64>,
     ) -> (Option<usize>, Option<UnresolvedCall>) {
         let relocation = rel32_displacement(instruction, self.address)
-            .and_then(|offset| self.relocation_targets.get(&offset).map(|t| (offset, t)));
-        if let Some((offset, target)) = relocation {
-            consumed.insert(offset);
-            return match target {
-                RelocationTarget::Symbol(index) => self
-                    .positions
-                    .get(index)
-                    .copied()
-                    .map_or((None, Some(UnresolvedCall::ExternalImport)), |target| {
-                        (Some(target), None)
-                    }),
-                _ => (None, Some(UnresolvedCall::MissingRelocation)),
+            .and_then(|offset| self.branch_relocation(offset));
+        if let Some(relocation) = relocation {
+            consumed.insert(relocation.offset);
+            return match relocation.target {
+                ResolvedTarget::Function(target) => (Some(target), None),
+                ResolvedTarget::Undefined => (None, Some(UnresolvedCall::ExternalImport)),
+                ResolvedTarget::UncoveredText(_) | ResolvedTarget::NotCode => {
+                    (None, Some(UnresolvedCall::MissingRelocation))
+                }
             };
         }
         let destination = instruction.near_branch_target();
@@ -353,12 +308,11 @@ impl SectionBranches<'_> {
             return (None, None);
         }
         let target = self
-            .addresses
-            .get(&(self.section, destination))
-            .copied()
+            .index
+            .at_section_address(self.section, destination)
             .or_else(|| {
                 is_jump
-                    .then(|| containing_function(&self.ranges, destination))
+                    .then(|| self.index.containing(self.section, destination))
                     .flatten()
             });
         (
@@ -367,6 +321,23 @@ impl SectionBranches<'_> {
                 .is_none()
                 .then_some(UnresolvedCall::MissingRelocation),
         )
+    }
+
+    /// The PC-relative relocation applied at section offset `offset`.
+    fn branch_relocation(&self, offset: u64) -> Option<&ResolvedRelocation> {
+        let first = self
+            .relocations
+            .partition_point(|relocation| relocation.offset < offset);
+        self.relocations
+            .get(first..)?
+            .iter()
+            .take_while(|relocation| relocation.offset == offset)
+            .find(|relocation| {
+                matches!(
+                    relocation.kind,
+                    RelocationKind::Relative | RelocationKind::PltRelative
+                )
+            })
     }
 }
 
@@ -393,30 +364,6 @@ const fn is_jump(mnemonic: Mnemonic) -> bool {
     )
 }
 
-/// Address ranges of the non-empty functions of one section, sorted by start.
-fn function_ranges(
-    functions: &[Positioned<'_>],
-    section_address: u64,
-    section_offset: u64,
-) -> Vec<FunctionRange> {
-    let mut ranges: Vec<_> = functions
-        .iter()
-        .filter(|(_, function)| !function.code.is_empty())
-        .filter_map(|(position, function)| {
-            let start =
-                section_address.checked_add(function.offset.checked_sub(section_offset)?)?;
-            let length = u64::try_from(function.code.len()).ok()?;
-            Some(FunctionRange {
-                start,
-                end: start.saturating_add(length),
-                position: *position,
-            })
-        })
-        .collect();
-    ranges.sort_by_key(|range| range.start);
-    ranges
-}
-
 /// Decode one function and record the transfers and address-taking in it.
 #[allow(clippy::too_many_arguments)]
 fn scan_function(
@@ -425,7 +372,6 @@ fn scan_function(
     inside: &std::ops::Range<u64>,
     bitness: u32,
     branches: &SectionBranches<'_>,
-    global_addresses: &HashMap<u64, usize>,
     consumed: &mut BTreeSet<u64>,
     transfers: &mut X86Transfers,
 ) {
@@ -438,8 +384,8 @@ fn scan_function(
         let is_call = instruction.mnemonic() == Mnemonic::Call;
         let is_jump = is_jump(instruction.mnemonic());
         if !is_call && !is_jump {
-            if !global_addresses.is_empty() {
-                note_address_taken(&instruction, global_addresses, transfers);
+            if branches.index.has_image_addresses() {
+                note_address_taken(&instruction, branches.index, transfers);
             }
             continue;
         }
@@ -479,9 +425,7 @@ fn scan_function(
 fn x86_transfers(
     file: &object::File<'_>,
     symbols: &[ArtifactSymbol],
-    positions: &HashMap<object::SymbolIndex, usize>,
-    addresses: &HashMap<(object::SectionIndex, u64), usize>,
-    global_addresses: &HashMap<u64, usize>,
+    index: &SymbolIndex,
 ) -> X86Transfers {
     let bitness = match file.architecture() {
         Architecture::I386 => 32,
@@ -505,28 +449,14 @@ fn x86_transfers(
     {
         let (section_offset, _) = section.file_range().unwrap_or((0, 0));
         let section_index = u32::try_from(section.index().0).ok();
-        let mut section_relocations = Vec::new();
-        let mut relocation_targets = HashMap::new();
-        for (offset, relocation) in section.relocations() {
-            section_relocations.push((offset, relocation.target()));
-            if matches!(
-                relocation.kind(),
-                RelocationKind::Relative | RelocationKind::PltRelative
-            ) {
-                relocation_targets.insert(offset, relocation.target());
-            }
-        }
         let callers = callers_by_section
             .get(&section_index)
             .map_or(&[][..], Vec::as_slice);
-        let ranges = function_ranges(callers, section.address(), section_offset);
         let branches = SectionBranches {
             section: section.index(),
             address: section.address(),
-            relocation_targets,
-            ranges,
-            positions,
-            addresses,
+            relocations: index.relocations_in(section.index()),
+            index,
         };
         let mut consumed = BTreeSet::new();
         for &(position, caller) in callers {
@@ -544,139 +474,90 @@ fn x86_transfers(
                 &inside,
                 bitness,
                 &branches,
-                global_addresses,
                 &mut consumed,
                 &mut transfers,
             );
         }
         // A relocation no branch consumed hands a function's address to
         // whatever the instruction does with it.
-        for (_, target) in section_relocations
+        for relocation in branches
+            .relocations
             .iter()
-            .filter(|(offset, _)| !consumed.contains(offset))
+            .filter(|relocation| !consumed.contains(&relocation.offset))
         {
-            note_relocation_target(
-                file,
-                target,
-                positions,
-                &callers_by_section,
-                &mut transfers.address_taken,
-            );
+            note_relocation_target(relocation.target, index, &mut transfers.address_taken);
         }
     }
-    note_data_references(
-        file,
-        positions,
-        &callers_by_section,
-        global_addresses,
-        &mut transfers.address_taken,
-    );
+    note_data_references(file, index, &mut transfers.address_taken);
     transfers
 }
 
 /// Record the functions that data sections and dynamic relocations point at.
 fn note_data_references(
     file: &object::File<'_>,
-    positions: &HashMap<object::SymbolIndex, usize>,
-    callers_by_section: &HashMap<Option<u32>, Vec<Positioned<'_>>>,
-    global_addresses: &HashMap<u64, usize>,
+    index: &SymbolIndex,
     address_taken: &mut BTreeSet<usize>,
 ) {
     for section in file.sections().filter(holds_function_pointers) {
-        for (_, relocation) in section.relocations() {
-            note_relocation_target(
-                file,
-                &relocation.target(),
-                positions,
-                callers_by_section,
-                address_taken,
-            );
+        for relocation in index.relocations_in(section.index()) {
+            note_relocation_target(relocation.target, index, address_taken);
         }
-        if !global_addresses.is_empty()
+        if index.has_image_addresses()
             && let Ok(data) = section.data()
         {
-            address_taken.extend(pointer_roots(
-                data,
-                file.is_64(),
-                file.endianness(),
-                global_addresses,
-            ));
+            address_taken.extend(pointer_roots(data, file.is_64(), file.endianness(), index));
         }
     }
-    if global_addresses.is_empty() {
+    if !index.has_image_addresses() {
         return;
     }
     for (_, relocation) in file.dynamic_relocations().into_iter().flatten() {
         if relocation.target() == RelocationTarget::Absolute
             && let Ok(address) = u64::try_from(relocation.addend())
-            && let Some(position) = global_addresses.get(&address)
+            && let Some(position) = index.at_image_address(address)
         {
-            address_taken.insert(*position);
+            address_taken.insert(position);
         }
     }
 }
 
-/// The function whose bytes contain `address`, among ranges sorted by start.
-fn containing_function(ranges: &[FunctionRange], address: u64) -> Option<usize> {
-    let after = ranges.partition_point(|range| range.start <= address);
-    ranges
-        .get(after.checked_sub(1)?)
-        .filter(|range| address < range.end)
-        .map(|range| range.position)
-}
-
-/// Record the function a relocation points at as address-taken.
+/// Record the function a relocation points at as a root.
 ///
-/// A section target names no single function, so every function in a text
-/// section it points into counts.
+/// A text location no function covers, or one the relocation does not place
+/// exactly, roots every function of that section, so no function it may name
+/// is left provably dead.
 fn note_relocation_target(
-    file: &object::File<'_>,
-    target: &RelocationTarget,
-    positions: &HashMap<object::SymbolIndex, usize>,
-    callers_by_section: &HashMap<Option<u32>, Vec<Positioned<'_>>>,
-    address_taken: &mut BTreeSet<usize>,
+    target: ResolvedTarget,
+    index: &SymbolIndex,
+    roots: &mut BTreeSet<usize>,
 ) {
     match target {
-        RelocationTarget::Symbol(index) => {
-            if let Some(position) = positions.get(index) {
-                address_taken.insert(*position);
-            }
+        ResolvedTarget::Function(position) => {
+            roots.insert(position);
         }
-        RelocationTarget::Section(index)
-            if file
-                .section_by_index(*index)
-                .is_ok_and(|section| section.kind() == SectionKind::Text) =>
-        {
-            address_taken.extend(
-                callers_by_section
-                    .get(&u32::try_from(index.0).ok())
-                    .into_iter()
-                    .flatten()
-                    .map(|(position, _)| *position),
-            );
-        }
-        _ => {}
+        ResolvedTarget::UncoveredText(section) => roots.extend(index.section_owners(section)),
+        ResolvedTarget::NotCode | ResolvedTarget::Undefined => {}
     }
 }
 
 /// Record a function whose address an instruction of a linked image computes.
 fn note_address_taken(
     instruction: &Instruction,
-    addresses: &HashMap<u64, usize>,
+    index: &SymbolIndex,
     transfers: &mut X86Transfers,
 ) {
     if instruction.is_ip_rel_memory_operand()
-        && let Some(position) = addresses.get(&instruction.ip_rel_memory_address())
+        && let Some(position) = index.at_image_address(instruction.ip_rel_memory_address())
     {
-        transfers.address_taken.insert(*position);
+        transfers.address_taken.insert(position);
     }
     for operand in 0..instruction.op_count() {
         if matches!(
             instruction.op_kind(operand),
             OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate32to64
-        ) && let Some(position) = addresses.get(&instruction.immediate(operand))
+        ) && let Some(position) = index.at_image_address(instruction.immediate(operand))
         {
-            transfers.address_taken.insert(*position);
+            transfers.address_taken.insert(position);
         }
     }
 }

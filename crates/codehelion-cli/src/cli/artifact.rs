@@ -296,7 +296,8 @@ pub struct ArtifactCompareArgs {
     /// the refactoring being measured.
     #[arg(long)]
     pub source_run: Option<i64>,
-    /// Stable clone-group fingerprint to evaluate against this comparison.
+    /// Clone group to evaluate against this comparison: its id, or an
+    /// unambiguous prefix of at least 8 hex digits as the report heading prints.
     #[arg(long)]
     pub clone_group: Option<String>,
     /// Local database path used to read the estimate and persist calibration.

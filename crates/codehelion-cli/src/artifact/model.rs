@@ -8,6 +8,7 @@ use super::{
 mod assumption;
 mod columns;
 mod comparison;
+mod facts;
 mod ownership;
 
 pub(super) use assumption::{
@@ -23,6 +24,9 @@ pub(super) use comparison::{
     ComparisonBuildVariant, SymbolDelta, code_section_bytes, data_segment_bytes,
     pairs_both_artifacts,
 };
+#[cfg(test)]
+pub(super) use comparison::{SYMBOL_IDENTITY_CHANGED, symbol_change};
+pub(super) use facts::{ARTIFACT_FACTS, COMPARISON_FACTS, ReportFact};
 pub(super) use ownership::{
     OwnershipDeltaReport, OwnershipReport, ToolchainHoldingsReport, declared_ownership,
     family_label, ownership_label, ownership_of, symbol_owners,

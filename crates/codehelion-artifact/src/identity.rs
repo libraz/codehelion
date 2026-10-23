@@ -4,8 +4,8 @@
 //! fingerprint, yet each occupies its own bytes and its own place in the call
 //! graph. Copies are told apart by Weisfeiler–Lehman colour refinement over
 //! the call graph: a copy's colour starts from its content, reachability bit,
-//! size and body identity, and each round folds in the colours of its callers
-//! and callees and its unresolved calls. Refinement runs separately per weakly
+//! size and body identity, and each round folds in how many of its callers
+//! and callees carry each colour, and its unresolved calls. Refinement runs separately per weakly
 //! connected component of copy-to-copy edges, so adding an unrelated group of
 //! copies never moves another copy's identity. Copies the refinement cannot
 //! separate are numbered in file order and marked as such.
@@ -74,6 +74,9 @@ pub(crate) fn assign_identities(
 /// A refinement colour; copies end up sharing one only when indistinguishable.
 type Colour = ArtifactFingerprint;
 
+/// Leads a neighbour list that carries counts, which a list length never equals.
+const COUNTED_NEIGHBOURS: u64 = u64::MAX;
+
 /// Callers, callees and unresolved calls of every symbol, as sets.
 struct Graph {
     callers: Vec<BTreeSet<usize>>,
@@ -105,10 +108,22 @@ impl Graph {
         let mut payload = Vec::new();
         field(&mut payload, &colours[position].as_bytes());
         for neighbours in [&self.callers[position], &self.callees[position]] {
-            let set: BTreeSet<Colour> = neighbours.iter().map(|other| colours[*other]).collect();
-            payload.extend((set.len() as u64).to_le_bytes());
-            for colour in set {
+            let mut counts: BTreeMap<Colour, u64> = BTreeMap::new();
+            for other in neighbours {
+                *counts.entry(colours[*other]).or_default() += 1;
+            }
+            // Neighbours of distinct colours keep the plain list, so only a
+            // repeated colour adds counts to the payload.
+            let counted = counts.values().any(|count| *count > 1);
+            if counted {
+                payload.extend(COUNTED_NEIGHBOURS.to_le_bytes());
+            }
+            payload.extend((counts.len() as u64).to_le_bytes());
+            for (colour, count) in counts {
                 payload.extend(colour.as_bytes());
+                if counted {
+                    payload.extend(count.to_le_bytes());
+                }
             }
         }
         let unresolved = &self.unresolved[position];
@@ -356,6 +371,35 @@ mod tests {
     }
 
     #[test]
+    fn copies_told_apart_by_how_many_alike_callers_reach_them_are_not_marked() {
+        // 0, 1 and 2 are copies of one caller; two of them call 3, one calls 4.
+        let (symbols, _) = assigned(&[1, 1, 1, 9, 9], &[], &[call(0, 3), call(1, 3), call(2, 4)]);
+
+        assert_unique(&symbols);
+        assert!(!symbols[3].identity_by_order, "{:#?}", symbols[3]);
+        assert!(!symbols[4].identity_by_order, "{:#?}", symbols[4]);
+    }
+
+    #[test]
+    fn distinct_neighbour_colours_keep_their_fingerprints() {
+        let mut payload = Vec::new();
+        field(&mut payload, &content(9).as_bytes());
+        for neighbours in [vec![content(1)], vec![]] {
+            payload.extend((neighbours.len() as u64).to_le_bytes());
+            for colour in neighbours {
+                payload.extend(colour.as_bytes());
+            }
+        }
+        payload.extend(0_u64.to_le_bytes());
+        let set_based = ArtifactFingerprint::from_content("artifact-symbol-colour-round", &payload);
+
+        let graph = Graph::new(2, &[call(0, 1)]);
+        let colours = [content(1), content(9)];
+
+        assert_eq!(graph.next_colour(1, &colours), set_based);
+    }
+
+    #[test]
     fn an_unrelated_copy_group_does_not_move_other_copies() {
         // Copies of 9 told apart by callers 1 and 2.
         let alone = assigned(&[1, 2, 9, 9], &[], &[call(0, 2), call(1, 3)]);
@@ -457,17 +501,28 @@ mod tests {
             };
             let mut signatures = BTreeMap::new();
             let mut next_class = BTreeMap::new();
+            let counted = |neighbours: BTreeSet<usize>| {
+                let mut counts: BTreeMap<Label, usize> = BTreeMap::new();
+                for neighbour in neighbours {
+                    *counts.entry(label(neighbour)).or_default() += 1;
+                }
+                counts
+            };
             for &position in &copies {
-                let called_by: BTreeSet<Label> = calls
-                    .iter()
-                    .filter(|call| call.target == Some(position))
-                    .map(|call| label(call.caller))
-                    .collect();
-                let callees: BTreeSet<Label> = calls
-                    .iter()
-                    .filter(|call| call.caller == position)
-                    .filter_map(|call| call.target.map(label))
-                    .collect();
+                let called_by = counted(
+                    calls
+                        .iter()
+                        .filter(|call| call.target == Some(position))
+                        .map(|call| call.caller)
+                        .collect(),
+                );
+                let callees = counted(
+                    calls
+                        .iter()
+                        .filter(|call| call.caller == position)
+                        .filter_map(|call| call.target)
+                        .collect(),
+                );
                 let unresolved: BTreeSet<String> = calls
                     .iter()
                     .filter(|call| call.caller == position)

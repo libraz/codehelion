@@ -61,8 +61,11 @@ pub fn collect_undefined_imports<'data, S>(
         }));
 }
 
-/// Copy the section, read-only data, and relocation facts common to native
-/// object formats into format-neutral IR.
+/// Copy the section and read-only data facts common to native object formats
+/// into format-neutral IR.
+///
+/// Relocations are recorded by [`collect_text_symbols`], which can name the
+/// function a section-relative target lands in.
 ///
 /// # Errors
 ///
@@ -87,14 +90,6 @@ pub fn collect_sections(file: &object::File<'_>, ir: &mut ArtifactIr) -> Result<
                 });
             }
         }
-        for (relocation_offset, relocation) in section.relocations() {
-            ir.relocations.push(ArtifactRelocation {
-                section: u32::try_from(section.index().0).ok(),
-                offset: offset.saturating_add(relocation_offset),
-                kind: format!("{:?}", relocation.kind()),
-                target: relocation_target_name(file, relocation.target()),
-            });
-        }
     }
     Ok(())
 }
@@ -112,6 +107,20 @@ pub fn symbol_fingerprint(
     normalized: Option<&NormalizedInstructions>,
     code: &[u8],
 ) -> ArtifactFingerprint {
+    relocated_symbol_fingerprint(name, section, normalized, code, &[])
+}
+
+/// [`symbol_fingerprint`] with the relocations inside the symbol appended.
+///
+/// No relocations leaves the identity exactly as [`symbol_fingerprint`] builds
+/// it, so an artifact without relocations keeps its fingerprints.
+fn relocated_symbol_fingerprint(
+    name: Option<&str>,
+    section: Option<&str>,
+    normalized: Option<&NormalizedInstructions>,
+    code: &[u8],
+    relocations: &[RelocationFact],
+) -> ArtifactFingerprint {
     let mut identity = Vec::new();
     append_field(&mut identity, name.unwrap_or_default().as_bytes());
     append_field(&mut identity, section.unwrap_or_default().as_bytes());
@@ -122,6 +131,15 @@ pub fn symbol_fingerprint(
     } else {
         identity.push(0);
         append_field(&mut identity, code);
+    }
+    for relocation in relocations {
+        append_field(&mut identity, &relocation.offset.to_le_bytes());
+        append_field(&mut identity, relocation.kind.as_bytes());
+        identity.push(u8::from(relocation.target.is_some()));
+        append_field(
+            &mut identity,
+            relocation.target.as_deref().unwrap_or_default().as_bytes(),
+        );
     }
     ArtifactFingerprint::from_content("native-symbol", &identity)
 }
@@ -135,33 +153,6 @@ pub fn data_fingerprint(section: Option<&str>, data: &[u8]) -> ArtifactFingerpri
     ArtifactFingerprint::from_content("native-data", &identity)
 }
 
-/// Determine a native symbol's byte extent without attributing bytes to a
-/// zero-size alias.
-///
-/// An alias owns no bytes: the symbol that claims the same range already does.
-/// Otherwise a declared size wins. For a boundary inferred from neighbouring
-/// symbols, only the next strictly greater address delimits the range.
-#[must_use]
-pub fn symbol_size(
-    address: u64,
-    declared_size: u64,
-    is_alias: bool,
-    following_addresses: impl IntoIterator<Item = u64>,
-    section_end: u64,
-) -> u64 {
-    if is_alias {
-        return 0;
-    }
-    if declared_size != 0 {
-        return declared_size;
-    }
-    following_addresses
-        .into_iter()
-        .find(|candidate| *candidate > address)
-        .unwrap_or(section_end)
-        .saturating_sub(address)
-}
-
 /// Remove only conventional trailing padding from an inferred native symbol.
 ///
 /// Explicit symbol sizes are authoritative and must not use this helper.
@@ -170,67 +161,71 @@ pub fn trim_inferred_symbol_padding(code: &[u8], architecture: object::Architect
     crate::x86::trim_inferred_padding(code, architecture)
 }
 
-/// Alias and boundary facts for one entry of an address-sorted symbol list.
+/// Ownership facts for one entry of a symbol list sorted by address, larger
+/// declared sizes first among equal addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SymbolBoundary {
-    /// Whether this symbol repeats a range another symbol already claims.
-    alias: bool,
-    /// First address in the list that is strictly greater, when one exists.
-    next_greater_address: Option<u64>,
+    /// Entry whose bytes cover this one's start, when this one is an alias.
+    owner: Option<usize>,
+    /// End of the bytes this entry owns; its own start when it owns none.
+    end: u64,
 }
 
-/// Derive alias and boundary facts for an address-sorted symbol list in one
-/// pass over it.
+/// Derive which entries own bytes and where each owned range ends.
 ///
-/// Sorting puts symbols sharing an address in one contiguous run, so both facts
-/// are run-local: a zero-size symbol is an alias when its run holds an earlier
-/// member or any sized member, a sized symbol is an alias when an earlier
-/// member of its run declares the same size, and the only address that can
-/// delimit an inferred range is the next run's. Answering either question per
-/// symbol would rescan the whole section instead, which a format reporting
-/// every symbol as zero-sized turns into a scan of the section per symbol.
-fn symbol_boundaries(sorted: &[(u64, u64)]) -> Vec<SymbolBoundary> {
-    boundaries_and_reads(sorted).0
+/// An entry starting inside bytes an earlier owner already claims is an alias
+/// owning none, so owned ranges never overlap and their total never exceeds the
+/// section, whatever extents the symbol table declares. A declared size ends
+/// an owner's range; otherwise the next strictly greater address, or the
+/// section end, does.
+fn symbol_boundaries(sorted: &[(u64, u64)], section_end: u64) -> Vec<SymbolBoundary> {
+    boundaries_and_reads(sorted, section_end).0
 }
 
 /// [`symbol_boundaries`] beside the number of entries it read.
 ///
-/// The count is what separates this from the whole-list rescan it replaced: a
-/// reader that consults every earlier symbol is quadratic in the number of
+/// The count is what separates this from a per-symbol rescan of the section:
+/// a reader that consults every earlier symbol is quadratic in the number of
 /// symbols sharing a section, which a wall clock only reveals on a machine
-/// that happens to be idle. Callers outside the tests take the boundaries and
-/// drop the count.
-fn boundaries_and_reads(sorted: &[(u64, u64)]) -> (Vec<SymbolBoundary>, usize) {
-    let mut boundaries = Vec::with_capacity(sorted.len());
-    let mut reads = 0_usize;
-    let mut start = 0;
-    while let Some(&(address, _)) = sorted.get(start) {
-        let run = sorted.get(start..).unwrap_or_default();
-        let end = start.saturating_add(run.partition_point(|(candidate, _)| *candidate == address));
-        let run = sorted.get(start..end).unwrap_or_default();
-        let has_sized_member = run.iter().any(|(_, size)| *size != 0);
-        let next_greater_address = sorted.get(end).map(|(address, _)| *address);
-        let mut claimed_sizes = HashSet::new();
-        boundaries.extend(
-            run.iter()
-                .enumerate()
-                .map(|(offset, (_, size))| SymbolBoundary {
-                    alias: if *size == 0 {
-                        offset > 0 || has_sized_member
-                    } else {
-                        !claimed_sizes.insert(*size)
-                    },
-                    next_greater_address,
-                }),
-        );
-        // Each run is read once to find its extent, once for a sized member
-        // and once to emit, plus the binary search that located its end.
-        reads = reads
-            .saturating_add(run.len().saturating_mul(3))
-            .saturating_add(run.len().max(1).ilog2() as usize);
-        start = end;
+/// that happens to be idle. Callers outside the tests drop the count.
+fn boundaries_and_reads(sorted: &[(u64, u64)], section_end: u64) -> (Vec<SymbolBoundary>, usize) {
+    let mut next_greater = vec![None; sorted.len()];
+    let mut following = None;
+    for (index, window) in sorted.windows(2).enumerate().rev() {
+        if let [(address, _), (next, _)] = window
+            && next > address
+        {
+            following = Some(*next);
+        }
+        if let Some(slot) = next_greater.get_mut(index) {
+            *slot = following;
+        }
     }
-    (boundaries, reads)
+    let mut boundaries = Vec::with_capacity(sorted.len());
+    let mut claimed: Option<(usize, u64)> = None;
+    for (index, &(address, size)) in sorted.iter().enumerate() {
+        if let Some((owner, end)) = claimed
+            && address < end
+        {
+            boundaries.push(SymbolBoundary {
+                owner: Some(owner),
+                end: address,
+            });
+            continue;
+        }
+        let end = if size == 0 {
+            next_greater
+                .get(index)
+                .copied()
+                .flatten()
+                .unwrap_or(section_end)
+        } else {
+            address.saturating_add(size)
+        };
+        claimed = Some((index, end));
+        boundaries.push(SymbolBoundary { owner: None, end });
+    }
+    (boundaries, sorted.len().saturating_mul(2))
 }
 
 /// Transient native-symbol data used only by format-specific join code.
@@ -242,13 +237,264 @@ pub struct NativeSymbolRange {
     pub index: object::SymbolIndex,
     /// Parser-local section index used to disambiguate relocatable addresses.
     pub section: object::SectionIndex,
-    /// Parser address used only for local joins.
+    /// Normalized parser address used only for local joins.
     pub address: u64,
     /// Retained code length.
     pub size: u64,
 }
 
-/// Collect text symbols using the shared native identity and boundary rules.
+/// What a relocation target denotes once placed among the text symbols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedTarget {
+    /// The record owning the bytes at the target, by position.
+    Function(usize),
+    /// A location in this text section that no record covers, or whose exact
+    /// address the relocation does not state.
+    UncoveredText(object::SectionIndex),
+    /// A location this object defines outside its text sections.
+    NotCode,
+    /// A symbol this object does not define.
+    Undefined,
+}
+
+/// One relocation of a section beside the target it resolved to.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedRelocation {
+    /// Offset of the relocated field within its section.
+    pub offset: u64,
+    /// Relocation kind as the object reader classified it.
+    pub kind: object::RelocationKind,
+    /// What the relocation points at.
+    pub target: ResolvedTarget,
+}
+
+/// Bytes one record owns, as an address span of its section.
+#[derive(Debug, Clone, Copy)]
+struct OwnedSpan {
+    start: u64,
+    end: u64,
+    position: usize,
+}
+
+/// One relocation inside a record, as it enters that record's identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelocationFact {
+    offset: u64,
+    kind: String,
+    target: Option<String>,
+}
+
+/// Address-keyed index over one native object's text symbols.
+///
+/// Built once per object. Symbol addresses are normalized here (the ARM Thumb
+/// bit cleared), a symbol starting inside bytes another already owns becomes an
+/// alias owning none, and every lookup — by symbol, section address, image
+/// address or relocation — answers with the record that owns the bytes.
+#[derive(Debug)]
+pub struct SymbolIndex {
+    ranges: Vec<NativeSymbolRange>,
+    by_symbol: HashMap<object::SymbolIndex, usize>,
+    by_start: HashMap<(object::SectionIndex, u64), usize>,
+    spans: HashMap<object::SectionIndex, Vec<OwnedSpan>>,
+    text_sections: HashSet<object::SectionIndex>,
+    /// Present only for a linked image, whose addresses are unique.
+    by_image_address: Option<HashMap<u64, usize>>,
+    relocations: HashMap<object::SectionIndex, Vec<ResolvedRelocation>>,
+    address_mask: u64,
+    pc_relative_field_bias: bool,
+}
+
+impl SymbolIndex {
+    fn new(file: &object::File<'_>) -> Self {
+        let thumb = file.format() == object::BinaryFormat::Elf
+            && file.architecture() == object::Architecture::Arm;
+        Self {
+            ranges: Vec::new(),
+            by_symbol: HashMap::new(),
+            by_start: HashMap::new(),
+            spans: HashMap::new(),
+            text_sections: HashSet::new(),
+            by_image_address: (file.kind() != object::ObjectKind::Relocatable).then(HashMap::new),
+            relocations: HashMap::new(),
+            address_mask: if thumb { !1 } else { u64::MAX },
+            pc_relative_field_bias: matches!(
+                file.architecture(),
+                object::Architecture::I386
+                    | object::Architecture::X86_64
+                    | object::Architecture::X86_64_X32
+            ),
+        }
+    }
+
+    /// A linked image's index holding only the given address lookups.
+    #[cfg(test)]
+    pub(crate) fn with_image_addresses(addresses: impl IntoIterator<Item = (u64, usize)>) -> Self {
+        Self {
+            ranges: Vec::new(),
+            by_symbol: HashMap::new(),
+            by_start: HashMap::new(),
+            spans: HashMap::new(),
+            text_sections: HashSet::new(),
+            by_image_address: Some(addresses.into_iter().collect()),
+            relocations: HashMap::new(),
+            address_mask: u64::MAX,
+            pc_relative_field_bias: false,
+        }
+    }
+
+    /// The address of the first instruction byte a symbol or pointer value
+    /// names.
+    #[must_use]
+    pub const fn code_address(&self, address: u64) -> u64 {
+        address & self.address_mask
+    }
+
+    /// Every text symbol-table entry, owners and aliases alike.
+    #[must_use]
+    pub fn ranges(&self) -> &[NativeSymbolRange] {
+        &self.ranges
+    }
+
+    /// The record owning the bytes of a symbol-table entry.
+    #[must_use]
+    pub fn symbol_owner(&self, symbol: object::SymbolIndex) -> Option<usize> {
+        self.by_symbol.get(&symbol).copied()
+    }
+
+    /// The record owning the bytes a symbol of `section` starts at `address`.
+    #[must_use]
+    pub fn at_section_address(&self, section: object::SectionIndex, address: u64) -> Option<usize> {
+        self.by_start
+            .get(&(section, self.code_address(address)))
+            .copied()
+    }
+
+    /// The record whose retained bytes contain `address` in `section`.
+    #[must_use]
+    pub fn containing(&self, section: object::SectionIndex, address: u64) -> Option<usize> {
+        self.span_containing(section, address)
+            .map(|span| span.position)
+    }
+
+    /// The record owning the bytes a symbol starts at in a linked image.
+    #[must_use]
+    pub fn at_image_address(&self, address: u64) -> Option<usize> {
+        self.by_image_address
+            .as_ref()?
+            .get(&self.code_address(address))
+            .copied()
+    }
+
+    /// Whether image addresses identify symbols, which holds for a linked
+    /// image and not for a relocatable object.
+    #[must_use]
+    pub fn has_image_addresses(&self) -> bool {
+        self.by_image_address
+            .as_ref()
+            .is_some_and(|addresses| !addresses.is_empty())
+    }
+
+    /// Records owning bytes in `section`, by position.
+    pub fn section_owners(
+        &self,
+        section: object::SectionIndex,
+    ) -> impl Iterator<Item = usize> + '_ {
+        self.spans
+            .get(&section)
+            .into_iter()
+            .flatten()
+            .map(|span| span.position)
+    }
+
+    /// Relocations of `section` with their resolved targets, by offset.
+    #[must_use]
+    pub fn relocations_in(&self, section: object::SectionIndex) -> &[ResolvedRelocation] {
+        self.relocations.get(&section).map_or(&[], Vec::as_slice)
+    }
+
+    fn span_containing(&self, section: object::SectionIndex, address: u64) -> Option<OwnedSpan> {
+        let spans = self.spans.get(&section)?;
+        let after = spans.partition_point(|span| span.start <= address);
+        spans
+            .get(after.checked_sub(1)?)
+            .filter(|span| address < span.end)
+            .copied()
+    }
+
+    /// Place a relocation target among the text symbols.
+    ///
+    /// A named symbol resolves to its owner. A section symbol, a local label
+    /// or a section target resolves through its address plus the addend, and
+    /// a PC-relative x86 field adds back its own width, which the addend
+    /// subtracts to reach the end of the instruction.
+    fn resolve_relocation(
+        &self,
+        file: &object::File<'_>,
+        relocation: &object::Relocation,
+    ) -> ResolvedTarget {
+        let (section, address) = match relocation.target() {
+            object::RelocationTarget::Symbol(index) => {
+                if let Some(owner) = self.symbol_owner(index) {
+                    return ResolvedTarget::Function(owner);
+                }
+                let Ok(symbol) = file.symbol_by_index(index) else {
+                    return ResolvedTarget::Undefined;
+                };
+                if symbol.is_undefined() {
+                    return ResolvedTarget::Undefined;
+                }
+                let Some(section) = symbol.section_index() else {
+                    return ResolvedTarget::NotCode;
+                };
+                (section, self.code_address(symbol.address()))
+            }
+            object::RelocationTarget::Section(section) => (
+                section,
+                file.section_by_index(section)
+                    .map_or(0, |section| section.address()),
+            ),
+            _ => return ResolvedTarget::NotCode,
+        };
+        if !self.text_sections.contains(&section) {
+            return ResolvedTarget::NotCode;
+        }
+        if relocation.has_implicit_addend() {
+            return ResolvedTarget::UncoveredText(section);
+        }
+        let bias = if self.pc_relative_field_bias
+            && matches!(
+                relocation.kind(),
+                object::RelocationKind::Relative | object::RelocationKind::PltRelative
+            ) {
+            u64::from(relocation.size() / 8)
+        } else {
+            0
+        };
+        let target = address
+            .wrapping_add_signed(relocation.addend())
+            .wrapping_add(bias);
+        self.containing(section, target).map_or(
+            ResolvedTarget::UncoveredText(section),
+            ResolvedTarget::Function,
+        )
+    }
+}
+
+impl IntoIterator for SymbolIndex {
+    type Item = NativeSymbolRange;
+    type IntoIter = std::vec::IntoIter<NativeSymbolRange>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.ranges.into_iter()
+    }
+}
+
+/// Collect text symbols using the shared native identity and boundary rules,
+/// then record every section's relocations against them.
+///
+/// A relocation's resolved target names it in the IR and, for one inside a
+/// record, enters that record's identity: in a relocatable object the
+/// relocated field is a placeholder, so equal bytes do not mean equal code.
 ///
 /// # Errors
 ///
@@ -256,8 +502,8 @@ pub struct NativeSymbolRange {
 pub fn collect_text_symbols(
     file: &object::File<'_>,
     ir: &mut ArtifactIr,
-) -> Result<Vec<NativeSymbolRange>, object::Error> {
-    let mut ranges = Vec::new();
+) -> Result<SymbolIndex, object::Error> {
+    let mut index = SymbolIndex::new(file);
     let mut by_section: HashMap<_, Vec<_>> = HashMap::new();
     for symbol in file.symbols() {
         if symbol.kind() != SymbolKind::Text || symbol.is_undefined() {
@@ -267,100 +513,220 @@ pub fn collect_text_symbols(
             by_section.entry(section_index).or_default().push(symbol);
         }
     }
+    let mut identities = Vec::new();
     for section in file
         .sections()
         .filter(|section| section.kind() == object::SectionKind::Text)
     {
-        let section_index = section.index();
-        let data = section.data()?;
-        let (section_offset, _) = section.file_range().unwrap_or((0, 0));
-        let mut symbols = by_section.remove(&section_index).unwrap_or_default();
-        symbols.sort_by_key(ObjectSymbol::address);
-        let boundaries = symbol_boundaries(
-            &symbols
-                .iter()
-                .map(|symbol| (symbol.address(), symbol.size()))
-                .collect::<Vec<_>>(),
+        let symbols = by_section.remove(&section.index()).unwrap_or_default();
+        identities.extend(index_section(file, &section, symbols, &mut index, ir)?);
+    }
+    let facts = record_relocations(file, &mut index, ir);
+    for (position, fingerprint_name) in identities {
+        let (Some(facts), Some(symbol)) = (facts.get(&position), ir.symbols.get_mut(position))
+        else {
+            continue;
+        };
+        symbol.fingerprint = relocated_symbol_fingerprint(
+            fingerprint_name.as_deref(),
+            Some("text"),
+            symbol.normalized.as_ref(),
+            &symbol.code,
+            facts,
         );
-        for (symbol, boundary) in symbols.iter().zip(boundaries) {
-            let Some(relative) = symbol.address().checked_sub(section.address()) else {
-                continue;
-            };
-            let size = symbol_size(
-                symbol.address(),
-                symbol.size(),
-                boundary.alias,
-                boundary.next_greater_address,
-                section
-                    .address()
-                    .saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX)),
-            );
-            let (Ok(start), Ok(size)) = (usize::try_from(relative), usize::try_from(size)) else {
-                continue;
-            };
-            let Some(raw) = data.get(start..start.saturating_add(size)) else {
-                continue;
-            };
-            let code = if symbol.size() == 0 {
-                trim_inferred_symbol_padding(raw, file.architecture())
-            } else {
-                raw
-            };
-            if code.is_empty() && symbol.size() != 0 && !boundary.alias {
-                continue;
-            }
-            let raw_name = symbol.name().ok().filter(|name| !name.is_empty());
-            let name = raw_name.map(demangle);
-            let fingerprint_name = raw_name.map(|name| {
-                let canonical = if file.format() == object::BinaryFormat::MachO {
-                    name.strip_prefix('_').unwrap_or(name)
-                } else {
-                    name
-                };
-                demangle(canonical)
-            });
-            let normalized = normalize_x86(code, file.architecture());
-            let fingerprint = symbol_fingerprint(
-                fingerprint_name.as_deref(),
-                Some("text"),
-                normalized.as_ref(),
-                code,
-            );
-            let size = u64::try_from(code.len()).unwrap_or(u64::MAX);
-            let position = ir.symbols.len();
-            ir.symbols.push(ArtifactSymbol {
-                fingerprint,
-                name,
-                exported: symbol.is_global(),
-                section: u32::try_from(section_index.0).ok(),
-                offset: section_offset.saturating_add(relative),
-                size,
-                size_inferred: symbol.size() == 0,
-                code: code.to_vec(),
-                normalized,
-                body_fingerprint: None,
-                inline_stack: Vec::new(),
-                content_fingerprint: None,
-                identity_by_order: false,
-            });
-            ranges.push(NativeSymbolRange {
+    }
+    Ok(index)
+}
+
+/// Append one text section's symbol records and index them, returning each
+/// record's position beside the name its fingerprint uses.
+fn index_section<'data>(
+    file: &object::File<'data>,
+    section: &object::Section<'data, '_>,
+    symbols: Vec<object::Symbol<'data, '_>>,
+    index: &mut SymbolIndex,
+    ir: &mut ArtifactIr,
+) -> Result<Vec<(usize, Option<String>)>, object::Error> {
+    let mut identities = Vec::with_capacity(symbols.len());
+    let section_index = section.index();
+    index.text_sections.insert(section_index);
+    let data = section.data()?;
+    let (section_offset, _) = section.file_range().unwrap_or((0, 0));
+    let section_start = section.address();
+    let section_end = section_start.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+    // A symbol whose start or declared end lies outside its section names
+    // no bytes of it.
+    let mut symbols: Vec<_> = symbols
+        .into_iter()
+        .map(|symbol| (index.code_address(symbol.address()), symbol))
+        .filter(|(address, symbol)| {
+            *address >= section_start && address.saturating_add(symbol.size()) <= section_end
+        })
+        .collect();
+    symbols.sort_by_key(|(address, symbol)| (*address, std::cmp::Reverse(symbol.size())));
+    let boundaries = symbol_boundaries(
+        &symbols
+            .iter()
+            .map(|(address, symbol)| (*address, symbol.size()))
+            .collect::<Vec<_>>(),
+        section_end,
+    );
+    let mut positions = Vec::with_capacity(symbols.len());
+    let mut spans = Vec::new();
+    for ((address, symbol), boundary) in symbols.iter().zip(boundaries) {
+        let relative = address.saturating_sub(section_start);
+        let (Ok(start), Ok(length)) = (
+            usize::try_from(relative),
+            usize::try_from(boundary.end.saturating_sub(*address)),
+        ) else {
+            positions.push(None);
+            continue;
+        };
+        let Some(raw) = data.get(start..start.saturating_add(length)) else {
+            positions.push(None);
+            continue;
+        };
+        let code = if symbol.size() == 0 {
+            trim_inferred_symbol_padding(raw, file.architecture())
+        } else {
+            raw
+        };
+        let (name, fingerprint_name) = symbol_names(file, symbol);
+        let normalized = normalize_x86(code, file.architecture());
+        let fingerprint = symbol_fingerprint(
+            fingerprint_name.as_deref(),
+            Some("text"),
+            normalized.as_ref(),
+            code,
+        );
+        let size = u64::try_from(code.len()).unwrap_or(u64::MAX);
+        let position = ir.symbols.len();
+        ir.symbols.push(ArtifactSymbol {
+            fingerprint,
+            name,
+            exported: symbol.is_global(),
+            section: u32::try_from(section_index.0).ok(),
+            offset: section_offset.saturating_add(relative),
+            size,
+            size_inferred: symbol.size() == 0,
+            code: code.to_vec(),
+            normalized,
+            body_fingerprint: None,
+            inline_stack: Vec::new(),
+            content_fingerprint: None,
+            identity_by_order: false,
+        });
+        let owner = boundary
+            .owner
+            .and_then(|owner| positions.get(owner).copied().flatten())
+            .unwrap_or(position);
+        positions.push(Some(position));
+        index.by_symbol.insert(symbol.index(), owner);
+        index
+            .by_start
+            .entry((section_index, *address))
+            .or_insert(owner);
+        if let Some(image) = &mut index.by_image_address {
+            image.entry(*address).or_insert(owner);
+        }
+        if owner == position && size != 0 {
+            spans.push(OwnedSpan {
+                start: *address,
+                end: address.saturating_add(size),
                 position,
-                index: symbol.index(),
-                section: section_index,
-                address: symbol.address(),
-                size,
             });
         }
+        index.ranges.push(NativeSymbolRange {
+            position,
+            index: symbol.index(),
+            section: section_index,
+            address: *address,
+            size,
+        });
+        identities.push((position, fingerprint_name));
     }
-    Ok(ranges)
+    index.spans.insert(section_index, spans);
+    Ok(identities)
+}
+
+/// A symbol's display name beside the name its fingerprint uses, which drops
+/// the Mach-O leading underscore.
+fn symbol_names(
+    file: &object::File<'_>,
+    symbol: &object::Symbol<'_, '_>,
+) -> (Option<String>, Option<String>) {
+    let raw_name = symbol.name().ok().filter(|name| !name.is_empty());
+    let fingerprint_name = raw_name.map(|name| {
+        let canonical = if file.format() == object::BinaryFormat::MachO {
+            name.strip_prefix('_').unwrap_or(name)
+        } else {
+            name
+        };
+        demangle(canonical)
+    });
+    (raw_name.map(demangle), fingerprint_name)
+}
+
+/// Resolve every section's relocations once, record them in the IR, and
+/// return the relocations each code record holds, by position.
+fn record_relocations(
+    file: &object::File<'_>,
+    index: &mut SymbolIndex,
+    ir: &mut ArtifactIr,
+) -> HashMap<usize, Vec<RelocationFact>> {
+    let mut facts: HashMap<usize, Vec<RelocationFact>> = HashMap::new();
+    for section in file.sections() {
+        let section_index = section.index();
+        let (section_offset, _) = section.file_range().unwrap_or((0, 0));
+        let is_text = index.text_sections.contains(&section_index);
+        let mut resolved = Vec::new();
+        for (offset, relocation) in section.relocations() {
+            let target = index.resolve_relocation(file, &relocation);
+            let kind = format!("{:?}", relocation.kind());
+            let name = relocation_target_name(file, &relocation, target, &ir.symbols);
+            if is_text
+                && let Some(span) =
+                    index.span_containing(section_index, section.address().saturating_add(offset))
+            {
+                facts
+                    .entry(span.position)
+                    .or_default()
+                    .push(RelocationFact {
+                        offset: section
+                            .address()
+                            .saturating_add(offset)
+                            .saturating_sub(span.start),
+                        kind: kind.clone(),
+                        target: name.clone(),
+                    });
+            }
+            ir.relocations.push(ArtifactRelocation {
+                section: u32::try_from(section_index.0).ok(),
+                offset: section_offset.saturating_add(offset),
+                kind,
+                target: name,
+            });
+            resolved.push(ResolvedRelocation {
+                offset,
+                kind: relocation.kind(),
+                target,
+            });
+        }
+        if !resolved.is_empty() {
+            resolved.sort_by_key(|relocation| relocation.offset);
+            index.relocations.insert(section_index, resolved);
+        }
+    }
+    facts
 }
 
 /// Every code record of a native object with the address that joins it to
 /// debug information.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct NativeTextSymbols {
-    /// Symbol-table entries, empty for an object without code symbols.
-    pub symbols: Vec<NativeSymbolRange>,
+    /// Symbol-table entries and their lookups, empty for an object without
+    /// code symbols.
+    pub index: SymbolIndex,
     /// Position, join address and retained length of each appended code
     /// record, whether it came from the symbol table or an inferred region.
     pub addresses: Vec<(usize, u64, u64)>,
@@ -381,8 +747,9 @@ pub fn collect_text_symbol_ranges(
     file: &object::File<'_>,
     ir: &mut ArtifactIr,
 ) -> Result<NativeTextSymbols, object::Error> {
-    let symbols = collect_text_symbols(file, ir)?;
-    let mut addresses: Vec<_> = symbols
+    let index = collect_text_symbols(file, ir)?;
+    let mut addresses: Vec<_> = index
+        .ranges()
         .iter()
         .map(|range| (range.position, range.address, range.size))
         .collect();
@@ -393,7 +760,7 @@ pub fn collect_text_symbol_ranges(
             |section, normalized, data| symbol_fingerprint(None, section, normalized, data),
         )?);
     }
-    Ok(NativeTextSymbols { symbols, addresses })
+    Ok(NativeTextSymbols { index, addresses })
 }
 
 /// Key code records' join addresses by the fingerprints `symbols` now carry.
@@ -415,18 +782,40 @@ fn append_field(identity: &mut Vec<u8>, value: &[u8]) {
     identity.extend(value);
 }
 
+/// Name a relocation target: a named symbol by its name, a section-relative
+/// target by the function it resolved to, otherwise by section and addend.
 fn relocation_target_name(
     file: &object::File<'_>,
-    target: object::RelocationTarget,
+    relocation: &object::Relocation,
+    target: ResolvedTarget,
+    symbols: &[ArtifactSymbol],
 ) -> Option<String> {
-    let object::RelocationTarget::Symbol(index) = target else {
-        return None;
+    let symbol = match relocation.target() {
+        object::RelocationTarget::Symbol(index) => file.symbol_by_index(index).ok(),
+        _ => None,
     };
-    file.symbol_by_index(index)
-        .ok()
+    if let Some(name) = symbol
+        .as_ref()
+        .filter(|symbol| symbol.kind() != SymbolKind::Section)
         .and_then(|symbol| symbol.name().ok())
         .filter(|name| !name.is_empty())
-        .map(demangle)
+    {
+        return Some(demangle(name));
+    }
+    if let ResolvedTarget::Function(position) = target {
+        return symbols.get(position).and_then(|symbol| symbol.name.clone());
+    }
+    let section = match relocation.target() {
+        object::RelocationTarget::Section(section) => section,
+        object::RelocationTarget::Symbol(_) => symbol?.section_index()?,
+        _ => return None,
+    };
+    let name = file.section_by_index(section).ok()?.name().ok()?.to_owned();
+    Some(if relocation.has_implicit_addend() {
+        name
+    } else {
+        format!("{name}{:+}", relocation.addend())
+    })
 }
 
 /// Add one explicitly inferred region for every non-empty text section.
@@ -492,32 +881,45 @@ mod tests {
 
     use super::{
         SymbolBoundary, boundaries_and_reads, collect_text_symbols, symbol_boundaries,
-        symbol_fingerprint, symbol_size,
+        symbol_fingerprint,
     };
     use crate::{ArtifactFormat, ArtifactIr, NormalizedInstructions};
 
-    /// Alias and boundary facts written the way a reader of the rule states
-    /// them: scan the whole symbol list for every symbol.
-    fn boundaries_by_direct_scan(sorted: &[(u64, u64)]) -> Vec<SymbolBoundary> {
-        sorted
-            .iter()
-            .enumerate()
-            .map(|(position, (address, size))| SymbolBoundary {
-                alias: if *size == 0 {
-                    sorted[..position].iter().any(|(prior, _)| prior == address)
-                        || sorted
-                            .iter()
-                            .any(|(other, other_size)| other == address && *other_size != 0)
-                } else {
-                    sorted[..position]
-                        .iter()
-                        .any(|(prior, prior_size)| prior == address && prior_size == size)
-                },
-                next_greater_address: sorted[position.saturating_add(1)..]
+    /// Ownership facts written the way a reader of the rule states them: scan
+    /// every earlier owner for each symbol.
+    fn boundaries_by_direct_scan(sorted: &[(u64, u64)], section_end: u64) -> Vec<SymbolBoundary> {
+        let mut boundaries: Vec<SymbolBoundary> = Vec::new();
+        for (position, (address, size)) in sorted.iter().enumerate() {
+            let owner = (0..position).find(|prior| {
+                boundaries[*prior].owner.is_none()
+                    && sorted[*prior].0 <= *address
+                    && *address < boundaries[*prior].end
+            });
+            let end = if owner.is_some() {
+                *address
+            } else if *size == 0 {
+                sorted[position + 1..]
                     .iter()
                     .map(|(candidate, _)| *candidate)
-                    .find(|candidate| *candidate > *address),
-            })
+                    .find(|candidate| candidate > address)
+                    .unwrap_or(section_end)
+            } else {
+                address + size
+            };
+            boundaries.push(SymbolBoundary { owner, end });
+        }
+        boundaries
+    }
+
+    fn sorted_for_ownership(mut symbols: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+        symbols.sort_by_key(|(address, size)| (*address, std::cmp::Reverse(*size)));
+        symbols
+    }
+
+    fn aliases(boundaries: &[SymbolBoundary]) -> Vec<bool> {
+        boundaries
+            .iter()
+            .map(|entry| entry.owner.is_some())
             .collect()
     }
 
@@ -579,36 +981,34 @@ mod tests {
     }
 
     #[test]
-    fn inferred_symbol_size_uses_the_next_strictly_greater_address() {
-        assert_eq!(symbol_size(10, 0, false, [10, 10, 14], 20), 4);
-    }
-
-    #[test]
-    fn a_declared_size_does_not_make_an_alias_own_bytes() {
-        assert_eq!(symbol_size(10, 4, true, [14], 20), 0);
-    }
-
-    #[test]
-    fn zero_size_alias_remains_an_explicit_empty_region() {
-        assert_eq!(symbol_size(10, 0, true, [14], 20), 0);
+    fn an_inferred_range_ends_at_the_next_strictly_greater_address() {
+        let boundaries = symbol_boundaries(&[(10, 0), (10, 0), (14, 0)], 20);
+        assert_eq!(
+            boundaries,
+            vec![
+                SymbolBoundary {
+                    owner: None,
+                    end: 14
+                },
+                SymbolBoundary {
+                    owner: Some(0),
+                    end: 10
+                },
+                SymbolBoundary {
+                    owner: None,
+                    end: 20
+                },
+            ]
+        );
     }
 
     #[test]
     fn only_a_shared_address_makes_a_zero_size_symbol_an_alias() {
-        let boundaries = symbol_boundaries(&[(10, 4), (10, 0), (14, 0), (14, 0), (20, 8)]);
+        let boundaries = symbol_boundaries(&[(10, 4), (10, 0), (14, 0), (14, 0), (20, 8)], 28);
+        assert_eq!(aliases(&boundaries), vec![false, true, false, true, false]);
         assert_eq!(
-            boundaries
-                .iter()
-                .map(|entry| entry.alias)
-                .collect::<Vec<_>>(),
-            vec![false, true, false, true, false]
-        );
-        assert_eq!(
-            boundaries
-                .iter()
-                .map(|entry| entry.next_greater_address)
-                .collect::<Vec<_>>(),
-            vec![Some(14), Some(14), Some(20), Some(20), None]
+            boundaries.iter().map(|entry| entry.end).collect::<Vec<_>>(),
+            vec![14, 10, 20, 14, 28]
         );
     }
 
@@ -618,9 +1018,9 @@ mod tests {
         let file = object::File::parse(bytes.as_slice()).unwrap();
         let mut ir = ArtifactIr::empty(ArtifactFormat::MachO, &bytes);
 
-        let ranges = collect_text_symbols(&file, &mut ir).unwrap();
+        let index = collect_text_symbols(&file, &mut ir).unwrap();
 
-        assert_eq!(ranges.len(), 100_000);
+        assert_eq!(index.ranges().len(), 100_000);
         assert_eq!(ir.symbols.len(), 100_000);
         assert!(
             ir.symbols
@@ -641,7 +1041,7 @@ mod tests {
                 .map(|index| ((index / aliases_per_address) as u64, 0))
                 .collect::<Vec<_>>();
 
-            let (boundaries, reads) = boundaries_and_reads(&sorted);
+            let (boundaries, reads) = boundaries_and_reads(&sorted, count as u64);
 
             assert_eq!(boundaries.len(), count);
             assert!(
@@ -653,25 +1053,135 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_sized_range_is_an_alias_but_a_different_size_is_not() {
-        let boundaries = symbol_boundaries(&[(10, 4), (10, 4), (10, 6), (20, 4)]);
-        assert_eq!(
-            boundaries
+    fn a_range_inside_bytes_another_symbol_owns_is_an_alias() {
+        let sorted = sorted_for_ownership(vec![(10, 4), (10, 4), (10, 6), (12, 2), (20, 4)]);
+        let boundaries = symbol_boundaries(&sorted, 24);
+        assert_eq!(sorted[0], (10, 6), "the widest range at an address owns it");
+        assert_eq!(aliases(&boundaries), vec![false, true, true, true, false]);
+    }
+
+    #[test]
+    fn a_range_overlapping_the_end_of_an_owned_range_owns_no_bytes() {
+        let boundaries = symbol_boundaries(&[(0, 8), (4, 8), (12, 0)], 16);
+        assert_eq!(aliases(&boundaries), vec![false, true, false]);
+        assert_eq!(boundaries[1].end, 4);
+    }
+
+    /// One text section whose every symbol declares a size reaching the
+    /// section end, the shape that copied the section once per symbol.
+    fn elf_fixture_with_symbols_sized_to_the_section_end(count: usize) -> Vec<u8> {
+        let mut object =
+            WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let text = object.section_id(StandardSection::Text);
+        let length = count as u64;
+        object.append_section_data(text, &vec![0x90; count], 1);
+        for index in 0..count {
+            let start = index as u64;
+            object.add_symbol(text_symbol(
+                format!("overlap{index}"),
+                text,
+                start,
+                length - start,
+            ));
+        }
+        object.write().expect("write overlapping ELF fixture")
+    }
+
+    #[test]
+    fn symbols_sized_to_the_section_end_copy_the_section_once() {
+        let count = 100_000;
+        let bytes = elf_fixture_with_symbols_sized_to_the_section_end(count);
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        let mut ir = ArtifactIr::empty(ArtifactFormat::Elf, &bytes);
+
+        let index = collect_text_symbols(&file, &mut ir).unwrap();
+
+        assert_eq!(index.ranges().len(), count);
+        let copied: usize = ir.symbols.iter().map(|symbol| symbol.code.len()).sum();
+        assert_eq!(copied, count, "owned bytes never exceed the section");
+        let owner = index.ranges()[0].position;
+        assert_eq!(ir.symbols[owner].size, count as u64);
+        assert!(
+            index
+                .ranges()
                 .iter()
-                .map(|entry| entry.alias)
-                .collect::<Vec<_>>(),
-            vec![false, true, false, false]
+                .all(|range| index.symbol_owner(range.index) == Some(owner)),
+            "every overlapping symbol resolves to the one owning the bytes"
         );
+    }
+
+    /// A 32-bit ARM ELF with one Thumb and one ARM-mode function of equal
+    /// bytes. The Thumb symbol's value carries the mode in bit 0.
+    fn arm_fixture() -> Vec<u8> {
+        let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::Arm, Endianness::Little);
+        let text = object.section_id(StandardSection::Text);
+        let body = [0x00, 0xbf, 0x70, 0x47];
+        let thumb = object.append_section_data(text, &body, 4);
+        let arm = object.append_section_data(text, &body, 4);
+        object.add_symbol(text_symbol("thumb".to_owned(), text, thumb | 1, 4));
+        object.add_symbol(text_symbol("arm".to_owned(), text, arm, 4));
+        object.write().expect("write ARM fixture")
+    }
+
+    #[test]
+    fn a_thumb_symbol_is_sliced_from_its_first_instruction_byte() {
+        let bytes = arm_fixture();
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        let mut ir = ArtifactIr::empty(ArtifactFormat::Elf, &bytes);
+
+        let index = collect_text_symbols(&file, &mut ir).unwrap();
+
+        let by_name = |name: &str| {
+            ir.symbols
+                .iter()
+                .position(|symbol| symbol.name.as_deref() == Some(name))
+                .unwrap()
+        };
+        let (thumb, arm) = (by_name("thumb"), by_name("arm"));
+        assert_eq!(ir.symbols[thumb].code, vec![0x00, 0xbf, 0x70, 0x47]);
+        assert_eq!(ir.symbols[thumb].code, ir.symbols[arm].code);
+        assert_eq!(ir.symbols[arm].offset - ir.symbols[thumb].offset, 4);
+        let thumb_range = index
+            .ranges()
+            .iter()
+            .find(|range| range.position == thumb)
+            .unwrap();
+        assert_eq!(
+            thumb_range.address % 2,
+            0,
+            "the join address drops the mode bit"
+        );
+        let report = crate::metrics::find_duplicates(&ir);
+        assert_eq!(report.exact.len(), 1, "{report:#?}");
+        assert_eq!(report.exact[0].members.len(), 2);
     }
 
     proptest! {
         #[test]
-        fn run_local_boundaries_agree_with_a_scan_of_the_whole_symbol_list(
-            symbols in proptest::collection::vec((0_u64..16, 0_u64..4), 0..64)
+        fn one_pass_boundaries_agree_with_a_scan_of_every_earlier_owner(
+            symbols in proptest::collection::vec((0_u64..16, 0_u64..6), 0..64)
         ) {
-            let mut sorted = symbols;
-            sorted.sort_by_key(|(address, _)| *address);
-            prop_assert_eq!(symbol_boundaries(&sorted), boundaries_by_direct_scan(&sorted));
+            let sorted = sorted_for_ownership(symbols);
+            prop_assert_eq!(
+                symbol_boundaries(&sorted, 24),
+                boundaries_by_direct_scan(&sorted, 24)
+            );
+        }
+
+        #[test]
+        fn owned_ranges_never_overlap(
+            symbols in proptest::collection::vec((0_u64..16, 0_u64..6), 0..64)
+        ) {
+            let sorted = sorted_for_ownership(symbols);
+            let boundaries = symbol_boundaries(&sorted, 24);
+            let mut owned: Vec<_> = sorted
+                .iter()
+                .zip(&boundaries)
+                .filter(|(_, boundary)| boundary.owner.is_none())
+                .map(|((address, _), boundary)| (*address, boundary.end))
+                .collect();
+            owned.sort_unstable();
+            prop_assert!(owned.windows(2).all(|pair| pair[0].1 <= pair[1].0));
         }
     }
 }

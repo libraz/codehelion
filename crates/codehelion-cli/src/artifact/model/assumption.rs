@@ -101,7 +101,7 @@ fn upper_bound_omissions() -> String {
 pub(super) const CONTAINER_WIDE_OBSERVED_BYTES: &str = "observed byte counts cover the whole container, including the skipped architecture slices; only section, symbol and duplicate counts are limited to the selected architecture";
 
 /// A verified saving belongs to one refactoring only under a controlled pair.
-pub(super) const VERIFIED_SAVINGS_NEEDS_CONTROL: &str = "verified_savings_bytes attributes the whole observed artifact difference to the calibrated clone group, which holds only when the two artifacts differ in nothing else; this comparison establishes the artifact format and the build variant and nothing further";
+pub(super) const VERIFIED_SAVINGS_NEEDS_CONTROL: &str = "verified_savings_bytes attributes the whole observed artifact difference to the calibrated clone group, which holds only when the two artifacts differ in nothing else; a calibration establishes the artifact format, the architecture and the build variant and nothing further";
 
 /// State what the reported size fields leave out, beside what their derivation
 /// already assumed.

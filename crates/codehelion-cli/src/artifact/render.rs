@@ -2,7 +2,8 @@
 
 use super::correlation::{self, AttributionBasis, RefactorSavingsAssumption};
 use super::metrics;
-use super::model::{self, column};
+use super::model::{self, ReportFact, column};
+use super::{Context, Result, Write, csv};
 
 mod compare;
 mod csv;
@@ -105,4 +106,35 @@ pub(super) const fn summary_column(category: metrics::SizeCategory) -> usize {
         metrics::SizeCategory::EstimatedRefactorSavings => column::ESTIMATED_REFACTOR_SAVINGS_BYTES,
         metrics::SizeCategory::VerifiedSavings => column::VERIFIED_SAVINGS_BYTES,
     }
+}
+
+/// Write each of `facts` into `row`, under the column `header` names for it.
+pub(super) fn write_fact_columns<R>(
+    facts: &[ReportFact<R>],
+    report: &R,
+    header: &[&str],
+    row: &mut [String],
+) -> Result<()> {
+    for fact in facts {
+        let index = header
+            .iter()
+            .position(|column| *column == fact.column)
+            .with_context(|| format!("the CSV header has no {} column", fact.column))?;
+        row[index] = (fact.value)(report).map_or_else(String::new, |value| csv(&value));
+    }
+    Ok(())
+}
+
+/// Write each of `facts` the report has as one `label: value` line.
+pub(super) fn render_fact_lines<R>(
+    facts: &[ReportFact<R>],
+    report: &R,
+    out: &mut impl Write,
+) -> Result<()> {
+    for fact in facts {
+        if let Some(value) = (fact.value)(report) {
+            writeln!(out, "{}: {value}", fact.label)?;
+        }
+    }
+    Ok(())
 }

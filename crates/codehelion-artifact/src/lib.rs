@@ -283,6 +283,63 @@ impl ArtifactIr {
             data_segments: Vec::new(),
         }
     }
+
+    /// What this IR measures, as one comparable key.
+    #[must_use]
+    pub fn slice_key(&self) -> ArtifactSliceKey<'_> {
+        ArtifactSliceKey {
+            format: self.format,
+            architecture: self.architecture.as_deref(),
+            universal_slice: !self.skipped_architectures.is_empty(),
+        }
+    }
+
+    /// Identity of the measured slice, for naming a stored analysis or
+    /// measurement.
+    ///
+    /// A whole input keeps [`Self::fingerprint`]. A slice of a universal
+    /// container folds the selected architecture into the container identity,
+    /// so two slices of one container never share an identity.
+    #[must_use]
+    pub fn slice_fingerprint(&self) -> ArtifactFingerprint {
+        let key = self.slice_key();
+        if !key.universal_slice {
+            return self.fingerprint;
+        }
+        let mut input = self.fingerprint.as_bytes().to_vec();
+        input.extend_from_slice(key.architecture.unwrap_or_default().as_bytes());
+        ArtifactFingerprint::from_content("artifact-slice", &input)
+    }
+}
+
+/// The measurement subject one IR describes: its container format, the
+/// architecture parsed from it, and whether that is one slice of a universal
+/// container.
+///
+/// Two artifacts are the same measurement subject only when their keys are
+/// equal; their contents may differ, which is what a comparison measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactSliceKey<'a> {
+    /// Container format that supplied the IR.
+    pub format: ArtifactFormat,
+    /// Architecture selected from or observed in the input, when known.
+    pub architecture: Option<&'a str>,
+    /// Whether other architectures of a universal container were skipped, in
+    /// which case container-level byte counts cover more than this slice.
+    pub universal_slice: bool,
+}
+
+impl fmt::Display for ArtifactSliceKey<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.format.name())?;
+        if let Some(architecture) = self.architecture {
+            write!(formatter, " {architecture}")?;
+        }
+        if self.universal_slice {
+            formatter.write_str(" (slice of a universal container)")?;
+        }
+        Ok(())
+    }
 }
 
 /// One object member observed inside a static archive.
@@ -943,6 +1000,48 @@ mod tests {
         assert_eq!(wasm.fingerprint, same.fingerprint);
         assert_ne!(wasm.fingerprint, changed.fingerprint);
         assert!(wasm.symbols.is_empty(), "symbols: {:?}", wasm.symbols);
+    }
+
+    fn macho(container: &[u8], architecture: &str, skipped: &[&str]) -> ArtifactIr {
+        let mut ir = ArtifactIr::empty(ArtifactFormat::MachO, container);
+        ir.architecture = Some(architecture.to_owned());
+        ir.skipped_architectures = skipped.iter().map(|&label| label.to_owned()).collect();
+        ir
+    }
+
+    #[test]
+    fn slice_keys_are_equal_only_for_one_format_architecture_and_slice_kind() {
+        let arm = macho(b"thin arm", "arm64", &[]);
+        assert_eq!(
+            arm.slice_key(),
+            macho(b"other bytes", "arm64", &[]).slice_key()
+        );
+        assert_ne!(
+            arm.slice_key(),
+            macho(b"thin x86", "x86_64", &[]).slice_key()
+        );
+        assert_ne!(
+            arm.slice_key(),
+            macho(b"fat", "arm64", &["x86_64"]).slice_key()
+        );
+        let mut elf = ArtifactIr::empty(ArtifactFormat::Elf, b"thin arm");
+        elf.architecture = Some("arm64".to_owned());
+        assert_ne!(arm.slice_key(), elf.slice_key());
+    }
+
+    #[test]
+    fn slice_identity_tells_apart_two_slices_of_one_container_only() {
+        let thin = macho(b"thin", "arm64", &[]);
+        assert_eq!(thin.slice_fingerprint(), thin.fingerprint);
+        let arm = macho(b"fat", "arm64", &["x86_64"]);
+        let x86 = macho(b"fat", "x86_64", &["arm64"]);
+        assert_eq!(arm.fingerprint, x86.fingerprint);
+        assert_ne!(arm.slice_fingerprint(), x86.slice_fingerprint());
+        assert_ne!(arm.slice_fingerprint(), arm.fingerprint);
+        assert_eq!(
+            arm.slice_fingerprint(),
+            macho(b"fat", "arm64", &["x86_64"]).slice_fingerprint()
+        );
     }
 
     #[test]
