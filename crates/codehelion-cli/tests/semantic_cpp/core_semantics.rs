@@ -323,10 +323,9 @@ fn cplusplus_semantic_scan_requires_a_helper_that_reads_cpp() {
         "a usable C++ helper produces restricted-semantic findings"
     );
 
-    let no_helper_path = tempfile::tempdir().expect("empty PATH directory");
+    // The Rust helper stays usable, so the refusal is about C++ alone.
     cmd()
         .current_dir(&root)
-        .env("PATH", no_helper_path.path())
         .args([
             "scan",
             ".",
