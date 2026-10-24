@@ -73,11 +73,14 @@ jobs:
       # about real translation units. It loads libclang at run time and reads a
       # control-flow graph by invoking `clang` separately, so both the library
       # and the unversioned driver have to be here. Neither is a CI-only extra:
-      # they are what running this suite needs anywhere.
+      # they are what running this suite needs anywhere. Clang 18, the image's
+      # default, cannot use libstdc++'s <expected>, which the C++23 cases need.
       - name: Install Clang and libclang
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libclang-dev libc++-dev libc++abi-dev
+          sudo apt-get install -y --no-install-recommends clang-20 libclang-20-dev libc++-20-dev libc++abi-20-dev
+          echo /usr/lib/llvm-20/bin >> "$GITHUB_PATH"
+          echo LIBCLANG_PATH=/usr/lib/llvm-20/lib >> "$GITHUB_ENV"
       # The labelled precision tests refuse to pass on an empty measurement:
       # with no case materialized they report that nothing was measured rather
       # than reporting success. The suite therefore needs the same sources the
