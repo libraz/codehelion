@@ -337,7 +337,7 @@ fn names_a_program(path: &[String]) -> bool {
 mod tests {
     use super::{
         Declared, declared_build_script, declares_workspace_table, has_build_script,
-        program_named_by, program_naming_key, workspace_manifest,
+        program_naming_key, workspace_manifest,
     };
 
     fn package(body: &str) -> String {
@@ -562,6 +562,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_planted_fifo_is_passed_over_rather_than_waited_on() {
+        use super::program_named_by;
+
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join(".cargo")).unwrap();
         for fifo in [
