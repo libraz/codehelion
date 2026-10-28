@@ -131,7 +131,7 @@ name stems emitted as several bodies (observed, not savings):
 各行には owner の分類、本体の数、異なる instance の数、本体のサイズの合計が出ます。`--verbose` を付けると、各行の下に instance ごとの行が加わります。
 
 ```text
-    probe<f::$_2>: 1 bodies, 340 bytes
+    probe<f::$_2>: 1 body, 340 bytes
 ```
 
 上位 10 行を列挙し、残りは件数だけを示します。JSON レポートでは `name_stems`、CSV では `name-stem` と `name-stem-instance` のレコードです。
@@ -139,6 +139,30 @@ name stems emitted as several bodies (observed, not savings):
 これは観測したバイト数であって削減量ではありません。ソース上で 1 度だけ書かれたテンプレートが、ある stem の本体をすべて生み出していることもあるため、この値は成果物が現に費やしている量であり、ソースを統合したときに減る量ではありません。束ね方は stem の完全一致であり、類似度ではありません。したがって[グループ化](grouping.md)の非推移性に関する考慮はここには及びません。同内容のコピーは、完全一致の重複グループと、本体が複数で instance が 1 つの stem の両方に現れます。2 つは同じバイトを別の側から述べています。
 
 本体が 2 つ以上ある stem が 1 つもなければ、この節は出ません。シンボルに名前がない成果物でも同じです。節が無いことだけでは、strip された成果物なのか、名前の重複が無い成果物なのかは区別できません。名前のないシンボルは ownership の節が報告します。
+
+## 一覧に出る名前
+
+デッドコード・retained size・重複グループの一覧はシンボルを fingerprint で示します。各行は fingerprint の前にシンボルの名前を出し、名前が無いシンボルには `<unnamed>` を出します。
+
+```text
+dead code candidates: 17 symbols
+  std::length_error::~length_error() 23cc6ca1f6351904707d8f9001147b09
+retained sizes (overlapping dominator regions):
+  emscripten_builtin_malloc 4c854ab40f762e03399b96e39b6dcbab: 5861 bytes
+exact duplicate groups:
+  8d725494f65c077c2ff7deaa1f341067: 27 observed duplicate bytes, 4 members
+    __cxa_throw 6eccc9e8e9fd06a9b57ee2236e2020b3 offset 4670 size 9
+```
+
+異なるシンボルが 1 つの fingerprint を共有することがあります。その場合の行には、どれか 1 つだけを選ぶと他のシンボルに誤った名前を付けることになるため、すべての名前を ` | ` でつないで出します。データの重複グループのメンバーはシンボルではなくデータセグメントなので、その行は fingerprint だけです。CSV は同じレコードの `name` 列を埋めます。
+
+テキスト出力では長い名前を短縮し、別の括弧の内側で開くテンプレート引数リストは `<…>` と書きます。`analyze`・`report`・`compare` の `--verbose`（`-v`）は名前を省略せずに出力し、JSON と CSV は常に全文の名前を持ちます。
+
+```text
+std::__2::basic_string<char, std::__2::char_traits<…>, std::__2::allocator<…>>::append(char const*)
+```
+
+短縮はテキストの見た目だけに作用します。同じ行の fingerprint がシンボルを識別するもので、比較が短縮した名前を使うことはありません。
 
 ## 圧縮後のサイズ
 
@@ -178,14 +202,32 @@ compressed bytes (gzip, level 9, flate2 (miniz_oxide)): 209828 before, 209710 af
 
 JSON では `compressed_deltas`、CSV では `compressed-delta` のレコードです。圧縮後の差が出るのは、両側を同じアルゴリズムと設定で測ったときだけです。
 
-シンボルの差は内容でシンボルを対応づけるので、シグネチャが `foo(int)` から `foo(unsigned int)` に変わり、本体も違う関数は、削除された 1 つと追加された 1 つとして現れます。stem delta はこれを stem `foo` の下で合算します。本体の数も数えるので、3 つの実体が 1 つになったテンプレートは次のように出ます。
+シンボルの差は内容でシンボルを対応づけるので、シグネチャが `foo(int)` から `foo(unsigned int)` に変わり、本体も違う関数は、異なる 2 つの名前の、削除された 1 つと追加された 1 つとして現れます。stem delta はこれを stem `foo` の下で合算します。本体の数も数えるので、3 つの実体が 1 つになったテンプレートは次のように出ます。
 
 ```text
 stem delta:
-  probe<> (other): 3 -> 1 bodies, -608 bytes
+  probe<> (other): 3 -> 1 body, -608 bytes
 ```
 
 行が出るのは、シンボル差のうち 2 つ以上が stem を共有するとき、または stem の本体数が変わっていずれかの側に 2 つ以上あるときです。本体数は変更されたシンボルだけでなく、各成果物の全体で数えます。バイト差はシンボル差の合計です。該当する行がなければこの節は出ません。JSON では `stem_deltas`、CSV では `stem-delta` のレコードです。
+
+同じ名前で作り直された関数は内容の identity が変わるため、削除された 1 つと追加された 1 つとして記録されます。その名前が両側でちょうど 1 つのシンボルに属しているとき、2 つのエントリは互いの fingerprint を `counterpart_fingerprint` に持ちます。JSON でも CSV でも同じです。テキスト出力ではこの組を 1 行にまとめ、正味の差の大きさで他のシンボル変更と並べます。
+
+```text
+symbol changes:
+  added prepend_alloc 5ed12a758531a2034188ea446b10c840 +1057 bytes
+  replaced emscripten_builtin_malloc b59a247d540cc3c724f6b08e5961d7b8 -> 4c854ab40f762e03399b96e39b6dcbab -404 bytes
+```
+
+行の形式は `replaced <name> <before> -> <after> <net> bytes` で、`<net>` は 2 つのエントリの合計です。JSON と CSV は 2 つのエントリをそのまま持ち、facts の `symbols added` と `symbols removed` も 2 つとして数えます。どちらかの側で名前が重複している場合や、対になる相手がいない場合は、`counterpart_fingerprint` が null の通常の added / removed として並びます。
+
+テキストのレポートは粗い要約から細部の順に読めます。ownership delta、stem delta、symbol changes の順で、重複グループの変更は専用の見出しの下に続きます。
+
+```text
+duplicate group changes:
+  exact 7a4bb1d56eafb391d09d8fd25d800c55 +4 bytes, +2 members
+  exact ec96a463ac6702ea108315dd3a8bbc11 +2 bytes, +1 member
+```
 
 両方の成果物がアーキテクチャを記録していて、その 2 つが異なる場合は、比較のどの出力形式でもそのことを述べます。フォーマットやアーキテクチャの異なる成果物どうし、およびユニバーサル Mach-O から選んだアーキテクチャについては、calibration の記録そのものを拒否します。後者の観測バイト数はコンテナ全体を数えているからです。
 

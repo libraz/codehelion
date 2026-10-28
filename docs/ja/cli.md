@@ -88,9 +88,12 @@ codehelion artifact analyze path/to/binary --format csv  # json も可。既定�
 codehelion artifact analyze path/to/binary --untrusted   # サイズ・時間・メモリの上限を下げる
 codehelion artifact analyze path/to/binary --debug-file companion
 codehelion artifact analyze path/to/binary --compressed gzip --compressed brotli
+codehelion artifact analyze path/to/binary -v        # 抽出した項目をすべて並べ、シンボル名を省略せずに出力
 codehelion artifact report              # 最新の保存済み解析を再描画
 codehelion artifact report --analysis 1 # 特定の保存済み解析を再描画
+codehelion artifact report -v       # 抽出した項目をすべて並べ、シンボル名を省略せずに出力
 codehelion artifact compare before/binary after/binary
+codehelion artifact compare before/binary after/binary -v  # シンボル名を省略せずに出力
 codehelion artifact calibration                 # 記録済みの計測を集計
 codehelion artifact calibration --source-run 1  # 特定のソーススキャンを集計
 codehelion artifact calibration --baseline earlier.json  # 以前の集計と並べる

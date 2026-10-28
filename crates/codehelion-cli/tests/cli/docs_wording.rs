@@ -218,6 +218,40 @@ fn documents_state_the_compressed_size_and_name_stem_surfaces() {
     }
 }
 
+/// The name columns, the replaced line and the short-name rule are documented with the report.
+#[test]
+fn documents_state_report_names_replaced_lines_and_short_names() {
+    for (language, document, written, in_full) in [
+        (
+            "English",
+            include_str!("../../../../docs/en/artifact-analysis.md"),
+            "is written `<…>`",
+            "prints names in full",
+        ),
+        (
+            "Japanese",
+            include_str!("../../../../docs/ja/artifact-analysis.md"),
+            "は `<…>` と書きます",
+            "名前を省略せずに出力し",
+        ),
+    ] {
+        for snippet in [
+            "replaced <name> <before> -> <after> <net> bytes",
+            "counterpart_fingerprint",
+            "duplicate group changes:",
+            "<unnamed>",
+            "--verbose",
+            written,
+            in_full,
+        ] {
+            assert!(
+                document.contains(snippet),
+                "{language} artifact document is missing {snippet}"
+            );
+        }
+    }
+}
+
 /// A baseline is for CI; following your own progress needs no baseline.
 #[test]
 fn baseline_documents_tell_the_two_uses_apart() {

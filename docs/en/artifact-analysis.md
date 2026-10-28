@@ -233,7 +233,7 @@ instances and the summed size of the bodies. `--verbose` adds one line per
 instance under each row:
 
 ```text
-    probe<f::$_2>: 1 bodies, 340 bytes
+    probe<f::$_2>: 1 body, 340 bytes
 ```
 
 The ten largest rows are listed and the rest are counted. The JSON report carries
@@ -252,6 +252,38 @@ The section is absent when no stem has two bodies. That also holds for an artifa
 whose symbols carry no names, so an absent section does not tell a stripped
 artifact from one without repeated names; the ownership section reports the
 unnamed symbols.
+
+## Names in the lists
+
+The dead code, retained size and duplicate group lists identify symbols by
+fingerprint, and each line shows the symbol's name before it, or `<unnamed>` when
+the symbol has none:
+
+```text
+dead code candidates: 17 symbols
+  std::length_error::~length_error() 23cc6ca1f6351904707d8f9001147b09
+retained sizes (overlapping dominator regions):
+  emscripten_builtin_malloc 4c854ab40f762e03399b96e39b6dcbab: 5861 bytes
+exact duplicate groups:
+  8d725494f65c077c2ff7deaa1f341067: 27 observed duplicate bytes, 4 members
+    __cxa_throw 6eccc9e8e9fd06a9b57ee2236e2020b3 offset 4670 size 9
+```
+
+Distinct symbols can share one fingerprint. The line then shows each of their
+names, joined with ` | `, because naming only one would label the others wrongly.
+Members of a data duplicate group are data segments, not symbols, so those lines
+carry the fingerprint alone. CSV fills the `name` column for the same records.
+
+Text output shortens long names: every template argument list that opens inside
+another bracket is written `<…>`. `--verbose` (`-v`) on `analyze`, `report` and
+`compare` prints names in full, and JSON and CSV always carry them in full:
+
+```text
+std::__2::basic_string<char, std::__2::char_traits<…>, std::__2::allocator<…>>::append(char const*)
+```
+
+Shortening only affects what the text shows. The fingerprint on the same line is
+what identifies the symbol, and comparisons never use the shortened name.
 
 ## Compressed size
 
@@ -319,13 +351,14 @@ The compressed delta is shown only when both sides were measured with the same
 algorithm and settings.
 
 Symbol deltas pair symbols by content, so a function whose signature changed from
-`foo(int)` to `foo(unsigned int)` with a different body appears as one removed and
-one added symbol. The stem delta sums those under the stem `foo`, and it also
-counts bodies, so a template whose three instances became one reads:
+`foo(int)` to `foo(unsigned int)` with a different body appears as one removed
+symbol and one added symbol under two different names. The stem delta sums those
+under the stem `foo`, and it also counts bodies, so a template whose three
+instances became one reads:
 
 ```text
 stem delta:
-  probe<> (other): 3 -> 1 bodies, -608 bytes
+  probe<> (other): 3 -> 1 body, -608 bytes
 ```
 
 A row appears when at least two symbol deltas share a stem, or when the stem's
@@ -333,6 +366,34 @@ number of bodies changes and either side has at least two. The bodies are counte
 over the whole of each artifact, not only over the changed symbols, and the byte
 difference is the sum of the symbol deltas. The section is omitted when there are
 no such rows; JSON carries `stem_deltas` and CSV `stem-delta` records.
+
+A function rebuilt under the same name has a new content identity, so it is
+recorded as one removed and one added symbol. When the name belongs to exactly one
+symbol on each side, the two entries carry each other's fingerprint in
+`counterpart_fingerprint`, in JSON and in CSV. Text output prints the pair as one
+line, ordered with the other symbol changes by the size of its net difference:
+
+```text
+symbol changes:
+  added prepend_alloc 5ed12a758531a2034188ea446b10c840 +1057 bytes
+  replaced emscripten_builtin_malloc b59a247d540cc3c724f6b08e5961d7b8 -> 4c854ab40f762e03399b96e39b6dcbab -404 bytes
+```
+
+The line has the form `replaced <name> <before> -> <after> <net> bytes`, where
+`<net>` is the sum of both entries. JSON and CSV keep both entries, and the facts
+`symbols added` and `symbols removed` count both. A name that is repeated on
+either side, or that has no counterpart, is listed as plain added and removed
+entries with `counterpart_fingerprint` null.
+
+The text report reads from the coarsest summary to the detail: the ownership
+delta, the stem delta, the symbol changes, and then the changes to duplicate
+groups under their own heading:
+
+```text
+duplicate group changes:
+  exact 7a4bb1d56eafb391d09d8fd25d800c55 +4 bytes, +2 members
+  exact ec96a463ac6702ea108315dd3a8bbc11 +2 bytes, +1 member
+```
 
 When both artifacts record an architecture and the two differ, every rendering of
 the comparison says so. A calibration is refused outright for artifacts of

@@ -146,9 +146,12 @@ codehelion artifact analyze path/to/binary --format csv  # also json, or text by
 codehelion artifact analyze path/to/binary --untrusted   # lowered size, time and memory ceilings
 codehelion artifact analyze path/to/binary --debug-file companion
 codehelion artifact analyze path/to/binary --compressed gzip --compressed brotli
+codehelion artifact analyze path/to/binary -v        # list every extracted item and print symbol names in full
 codehelion artifact report              # render the latest saved analysis
 codehelion artifact report --analysis 1 # render a particular saved analysis
+codehelion artifact report -v       # list every extracted item and print symbol names in full
 codehelion artifact compare before/binary after/binary
+codehelion artifact compare before/binary after/binary -v  # print symbol names in full
 codehelion artifact calibration                 # summarize the recorded measurements
 codehelion artifact calibration --source-run 1  # summarize a particular source scan
 codehelion artifact calibration --baseline earlier.json  # set the summary beside an earlier one
