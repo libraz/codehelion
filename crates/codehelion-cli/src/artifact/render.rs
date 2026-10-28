@@ -138,3 +138,18 @@ pub(super) fn render_fact_lines<R>(
     }
     Ok(())
 }
+
+/// Say how many entries a capped list left to the JSON output.
+pub(super) fn render_omitted(
+    total: usize,
+    listed: usize,
+    what: &str,
+    indent: &str,
+    out: &mut impl Write,
+) -> Result<()> {
+    let omitted = total.saturating_sub(listed);
+    if omitted > 0 {
+        writeln!(out, "{indent}{omitted} more {what}")?;
+    }
+    Ok(())
+}

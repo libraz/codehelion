@@ -10,6 +10,7 @@ use super::assumption::{
 };
 use super::compression::{CompressedDelta, compressed_deltas};
 use super::ownership::{DEFINING_PATH, NO_OWN_DECLARED, OwnershipDeltaReport, declared_ownership};
+use super::stem::{StemDelta, stem_deltas_of, stem_of};
 use crate::artifact::{
     ARTIFACT_COMPARISON_REPORT_SCHEMA_VERSION, ArtifactIr, BTreeMap, BTreeSet, BinaryFormat,
     EstimatedRefactorSavingsBytes, ObservedSizeReductionBytes, Serialize, VerifiedSavingsBytes,
@@ -36,6 +37,7 @@ pub(in crate::artifact) struct ArtifactComparisonReport {
     pub(in crate::artifact) symbol_changes: SymbolChanges,
     pub(in crate::artifact) symbol_deltas: Vec<SymbolDelta>,
     pub(in crate::artifact) ownership_deltas: OwnershipDeltaReport,
+    pub(in crate::artifact) stem_deltas: Vec<StemDelta>,
     pub(in crate::artifact) duplicate_group_deltas: Vec<DuplicateGroupDelta>,
     pub(in crate::artifact) build_variant_warning: Option<String>,
     pub(in crate::artifact) assumptions: Vec<String>,
@@ -120,6 +122,9 @@ pub(in crate::artifact) struct SymbolDelta {
     /// artifact for a removal, the later one otherwise.
     pub(in crate::artifact) owner: String,
     pub(in crate::artifact) ownership: Ownership,
+    /// Stem of the name, taken from the same side as the owner.
+    #[serde(skip)]
+    pub(in crate::artifact) stem: Option<codehelion_artifact::stem::NameStem>,
 }
 
 /// What a comparison established about one symbol, as [`SymbolDelta::kind`]
@@ -280,6 +285,7 @@ impl ArtifactComparisonReport {
         let code_section_delta_bytes =
             difference(code_section_bytes(after), code_section_bytes(before));
         let ownership_deltas = ownership_deltas(&symbol_deltas, code_section_delta_bytes);
+        let stem_deltas = stem_deltas_of(&symbol_deltas, before, after);
         Self {
             schema_version: ARTIFACT_COMPARISON_REPORT_SCHEMA_VERSION,
             before: ComparisonArtifact {
@@ -330,6 +336,7 @@ impl ArtifactComparisonReport {
             },
             symbol_deltas,
             ownership_deltas,
+            stem_deltas,
             duplicate_group_deltas,
             build_variant_warning,
             assumptions,
@@ -348,6 +355,9 @@ impl ArtifactComparisonReport {
         }
         self.ownership_deltas =
             ownership_deltas(&self.symbol_deltas, self.code_section_delta_bytes);
+        for row in &mut self.stem_deltas {
+            row.ownership = declared_ownership(row.ownership, &row.owner, &declared);
+        }
         self.assumptions.retain(|text| text != NO_OWN_DECLARED);
         self
     }
@@ -486,10 +496,14 @@ pub(in crate::artifact) fn symbol_deltas(
                 (Some(earlier), Some(later)) => {
                     // Both sides share one identity, so either name is the
                     // symbol's; the later artifact is what the report is about.
-                    let (name, owner, ownership) = match &later.name {
-                        Some(_) => owner_label(&after_platform, later),
-                        None => owner_label(&before_platform, earlier),
+                    // Both sides share one identity, so either name is the
+                    // symbol's; the later artifact is what the report is about.
+                    let (platform, symbol) = match &later.name {
+                        Some(_) => (&after_platform, later),
+                        None => (&before_platform, earlier),
                     };
+                    let (name, owner, ownership) = owner_label(platform, symbol);
+                    let stem = stem_of(platform, symbol);
                     result.push(SymbolDelta {
                         kind: if earlier.size == later.size {
                             symbol_change::MODIFIED
@@ -501,10 +515,12 @@ pub(in crate::artifact) fn symbol_deltas(
                         size_delta_bytes: difference(later.size, earlier.size),
                         owner,
                         ownership,
+                        stem,
                     });
                 }
                 (Some(earlier), None) => {
                     let (name, owner, ownership) = owner_label(&before_platform, earlier);
+                    let stem = stem_of(&before_platform, earlier);
                     result.push(SymbolDelta {
                         kind: symbol_change::REMOVED,
                         name,
@@ -512,10 +528,12 @@ pub(in crate::artifact) fn symbol_deltas(
                         size_delta_bytes: -i128::from(earlier.size),
                         owner,
                         ownership,
+                        stem,
                     });
                 }
                 (None, Some(later)) => {
                     let (name, owner, ownership) = owner_label(&after_platform, later);
+                    let stem = stem_of(&after_platform, later);
                     result.push(SymbolDelta {
                         kind: symbol_change::ADDED,
                         name,
@@ -523,6 +541,7 @@ pub(in crate::artifact) fn symbol_deltas(
                         size_delta_bytes: i128::from(later.size),
                         owner,
                         ownership,
+                        stem,
                     });
                 }
                 (None, None) => break,

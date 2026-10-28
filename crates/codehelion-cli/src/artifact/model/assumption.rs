@@ -19,6 +19,8 @@ pub(in crate::artifact) enum AssumptionScope {
     DeadCode,
     /// Qualifies the owner labels.
     Ownership,
+    /// Qualifies the name stems.
+    NameStems,
     /// Qualifies the symbol identities.
     Symbols,
     /// Qualifies the toolchain holders.
@@ -38,6 +40,7 @@ impl AssumptionScope {
             Self::RetainedSizes => "retained_sizes",
             Self::DeadCode => "dead_code",
             Self::Ownership => "ownership",
+            Self::NameStems => "name_stems",
             Self::Symbols => "symbols",
             Self::ToolchainHoldings => "toolchain_holdings",
             Self::BuildVariant => "build_variant",
@@ -153,6 +156,15 @@ pub(in crate::artifact) fn report_assumptions(
             .iter()
             .map(|text| ReportAssumption {
                 scope: AssumptionScope::Ownership,
+                text: text.as_str(),
+            }),
+    );
+    assumptions.extend(
+        report
+            .name_stem_assumptions
+            .iter()
+            .map(|text| ReportAssumption {
+                scope: AssumptionScope::NameStems,
                 text: text.as_str(),
             }),
     );

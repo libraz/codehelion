@@ -215,6 +215,26 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
         csv(&serde_json::to_string(&report.ownership.declared_own)
             .context("serializing CSV declared own owners")?);
     write_artifact_csv_row(out, &ownership_summary)?;
+    for stem in &report.name_stems {
+        let mut row = artifact_csv_row("name-stem", report);
+        row[column::NAME_STEM] = csv(&stem.stem);
+        row[column::STEM_PARAMETERIZED] = stem.parameterized.to_string();
+        row[column::OWNER] = csv(&stem.owner);
+        ownership_label(stem.ownership).clone_into(&mut row[column::OWNERSHIP]);
+        row[column::EMITTED_BODIES] = stem.bodies.to_string();
+        row[column::STEM_INSTANCES] = stem.instances.to_string();
+        row[column::SIZE] = stem.size_bytes.to_string();
+        write_artifact_csv_row(out, &row)?;
+        for instance in &stem.instance_details {
+            let mut row = artifact_csv_row("name-stem-instance", report);
+            row[column::NAME_STEM] = csv(&stem.stem);
+            row[column::OWNER] = csv(&stem.owner);
+            row[column::NAME] = csv(&instance.instance);
+            row[column::EMITTED_BODIES] = instance.bodies.to_string();
+            row[column::SIZE] = instance.size_bytes.to_string();
+            write_artifact_csv_row(out, &row)?;
+        }
+    }
     if let Some(holdings) = &report.toolchain_holdings {
         for holding in &holdings.holdings {
             let mut row = artifact_csv_row("toolchain-holding", report);

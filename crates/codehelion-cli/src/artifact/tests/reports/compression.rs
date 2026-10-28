@@ -217,7 +217,7 @@ fn a_comparison_without_a_measurement_states_no_compressed_size_anywhere() {
 }
 
 #[test]
-fn the_compression_columns_sit_at_the_end_of_each_header() {
+fn the_compression_columns_keep_their_positions_in_each_header() {
     for (header, names) in [
         (
             ARTIFACT_CSV_HEADER,
@@ -261,6 +261,7 @@ fn the_compression_columns_sit_at_the_end_of_each_header() {
             assert_eq!(header[*index], *name);
         }
         let first = names[0].0;
-        assert_eq!(header.len(), first + names.len());
+        // Columns are only appended, so later quantities follow these.
+        assert!(header.len() >= first + names.len());
     }
 }

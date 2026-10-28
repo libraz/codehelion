@@ -79,6 +79,12 @@
       "items": { "$ref": "#/$defs/retained_size" }
     },
     "ownership": { "$ref": "#/$defs/ownership" },
+    "name_stems": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/name_stem" },
+      "description": "Stems emitted as at least two bodies, grouped by name alone; observed bytes, not savings."
+    },
+    "name_stem_assumptions": { "type": "array", "items": { "type": "string" } },
     "toolchain_holdings": { "$ref": "#/$defs/toolchain_holdings" },
     "duplicates": { "$ref": "#/$defs/duplicate_summary" },
     "duplicate_groups": { "$ref": "#/$defs/duplicate_groups" },
@@ -370,6 +376,32 @@
           "description": "True only when every call endpoint resolved and every symbol fingerprint is unique. Shared identities or a missing endpoint leave a candidate list and an assumption naming the reason."
         },
         "assumptions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "name_stem": {
+      "type": "object",
+      "required": [
+        "stem", "parameterized", "owner", "ownership", "bodies", "instances", "size_bytes",
+        "instance_details"
+      ],
+      "properties": {
+        "stem": { "type": "string" },
+        "parameterized": { "type": "boolean" },
+        "owner": { "type": "string" },
+        "ownership": { "$ref": "#/$defs/ownership_class" },
+        "bodies": { "type": "integer", "minimum": 0 },
+        "instances": { "type": "integer", "minimum": 0 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "instance_details": { "type": "array", "items": { "$ref": "#/$defs/name_stem_instance" } }
+      }
+    },
+    "name_stem_instance": {
+      "type": "object",
+      "required": ["instance", "bodies", "size_bytes"],
+      "properties": {
+        "instance": { "type": "string" },
+        "bodies": { "type": "integer", "minimum": 0 },
+        "size_bytes": { "type": "integer", "minimum": 0 }
       }
     },
     "compressed_size": {

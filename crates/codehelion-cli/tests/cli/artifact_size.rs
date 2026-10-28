@@ -24,6 +24,8 @@ const BROTLI: Spelling = Spelling {
     encoder: "brotli (rust)",
 };
 
+const STEM_HEADING: &str = "name stems emitted as several bodies (observed, not savings):";
+
 const NOTE: &str = "  note: the compressed size covers the whole artifact; it is not divided among symbols, and an external compressor at the same level can differ by a fraction of a percent";
 
 #[derive(Clone, Copy, Debug)]
@@ -400,6 +402,226 @@ fn check_comparison(
     }
 }
 
+/// One stem row an analysis of the `Parameterized` module reports.
+struct ExpectedStem {
+    stem: &'static str,
+    owner: &'static str,
+    ownership: &'static str,
+    bodies: usize,
+    size: u64,
+    /// `(instance, bodies, size)`, largest first.
+    instances: &'static [(&'static str, usize, u64)],
+}
+
+/// Every body of the module is `00 41 <index> 1a 0b`, five bytes, in the
+/// first variant: three `probe` instances and two `deque` members repeat a
+/// stem, `solo()` does not.
+const fn expected_stems(names: Names) -> &'static [ExpectedStem] {
+    match names {
+        Names::Parameterized => &[
+            ExpectedStem {
+                stem: "probe<>",
+                owner: "<global>",
+                ownership: "other",
+                bodies: 3,
+                size: 15,
+                instances: &[
+                    ("probe<f::$_0>", 1, 5),
+                    ("probe<f::$_1>", 1, 5),
+                    ("probe<f::$_2>", 1, 5),
+                ],
+            },
+            ExpectedStem {
+                stem: "std::__2::deque<>",
+                owner: "std",
+                ownership: "toolchain",
+                bodies: 2,
+                size: 10,
+                instances: &[("std::__2::deque<int>", 2, 10)],
+            },
+        ],
+        Names::Plain | Names::Unnamed => &[],
+    }
+}
+
+/// What an analysis says about name stems, in any format. Plain and unnamed
+/// modules repeat no stem, so the section is absent altogether.
+fn check_stems(output: &str, format: &str, names: Names) {
+    let expected = expected_stems(names);
+    match format {
+        "json" => {
+            let report: Value = serde_json::from_str(output).expect("json report");
+            let stems = report["name_stems"].as_array().expect("array");
+            assert_eq!(stems.len(), expected.len(), "{output}");
+            for (stem, want) in stems.iter().zip(expected) {
+                assert_eq!(stem["stem"], want.stem);
+                assert_eq!(stem["parameterized"], true);
+                assert_eq!(stem["owner"], want.owner);
+                assert_eq!(stem["ownership"], want.ownership);
+                assert_eq!(stem["bodies"], want.bodies);
+                assert_eq!(stem["instances"], want.instances.len());
+                assert_eq!(stem["size_bytes"], want.size);
+                let details = stem["instance_details"].as_array().expect("array");
+                assert_eq!(details.len(), want.instances.len());
+                for (detail, (instance, bodies, size)) in details.iter().zip(want.instances) {
+                    assert_eq!(detail["instance"], *instance);
+                    assert_eq!(detail["bodies"], *bodies);
+                    assert_eq!(detail["size_bytes"], *size);
+                }
+            }
+            let statements = report["name_stem_assumptions"].as_array().expect("array");
+            assert_eq!(statements.len(), usize::from(!expected.is_empty()));
+        }
+        "text" => {
+            assert_eq!(
+                output.contains(STEM_HEADING),
+                !expected.is_empty(),
+                "{output}"
+            );
+            for want in expected {
+                let line = format!(
+                    "  {} ({}): {} bodies in {} instances, {} bytes",
+                    want.stem,
+                    want.ownership,
+                    want.bodies,
+                    want.instances.len(),
+                    want.size
+                );
+                assert!(output.lines().any(|found| found == line), "{output}");
+            }
+            if !expected.is_empty() {
+                let ownership = output.find("\nownership:").expect("ownership");
+                let stems = output.find(STEM_HEADING).expect("stem section");
+                let holders = output.find("toolchain holders").expect("holders");
+                assert!(ownership < stems && stems < holders, "{output}");
+            }
+        }
+        "csv" => {
+            let stems = csv_records(output, "name-stem");
+            assert_eq!(stems.len(), expected.len(), "{output}");
+            for (record, want) in stems.iter().zip(expected) {
+                assert_eq!(record["name_stem"], want.stem);
+                assert_eq!(record["stem_parameterized"], "true");
+                assert_eq!(record["owner"], want.owner);
+                assert_eq!(record["ownership"], want.ownership);
+                assert_eq!(record["emitted_bodies"], want.bodies.to_string());
+                assert_eq!(record["stem_instances"], want.instances.len().to_string());
+                assert_eq!(record["size"], want.size.to_string());
+            }
+            let instances = csv_records(output, "name-stem-instance");
+            let wanted: Vec<_> = expected
+                .iter()
+                .flat_map(|stem| stem.instances.iter().map(move |found| (stem, found)))
+                .collect();
+            assert_eq!(instances.len(), wanted.len(), "{output}");
+            for (record, (stem, (instance, bodies, size))) in instances.iter().zip(wanted) {
+                assert_eq!(record["name_stem"], stem.stem);
+                assert_eq!(record["owner"], stem.owner);
+                assert_eq!(record["name"], *instance);
+                assert_eq!(record["emitted_bodies"], bodies.to_string());
+                assert_eq!(record["size"], size.to_string());
+            }
+            let types: Vec<&str> = output
+                .lines()
+                .skip(1)
+                .map(|line| line.split(',').next().expect("record type"))
+                .collect();
+            let summary = types.iter().position(|kind| *kind == "ownership-summary");
+            let first = types.iter().position(|kind| *kind == "name-stem");
+            if first.is_some() {
+                assert_eq!(first, summary.map(|at| at + 1), "{output}");
+            }
+        }
+        other => panic!("unknown format {other}"),
+    }
+}
+
+/// The stem row a comparison of the two variants reports: the first body
+/// grows by one instruction, so its identity changes and it is one removal
+/// and one addition of the same stem, one byte apart.
+const fn expected_stem_delta(names: Names) -> Option<(&'static str, bool)> {
+    match names {
+        Names::Parameterized => Some(("probe<>", true)),
+        Names::Plain => Some(("solo", false)),
+        Names::Unnamed => None,
+    }
+}
+
+/// What a comparison says about name stems, in any format.
+fn check_stem_deltas(output: &str, format: &str, names: Names) {
+    let expected = expected_stem_delta(names);
+    let bodies = match names {
+        Names::Parameterized => 3,
+        _ => 1,
+    };
+    match format {
+        "json" => {
+            let report: Value = serde_json::from_str(output).expect("json report");
+            let deltas = report["symbol_deltas"].as_array().expect("array");
+            let mut kinds: Vec<&str> = deltas
+                .iter()
+                .map(|delta| delta["kind"].as_str().expect("kind"))
+                .collect();
+            kinds.sort_unstable();
+            assert_eq!(kinds, ["added", "removed"], "{output}");
+            let rows = report["stem_deltas"].as_array().expect("array");
+            assert_eq!(rows.len(), usize::from(expected.is_some()), "{output}");
+            if let Some((stem, parameterized)) = expected {
+                assert_eq!(rows[0]["stem"], stem);
+                assert_eq!(rows[0]["parameterized"], parameterized);
+                assert_eq!(rows[0]["owner"], "<global>");
+                assert_eq!(rows[0]["ownership"], "other");
+                assert_eq!(rows[0]["before_bodies"], bodies);
+                assert_eq!(rows[0]["after_bodies"], bodies);
+                assert_eq!(rows[0]["delta_bytes"], 1);
+            }
+        }
+        "text" => {
+            assert_eq!(
+                output.contains("stem delta:"),
+                expected.is_some(),
+                "{output}"
+            );
+            if let Some((stem, _)) = expected {
+                let line = format!("  {stem} (other): {bodies} -> {bodies} bodies, +1 bytes");
+                assert!(
+                    output.contains(&format!("stem delta:\n{line}\n")),
+                    "{output}"
+                );
+                let owners = output.find("ownership delta:").expect("owner deltas");
+                let stems = output.find("stem delta:").expect("stem section");
+                let assumption = output.find("assumption:").expect("assumption");
+                assert!(owners < stems && stems < assumption, "{output}");
+            }
+        }
+        "csv" => {
+            let records = csv_records(output, "stem-delta");
+            assert_eq!(records.len(), usize::from(expected.is_some()), "{output}");
+            if let Some((stem, parameterized)) = expected {
+                let record = &records[0];
+                assert_eq!(record["name_stem"], stem);
+                assert_eq!(record["stem_parameterized"], parameterized.to_string());
+                assert_eq!(record["owner"], "<global>");
+                assert_eq!(record["ownership"], "other");
+                assert_eq!(record["before_bodies"], bodies.to_string());
+                assert_eq!(record["after_bodies"], bodies.to_string());
+                assert_eq!(record["symbol_size_delta_bytes"], "1");
+                let types: Vec<&str> = output
+                    .lines()
+                    .skip(1)
+                    .map(|line| line.split(',').next().expect("record type"))
+                    .collect();
+                let last_owner = types
+                    .iter()
+                    .rposition(|kind| *kind == "owner-delta")
+                    .expect("owner deltas");
+                assert_eq!(types[last_owner + 1], "stem-delta", "{output}");
+            }
+        }
+        other => panic!("unknown format {other}"),
+    }
+}
+
 fn write_module(directory: &Path, file: &str, bytes: &[u8]) -> PathBuf {
     let path = directory.join(file);
     std::fs::write(&path, bytes).expect("write module");
@@ -431,6 +653,7 @@ fn compressed_size_is_reported_by_every_command_in_every_format() {
                     stdout_of(&run(root, &analyze_args(first_arg, database_arg, &extra)));
                 let expected = measured(&first, row.compressed);
                 check_analysis(&analyzed, row.format, row.compressed, &expected);
+                check_stems(&analyzed, row.format, row.names);
                 if matches!(row.command, Command::Report) {
                     std::fs::remove_file(&first).expect("remove the input");
                     let replayed = stdout_of(&run(
@@ -462,6 +685,7 @@ fn compressed_size_is_reported_by_every_command_in_every_format() {
                 let before = measured(&first, row.compressed);
                 let after = measured(&second, row.compressed);
                 check_comparison(&compared, row.format, row.compressed, &before, &after);
+                check_stem_deltas(&compared, row.format, row.names);
             }
         }
     }

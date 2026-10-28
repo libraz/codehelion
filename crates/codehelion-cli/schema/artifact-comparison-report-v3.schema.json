@@ -36,6 +36,11 @@
     "symbol_changes": { "$ref": "#/$defs/symbol_changes" },
     "symbol_deltas": { "type": "array", "items": { "$ref": "#/$defs/symbol_delta" } },
     "ownership_deltas": { "$ref": "#/$defs/ownership_deltas" },
+    "stem_deltas": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/stem_delta" },
+      "description": "Stems whose bodies changed in number or moved in several symbols; bytes are the summed symbol size deltas."
+    },
     "duplicate_group_deltas": { "type": "array", "items": { "$ref": "#/$defs/duplicate_group_delta" } },
     "build_variant_warning": { "type": ["string", "null"] },
     "assumptions": { "type": "array", "items": { "type": "string" } }
@@ -209,6 +214,22 @@
       "properties": {
         "key": { "type": "string" },
         "ownership": { "$ref": "#/$defs/ownership_class" },
+        "delta_bytes": { "type": "integer" }
+      }
+    },
+    "stem_delta": {
+      "type": "object",
+      "required": [
+        "stem", "parameterized", "owner", "ownership", "before_bodies", "after_bodies",
+        "delta_bytes"
+      ],
+      "properties": {
+        "stem": { "type": "string" },
+        "parameterized": { "type": "boolean" },
+        "owner": { "type": "string" },
+        "ownership": { "$ref": "#/$defs/ownership_class" },
+        "before_bodies": { "type": "integer", "minimum": 0 },
+        "after_bodies": { "type": "integer", "minimum": 0 },
         "delta_bytes": { "type": "integer" }
       }
     },

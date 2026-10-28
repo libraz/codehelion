@@ -273,6 +273,51 @@ fn normalizable_symbol(
     }
 }
 
+/// One symbol whose identity follows its seed, so a fixture can decide on its
+/// own which changed symbols carry a name.
+fn comparison_symbol(
+    name: Option<&str>,
+    seed: &[u8],
+    size: u64,
+) -> codehelion_artifact::ArtifactSymbol {
+    codehelion_artifact::ArtifactSymbol {
+        fingerprint: codehelion_artifact::ArtifactFingerprint::from_content("symbol", seed),
+        name: name.map(ToOwned::to_owned),
+        exported: false,
+        section: None,
+        offset: 0,
+        size,
+        size_inferred: false,
+        code: vec![1; usize::try_from(size).unwrap()],
+        normalized: None,
+        body_fingerprint: None,
+        inline_stack: Vec::new(),
+        content_fingerprint: None,
+        identity_by_order: false,
+    }
+}
+
+/// A comparison of two artifacts holding the given symbols.
+fn symbol_comparison(
+    before_symbols: Vec<codehelion_artifact::ArtifactSymbol>,
+    after_symbols: Vec<codehelion_artifact::ArtifactSymbol>,
+) -> ArtifactComparisonReport {
+    let mut before = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
+    before.symbols = before_symbols;
+    before.observed_bytes = 64;
+    let mut after = before.clone();
+    after.symbols = after_symbols;
+    after.observed_bytes = 32;
+    ArtifactComparisonReport::new(
+        std::path::Path::new("before.wasm"),
+        &before,
+        None,
+        std::path::Path::new("after.wasm"),
+        &after,
+        None,
+    )
+}
+
 /// Every size category reaches text, CSV and JSON under the name the schema
 /// declares, carrying its own value.
 ///
@@ -614,4 +659,5 @@ mod input;
 mod ownership;
 mod schema;
 mod source_map;
+mod stem;
 mod text;

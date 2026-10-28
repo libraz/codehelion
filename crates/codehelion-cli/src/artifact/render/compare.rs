@@ -2,10 +2,10 @@
 
 use codehelion_artifact::ownership::Ownership;
 
-use super::{render_fact_lines, write_fact_columns};
+use super::{render_fact_lines, render_omitted, write_fact_columns};
 use crate::artifact::model::{
     ArtifactComparisonReport, AssumptionScope, COMPARE_CSV_HEADER, COMPARISON_FACTS,
-    OwnershipDeltaReport, compare_column, comparison_assumptions, ownership_label,
+    OwnershipDeltaReport, StemDelta, compare_column, comparison_assumptions, ownership_label,
     pairs_both_artifacts,
 };
 use crate::artifact::{Result, Write, csv, optional_f64};
@@ -47,6 +47,17 @@ pub(in crate::artifact) fn render_compare_csv(
         ownership_label(owner.ownership).clone_into(&mut row[compare_column::CHANGE_KIND]);
         row[compare_column::NAME] = csv(&owner.key);
         row[compare_column::SYMBOL_SIZE_DELTA_BYTES] = owner.delta_bytes.to_string();
+        write_compare_csv_row(out, &row)?;
+    }
+    for delta in &report.stem_deltas {
+        let mut row = compare_csv_row(report, "stem-delta");
+        row[compare_column::NAME_STEM] = csv(&delta.stem);
+        row[compare_column::STEM_PARAMETERIZED] = delta.parameterized.to_string();
+        row[compare_column::OWNER] = csv(&delta.owner);
+        ownership_label(delta.ownership).clone_into(&mut row[compare_column::OWNERSHIP]);
+        row[compare_column::BEFORE_BODIES] = delta.before_bodies.to_string();
+        row[compare_column::AFTER_BODIES] = delta.after_bodies.to_string();
+        row[compare_column::SYMBOL_SIZE_DELTA_BYTES] = delta.delta_bytes.to_string();
         write_compare_csv_row(out, &row)?;
     }
     for delta in &report.duplicate_group_deltas {
@@ -261,6 +272,7 @@ pub(in crate::artifact) fn render_compare_text(
         )?;
     }
     render_ownership_deltas(&report.ownership_deltas, out)?;
+    render_stem_deltas(&report.stem_deltas, out)?;
     for assumption in assumptions
         .iter()
         .filter(|assumption| assumption.scope != AssumptionScope::BuildVariant)
@@ -339,16 +351,34 @@ fn render_ownership_deltas(deltas: &OwnershipDeltaReport, out: &mut impl Write) 
             owner.delta_bytes
         )?;
     }
-    let omitted = owners.len().saturating_sub(LISTED_OWNERS);
-    if omitted > 0 {
-        writeln!(out, "  {omitted} more owners")?;
-    }
+    render_omitted(owners.len(), LISTED_OWNERS, "owners", "  ", out)?;
     writeln!(
         out,
         "  outside symbols: {:+} bytes",
         deltas.outside_symbols_delta_bytes
     )?;
     Ok(())
+}
+
+/// The stems whose bodies changed in number, with the bytes they moved.
+/// Nothing is written while there are none.
+fn render_stem_deltas(deltas: &[StemDelta], out: &mut impl Write) -> Result<()> {
+    if deltas.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "stem delta:")?;
+    for delta in deltas.iter().take(LISTED_OWNERS) {
+        writeln!(
+            out,
+            "  {} ({}): {} -> {} bodies, {:+} bytes",
+            delta.stem,
+            ownership_label(delta.ownership),
+            delta.before_bodies,
+            delta.after_bodies,
+            delta.delta_bytes
+        )?;
+    }
+    render_omitted(deltas.len(), LISTED_OWNERS, "stems", "  ", out)
 }
 
 /// One byte difference written so its sign cannot be read backwards: the

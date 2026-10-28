@@ -87,7 +87,13 @@ fn the_csv_summary_carries_every_size_category() {
 /// matters is that each kind appears: a kind nothing exercises is a
 /// declaration nothing checks.
 fn report_of_every_record_kind() -> ArtifactReport {
-    let artifact = artifact_with_a_toolchain_holder();
+    let mut artifact = artifact_with_a_toolchain_holder();
+    // Two bodies of one stem, so the stem records are written.
+    for (offset, name) in [(60, "emit<int>()"), (70, "emit<long>()")] {
+        let mut symbol = normalizable_symbol(offset, &[1, 7], &[9]);
+        symbol.name = Some(name.to_owned());
+        artifact.symbols.push(symbol);
+    }
     let mut report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None)
         .with_correlation(Some(populated_correlation()));
     report.containment = Some(ArtifactContainment {

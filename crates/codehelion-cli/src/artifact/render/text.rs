@@ -5,12 +5,13 @@ use codehelion_artifact::ownership::Ownership;
 
 use super::{
     artifact_import_kind_label, attribution_basis_label, optional_bytes,
-    refactor_savings_assumption_text, render_fact_lines, stated_bytes,
+    refactor_savings_assumption_text, render_fact_lines, render_omitted, stated_bytes,
 };
 use crate::artifact::model::{
-    ARTIFACT_FACTS, ArtifactReport, AssumptionScope, DuplicateGroupReport, OwnershipReport,
-    ReportAssumption, SourceMapResolutionStatus, ToolchainHoldingsReport, dead_code_unavailability,
-    family_label, ownership_label, report_assumptions, retained_size_unavailability,
+    ARTIFACT_FACTS, ArtifactReport, AssumptionScope, DuplicateGroupReport, NameStemReport,
+    OwnershipReport, ReportAssumption, SourceMapResolutionStatus, ToolchainHoldingsReport,
+    dead_code_unavailability, family_label, ownership_label, report_assumptions,
+    retained_size_unavailability,
 };
 use crate::artifact::{Result, Write};
 
@@ -372,6 +373,7 @@ pub(in crate::artifact) fn render_text(
         }
     }
     render_ownership(&report.ownership, &assumptions, out)?;
+    render_name_stems(&report.name_stems, verbose, &assumptions, out)?;
     match &report.toolchain_holdings {
         Some(holdings) => render_holdings(holdings, &assumptions, out)?,
         // The retained-size line above already named the conditions.
@@ -516,6 +518,49 @@ fn render_ownership(
     render_assumptions(assumptions, AssumptionScope::Ownership, out)
 }
 
+/// The stems emitted as several bodies, largest first, with the instances of
+/// each under `--verbose`. Nothing is written while there are none.
+fn render_name_stems(
+    stems: &[NameStemReport],
+    verbose: bool,
+    assumptions: &[ReportAssumption<'_>],
+    out: &mut impl Write,
+) -> Result<()> {
+    if stems.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        out,
+        "name stems emitted as several bodies (observed, not savings):"
+    )?;
+    for stem in stems.iter().take(LISTED_OWNERS) {
+        writeln!(
+            out,
+            "  {} ({}): {} bodies in {} instances, {} bytes",
+            stem.stem,
+            ownership_label(stem.ownership),
+            stem.bodies,
+            stem.instances,
+            stem.size_bytes
+        )?;
+        if verbose {
+            for instance in &stem.instance_details {
+                writeln!(
+                    out,
+                    "    {}: {} bodies, {} bytes",
+                    instance.instance, instance.bodies, instance.size_bytes
+                )?;
+            }
+        }
+    }
+    render_omitted(stems.len(), LISTED_OWNERS, "stems", "  ", out)?;
+    writeln!(
+        out,
+        "  note: a stem groups bodies whose names differ only in template arguments, closure numbering or parameter lists; one source template written once can account for all of them, so the bytes are what the artifact spends, not what consolidating source would remove"
+    )?;
+    render_assumptions(assumptions, AssumptionScope::NameStems, out)
+}
+
 /// The largest holders with their heads, then the shared toolchain code.
 fn render_holdings(
     holdings: &ToolchainHoldingsReport,
@@ -605,21 +650,6 @@ fn render_holdings(
         out,
     )?;
     render_assumptions(assumptions, AssumptionScope::ToolchainHoldings, out)
-}
-
-/// Say how many entries a capped list left to the JSON output.
-fn render_omitted(
-    total: usize,
-    listed: usize,
-    what: &str,
-    indent: &str,
-    out: &mut impl Write,
-) -> Result<()> {
-    let omitted = total.saturating_sub(listed);
-    if omitted > 0 {
-        writeln!(out, "{indent}{omitted} more {what}")?;
-    }
-    Ok(())
 }
 
 fn render_groups(kind: &str, groups: &[DuplicateGroupReport], out: &mut impl Write) -> Result<()> {

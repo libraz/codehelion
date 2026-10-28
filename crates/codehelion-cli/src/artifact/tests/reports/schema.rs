@@ -62,11 +62,21 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
         normalizable_symbol(20, &[1, 3], &[9]),
         normalizable_symbol(30, &[1, 2], &[9]),
         normalizable_symbol(40, &[1, 4], &[9]),
+        normalizable_symbol(50, &[1, 5], &[9]),
+        normalizable_symbol(60, &[1, 6], &[9]),
     ];
-    // Two roots share `strtof`, and the first alone holds `__addtf3`.
-    for (index, name) in ["root", "strtof", "second_root", "__addtf3"]
-        .into_iter()
-        .enumerate()
+    // Two roots share `strtof`, and the first alone holds `__addtf3`; the last
+    // two are bodies of one stem.
+    for (index, name) in [
+        "root",
+        "strtof",
+        "second_root",
+        "__addtf3",
+        "emit<int>()",
+        "emit<long>()",
+    ]
+    .into_iter()
+    .enumerate()
     {
         artifact.symbols[index].name = Some(name.to_owned());
     }
@@ -173,6 +183,7 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
 
     let value = serde_json::to_value(&report).unwrap();
     assert!(value["compressed_sizes"][0].is_object());
+    assert!(value["name_stems"][0]["instance_details"][0].is_object());
     assert!(value["symbols"].as_array().is_some_and(|s| !s.is_empty()));
     assert!(value["duplicate_groups"]["exact"][0].is_object());
     assert!(value["duplicate_groups"]["normalized"][0].is_object());
@@ -197,6 +208,11 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
         (
             &value["compressed_sizes"][0],
             &defs["compressed_size"]["properties"],
+        ),
+        (&value["name_stems"][0], &defs["name_stem"]["properties"]),
+        (
+            &value["name_stems"][0]["instance_details"][0],
+            &defs["name_stem_instance"]["properties"],
         ),
         (&value["symbols"][0], &defs["symbol"]["properties"]),
         (&value["section_details"][0], &defs["section"]["properties"]),
@@ -374,8 +390,19 @@ fn comparison_json_field_names_appear_in_the_shipped_schema() {
     before.symbols = vec![normalizable_symbol(10, &[1, 2], &[9])];
     before.symbols[0].name = Some("my::f".to_owned());
     let mut after = before.clone();
-    after.symbols = vec![normalizable_symbol(20, &[1, 2, 3], &[9])];
-    after.symbols[0].name = Some("strtof".to_owned());
+    // Two bodies of one stem appear, beside the renamed symbol.
+    after.symbols = vec![
+        normalizable_symbol(20, &[1, 2, 3], &[9]),
+        normalizable_symbol(30, &[1, 4], &[9]),
+        normalizable_symbol(40, &[1, 5], &[9]),
+    ];
+    for (symbol, name) in after
+        .symbols
+        .iter_mut()
+        .zip(["strtof", "emit<int>()", "emit<long>()"])
+    {
+        symbol.name = Some(name.to_owned());
+    }
     let measured = |bytes| codehelion_artifact::compression::CompressedSize {
         algorithm: CompressionAlgorithm::Gzip,
         parameters: "level 9".to_owned(),
@@ -405,6 +432,7 @@ fn comparison_json_field_names_appear_in_the_shipped_schema() {
             &value["compressed_deltas"][0],
             &defs["compressed_delta"]["properties"],
         ),
+        (&value["stem_deltas"][0], &defs["stem_delta"]["properties"]),
         (
             &value["ownership_deltas"],
             &defs["ownership_deltas"]["properties"],

@@ -11,6 +11,7 @@ mod comparison;
 mod compression;
 mod facts;
 mod ownership;
+mod stem;
 
 pub(super) use assumption::{
     AssumptionScope, ReportAssumption, comparison_assumptions, dead_code_unavailability,
@@ -33,6 +34,7 @@ pub(super) use ownership::{
     OwnershipDeltaReport, OwnershipReport, ToolchainHoldingsReport, declared_ownership,
     family_label, ownership_label, ownership_of, symbol_owners,
 };
+pub(super) use stem::{NameStemReport, StemDelta};
 
 /// Stable summary of one artifact report, excluding raw code and data bytes.
 #[derive(Debug, Serialize)]
@@ -71,6 +73,8 @@ pub(super) struct ArtifactReport {
     pub(super) dead_code: Option<DeadCodeReport>,
     pub(super) retained_sizes: Option<Vec<RetainedSizeReport>>,
     pub(super) ownership: OwnershipReport,
+    pub(super) name_stems: Vec<NameStemReport>,
+    pub(super) name_stem_assumptions: Vec<String>,
     /// Absent under the same conditions as `retained_sizes`.
     pub(super) toolchain_holdings: Option<ToolchainHoldingsReport>,
     pub(super) duplicates: DuplicateSummary,
@@ -199,6 +203,7 @@ impl ArtifactReport {
         qualify_sizes(&mut sizes, &artifact.skipped_architectures);
         let owners = symbol_owners(artifact);
         let (ownership, toolchain_holdings) = ownership_of(artifact, &graph, &owners);
+        let name_stems = stem::name_stems_of(artifact, &owners);
         Self {
             schema_version: ARTIFACT_REPORT_SCHEMA_VERSION,
             path: path.display().to_string(),
@@ -266,6 +271,8 @@ impl ArtifactReport {
                 .retained_sizes()
                 .map(|sizes| sizes.into_iter().map(RetainedSizeReport::from).collect()),
             ownership,
+            name_stem_assumptions: stem::name_stem_assumptions(&name_stems),
+            name_stems,
             toolchain_holdings,
             duplicates: DuplicateSummary {
                 exact_groups: duplicates.exact.len(),
@@ -322,6 +329,9 @@ impl ArtifactReport {
             holdings.declare(&relabelled);
         }
         self.ownership.declare(own, &declared);
+        for row in &mut self.name_stems {
+            row.ownership = declared_ownership(row.ownership, &row.owner, &declared);
+        }
         self
     }
 }

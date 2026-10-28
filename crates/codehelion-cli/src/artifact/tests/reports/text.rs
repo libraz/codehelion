@@ -378,6 +378,40 @@ fn text_reports_ownership_classes_and_toolchain_holders() {
     assert!(retained < ownership && ownership < holders, "{text}");
 }
 
+/// The stem section sits between the ownership table and the toolchain
+/// holders, and the comparison's stem section between the ownership delta and
+/// the assumptions.
+#[test]
+fn text_places_the_stem_sections_after_the_ownership_tables() {
+    let mut artifact = ArtifactIr::empty(BinaryFormat::Wasm, b"fixture");
+    artifact.symbols = vec![
+        normalizable_symbol(10, &[1, 2], &[9]),
+        normalizable_symbol(20, &[1, 3], &[9]),
+    ];
+    artifact.symbols[0].name = Some("emit<int>()".to_owned());
+    artifact.symbols[1].name = Some("emit<long>()".to_owned());
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None);
+    let text = rendered_text(&report, false);
+    let ownership = text.find("ownership:").unwrap();
+    let stems = text.find("name stems emitted as several bodies").unwrap();
+    let holders = text.find("toolchain holders").unwrap();
+    assert!(ownership < stems && stems < holders, "{text}");
+
+    let comparison = ArtifactComparisonReport::new(
+        FilePath::new("before.wasm"),
+        &ArtifactIr::empty(BinaryFormat::Wasm, b"fixture"),
+        None,
+        FilePath::new("after.wasm"),
+        &artifact,
+        None,
+    );
+    let text = rendered_compare_text(&comparison);
+    let owners = text.find("ownership delta:").unwrap();
+    let stems = text.find("stem delta:").unwrap();
+    let assumption = text.find("assumption:").unwrap();
+    assert!(owners < stems && stems < assumption, "{text}");
+}
+
 /// The compressed sizes follow the data segment line and lead the section
 /// list, so the lines that were already there keep their relative order.
 #[test]

@@ -95,6 +95,9 @@ pub(in crate::artifact) const ARTIFACT_CSV_HEADER: &[&str] = &[
     "compression_parameters",
     "compression_encoder",
     "compressed_bytes",
+    "name_stem",
+    "stem_parameterized",
+    "stem_instances",
 ];
 
 /// The columns one kind of record in the artifact CSV carries.
@@ -285,6 +288,28 @@ pub(in crate::artifact) const RECORD_COLUMNS: &[RecordColumns] = &[
     },
     // The held bytes are a part of the holder's retained size: they sit in
     // the holder's dominator subtree, so they are not added to it.
+    RecordColumns {
+        record_type: "name-stem",
+        columns: &[
+            column::NAME_STEM,
+            column::STEM_PARAMETERIZED,
+            column::OWNER,
+            column::OWNERSHIP,
+            column::EMITTED_BODIES,
+            column::STEM_INSTANCES,
+            column::SIZE,
+        ],
+    },
+    RecordColumns {
+        record_type: "name-stem-instance",
+        columns: &[
+            column::NAME_STEM,
+            column::OWNER,
+            column::NAME,
+            column::EMITTED_BODIES,
+            column::SIZE,
+        ],
+    },
     RecordColumns {
         record_type: "toolchain-holding",
         columns: &[
@@ -527,6 +552,9 @@ pub(in crate::artifact) mod column {
     pub(in crate::artifact) const COMPRESSION_PARAMETERS: usize = 83;
     pub(in crate::artifact) const COMPRESSION_ENCODER: usize = 84;
     pub(in crate::artifact) const COMPRESSED_BYTES: usize = 85;
+    pub(in crate::artifact) const NAME_STEM: usize = 86;
+    pub(in crate::artifact) const STEM_PARAMETERIZED: usize = 87;
+    pub(in crate::artifact) const STEM_INSTANCES: usize = 88;
 }
 
 /// Every comparison CSV column, in the order they are written, under the same
@@ -589,6 +617,10 @@ pub(in crate::artifact) const COMPARE_CSV_HEADER: &[&str] = &[
     "before_compressed_bytes",
     "after_compressed_bytes",
     "compressed_delta_bytes",
+    "name_stem",
+    "stem_parameterized",
+    "before_bodies",
+    "after_bodies",
 ];
 
 /// Column positions in [`COMPARE_CSV_HEADER`].
@@ -639,4 +671,8 @@ pub(in crate::artifact) mod compare_column {
     pub(in crate::artifact) const BEFORE_COMPRESSED_BYTES: usize = 54;
     pub(in crate::artifact) const AFTER_COMPRESSED_BYTES: usize = 55;
     pub(in crate::artifact) const COMPRESSED_DELTA_BYTES: usize = 56;
+    pub(in crate::artifact) const NAME_STEM: usize = 57;
+    pub(in crate::artifact) const STEM_PARAMETERIZED: usize = 58;
+    pub(in crate::artifact) const BEFORE_BODIES: usize = 59;
+    pub(in crate::artifact) const AFTER_BODIES: usize = 60;
 }
