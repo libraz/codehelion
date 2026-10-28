@@ -15,6 +15,7 @@ use thiserror::Error;
 
 #[cfg(feature = "archive")]
 pub mod archive;
+pub mod compression;
 pub mod dwarf;
 #[cfg(feature = "elf")]
 pub mod elf;
@@ -26,6 +27,7 @@ pub mod native;
 pub mod ownership;
 #[cfg(feature = "pe")]
 pub mod pe;
+pub mod stem;
 pub mod support;
 pub mod symbols;
 #[cfg(feature = "wasm")]
@@ -222,6 +224,9 @@ pub struct ArtifactIr {
     pub fingerprint: ArtifactFingerprint,
     /// Input length measured directly from the byte stream.
     pub observed_bytes: u64,
+    /// Compressed lengths of the complete byte input, measured when requested.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compressed_sizes: Vec<compression::CompressedSize>,
     /// Architecture selected from the parsed input, when the format exposes one.
     ///
     /// A universal Mach-O records its explicitly selected slice here. Ordinary
@@ -269,6 +274,7 @@ impl ArtifactIr {
             capabilities: ArtifactCapabilities::default(),
             fingerprint: ArtifactFingerprint::from_content("artifact", bytes),
             observed_bytes: bytes.len() as u64,
+            compressed_sizes: Vec::new(),
             architecture: None,
             skipped_architectures: Vec::new(),
             sections: Vec::new(),
