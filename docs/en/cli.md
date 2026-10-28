@@ -145,6 +145,7 @@ codehelion artifact analyze path/to/binary
 codehelion artifact analyze path/to/binary --format csv  # also json, or text by default
 codehelion artifact analyze path/to/binary --untrusted   # lowered size, time and memory ceilings
 codehelion artifact analyze path/to/binary --debug-file companion
+codehelion artifact analyze path/to/binary --compressed gzip --compressed brotli
 codehelion artifact report              # render the latest saved analysis
 codehelion artifact report --analysis 1 # render a particular saved analysis
 codehelion artifact compare before/binary after/binary
@@ -159,7 +160,10 @@ selects the slice of a universal Mach-O binary. `analyze` takes `--build-variant
 `--before-build-variant` and `--after-build-variant` to report differing build
 conditions. To record a controlled calibration from a comparison, it additionally
 needs `--source-run` and `--clone-group` together with both build-variant flags;
-`--db` is optional and defaults like every other command's. See
+`--db` is optional and defaults like every other command's.
+`--compressed <gzip|brotli>`, repeatable, is accepted by both `analyze` and
+`compare` and also measures the compressed size of the whole artifact; it is off by
+default, and the measurement runs inside `--timeout-seconds`. See
 [Artifact analysis](artifact-analysis.md) and [Calibration](calibration.md).
 
 ## `history`

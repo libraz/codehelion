@@ -202,6 +202,92 @@ fingerprint. Archive symbols also keep a `content_fingerprint` independent of th
 member bytes, so changing one function does not change the comparison identity of
 other functions in the same member.
 
+## Name stems
+
+Several bodies of one artifact can differ only in a template argument, a closure
+number or a parameter list: `int probe<f::$_0>(char const*, f::$_0)`,
+`int probe<f::$_1>(char const*, f::$_1)` and `int probe<f::$_2>(char const*, f::$_2)`
+are three bodies of one template. A name stem is the name cut at its first
+parameterized component, with the template arguments written `<>`, closures
+written `{closure}`, and no parameter list or return type. The three bodies above
+share the stem `probe<>` and keep their own spellings as instances.
+
+The cut is at the first parameterized component and not at the end of the name, so
+members of one container share a stem whatever they do:
+`std::__2::deque<int>::push_back(int&&)` and `std::__2::deque<int>::pop_front()`
+both belong to `std::__2::deque<>`, and their sizes add up to what that container
+costs. A name with no parameterized component, such as
+`solo()`, has the stem `solo`, and overloads (`foo(int)`, `foo(unsigned int)`)
+share one.
+
+`artifact analyze` lists the stems with at least two bodies, from symbol names
+alone, so no source run is needed:
+
+```text
+name stems emitted as several bodies (observed, not savings):
+  probe<> (other): 3 bodies in 3 instances, 948 bytes
+```
+
+Each row gives the owner class, the number of bodies, the number of distinct
+instances and the summed size of the bodies. `--verbose` adds one line per
+instance under each row:
+
+```text
+    probe<f::$_2>: 1 bodies, 340 bytes
+```
+
+The ten largest rows are listed and the rest are counted. The JSON report carries
+the rows as `name_stems` and CSV carries `name-stem` and `name-stem-instance`
+records.
+
+These are observed bytes, not savings. One template written once in the source
+can account for every body of a stem, so the figure is what the artifact spends
+and not what consolidating the source would remove. Grouping is by exact equality
+of the stem, not by similarity, so the non-transitivity concerns of
+[grouping](grouping.md) do not arise. A set of identical copies appears
+both as an exact duplicate group and as a stem with several bodies in one
+instance; the two reports describe the same bytes from different directions.
+
+The section is absent when no stem has two bodies. That also holds for an artifact
+whose symbols carry no names, so an absent section does not tell a stripped
+artifact from one without repeated names; the ownership section reports the
+unnamed symbols.
+
+## Compressed size
+
+```sh
+codehelion artifact analyze path/to/binary --compressed gzip --compressed brotli
+```
+
+measures the whole input once per algorithm and prints one line each:
+
+```text
+compressed bytes (gzip, level 9, flate2 (miniz_oxide)): 209710
+```
+
+The value is the length of the complete compressed stream. gzip runs at level 9
+through `flate2` with its `miniz_oxide` backend, with a zero timestamp and no file
+name in the header. brotli runs at quality 11 with a 22-bit window. The flag is
+opt-in and repeatable; without it no compression runs and no line, JSON entry or
+CSV record appears. The JSON report carries `compressed_sizes`, and CSV carries
+`compressed-size` records. `artifact report` shows the values recorded with the
+analysis and does not read the artifact again.
+
+The value is never divided among symbols, stems, owners or duplicate groups. A
+compressor's output for one function depends on what precedes it, so moving
+functions around changes the figure without changing any function, and a share
+computed per part would not add up to the whole. The report states this beside
+the figure.
+
+The encoders are not the external tools. An external compressor at the same level
+differs by a fraction of a percent, so a number from `gzip -9` cannot be set
+against one printed here. Compare two builds inside one `artifact compare`, which
+measures both with the same encoder.
+
+brotli at quality 11 is much slower than gzip, and the measurement runs inside
+`--timeout-seconds`. A timeout during it names the `compression` phase; raise the
+limit or ask for gzip only.
+
 ## Comparing two builds
 
 > **Pre-1.0 surface.** This is documented and tested, but has not had the real
@@ -219,6 +305,34 @@ the retained code bytes standing in for a body identity where the backend decode
 none. Given a
 source run and a clone group as well, it also records a calibration measurement —
 see [Calibration](calibration.md).
+
+With `--compressed gzip` (or `brotli`), the comparison also measures both
+artifacts in one process, so both sides use the same encoder and settings, and
+prints the difference beside the other byte deltas:
+
+```text
+compressed bytes (gzip, level 9, flate2 (miniz_oxide)): 209828 before, 209710 after, -118 bytes (smaller)
+```
+
+JSON carries these as `compressed_deltas` and CSV as `compressed-delta` records.
+The compressed delta is shown only when both sides were measured with the same
+algorithm and settings.
+
+Symbol deltas pair symbols by content, so a function whose signature changed from
+`foo(int)` to `foo(unsigned int)` with a different body appears as one removed and
+one added symbol. The stem delta sums those under the stem `foo`, and it also
+counts bodies, so a template whose three instances became one reads:
+
+```text
+stem delta:
+  probe<> (other): 3 -> 1 bodies, -608 bytes
+```
+
+A row appears when at least two symbol deltas share a stem, or when the stem's
+number of bodies changes and either side has at least two. The bodies are counted
+over the whole of each artifact, not only over the changed symbols, and the byte
+difference is the sum of the symbol deltas. The section is omitted when there are
+no such rows; JSON carries `stem_deltas` and CSV `stem-delta` records.
 
 When both artifacts record an architecture and the two differ, every rendering of
 the comparison says so. A calibration is refused outright for artifacts of

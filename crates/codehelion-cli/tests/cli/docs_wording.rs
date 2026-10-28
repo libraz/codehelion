@@ -182,6 +182,42 @@ fn limitation_documents_explain_compressed_size_without_quoting_a_measured_ratio
     }
 }
 
+/// The compressed-size and name-stem surfaces are documented where they are used.
+#[test]
+fn documents_state_the_compressed_size_and_name_stem_surfaces() {
+    for (language, artifact, cli, limitations, not_divided) in [
+        (
+            "English",
+            include_str!("../../../../docs/en/artifact-analysis.md"),
+            include_str!("../../../../docs/en/cli.md"),
+            include_str!("../../../../docs/en/limitations.md"),
+            "Compressed size is not divided among symbols, stems, owners or duplicate groups",
+        ),
+        (
+            "Japanese",
+            include_str!("../../../../docs/ja/artifact-analysis.md"),
+            include_str!("../../../../docs/ja/cli.md"),
+            include_str!("../../../../docs/ja/limitations.md"),
+            "圧縮後サイズはシンボル・stem・owner・重複グループには割り付けない",
+        ),
+    ] {
+        for snippet in ["--compressed gzip", "name stems emitted as several bodies"] {
+            assert!(
+                artifact.contains(snippet),
+                "{language} artifact document is missing {snippet}"
+            );
+        }
+        assert!(
+            cli.contains("--compressed"),
+            "{language} command-line document does not name --compressed"
+        );
+        assert!(
+            limitations.contains(not_divided),
+            "{language} limitation document does not say compressed size is not divided"
+        );
+    }
+}
+
 /// A baseline is for CI; following your own progress needs no baseline.
 #[test]
 fn baseline_documents_tell_the_two_uses_apart() {

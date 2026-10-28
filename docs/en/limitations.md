@@ -54,6 +54,19 @@ image, a WASM module measured before transport encoding — it is.
 Measure both before and after your own refactor rather than taking a ratio from
 anywhere else; nothing here re-derives one for you.
 
+`artifact analyze --compressed` measures only the whole artifact. Compressed size is not divided among symbols, stems, owners or duplicate groups, so no row of a report says how many compressed bytes a function or a duplicate costs. The output for one function depends on what precedes it, and reordering functions alone moves the total.
+
+## Name stems follow names only
+
+A name stem is computed from the symbol name and nothing else. Overloads of one
+function and same-named copies share a stem with template instantiations, and a
+symbol without a name belongs to no stem. Copies of a same-named function from
+different members of an archive count as separate bodies. MSVC lambdas
+(`<lambda_1>`) group like other closures. The section does not appear when no stem
+has two bodies, so its absence does not distinguish an artifact without names from
+one without repeated names; the ownership section reports unnamed symbols. See
+[name stems](artifact-analysis.md#name-stems).
+
 ## Fast mode reports more than you want to read
 
 The suppression policies for boilerplate, test code and integer-width families

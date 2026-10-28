@@ -74,6 +74,11 @@ copies yet.
 **lineage** — the recorded link from a group in one run to the group it inherited
 from in the run before, when content changed enough to move the id.
 
+**name stem** — a symbol name cut at its first parameterized component, with
+template arguments written `<>` and closures `{closure}`, and no parameter list.
+Bodies that share a stem differ only in those parts. Counted in observed bytes,
+never as savings. See [Artifact analysis](artifact-analysis.md#name-stems).
+
 **near miss** — a proposal that landed just under the gate, retained as a
 diagnostic. `--show-near-misses` lists them.
 
