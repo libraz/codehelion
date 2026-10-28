@@ -64,7 +64,7 @@ const CLONE_ANNOTATION: &str = " [clone ";
 /// Prefix of an Itanium ABI tag such as `[abi:cxx11]`.
 const ABI_TAG: &str = "[abi:";
 /// Trailing qualifiers that do not name the function, longest spelling first.
-const TRAILING_QUALIFIERS: &[&str] = &[" const", " volatile", " &&", " &"];
+pub(crate) const TRAILING_QUALIFIERS: &[&str] = &[" const", " volatile", " &&", " &"];
 /// Most whole-name `{…}` wrappers opened before a name is judged by the
 /// fallback key instead; real special names nest one or two deep.
 const MAX_SPECIAL_NAME_DEPTH: usize = 16;
@@ -298,7 +298,7 @@ pub fn is_static_initializer_spelling(name: &str) -> bool {
 ///
 /// `None` for a name wrapped deeper than [`MAX_SPECIAL_NAME_DEPTH`]: each
 /// opening rescans the name, so the bound is what keeps judging linear.
-fn normalize(name: &str) -> Option<(String, bool)> {
+pub(crate) fn normalize(name: &str) -> Option<(String, bool)> {
     let mut current = strip_decorations(name);
     let mut depth = 0;
     while let Some(inner) = special_name_target(&current) {
@@ -402,14 +402,14 @@ fn drop_anonymous_namespaces(name: &str) -> String {
 }
 
 /// The name without its trailing top-level argument list.
-fn head(name: &str) -> &str {
+pub(crate) fn head(name: &str) -> &str {
     trailing_group(name, &levels(name)).map_or(name, |open| &name[..open])
 }
 
 /// The function name inside a head: from the token holding a top-level
 /// `operator` keyword to the end, or else the last top-level token, which
 /// drops a leading return type.
-fn function_name(head: &str) -> &str {
+pub(crate) fn function_name(head: &str) -> &str {
     let head = head.trim_end();
     let head_levels = levels(head);
     let top_level_space =
@@ -531,7 +531,7 @@ fn first_path_element(path: &str) -> Option<&str> {
 }
 
 /// Byte offset of the `(` that opens a top-level argument list ending `name`.
-fn trailing_group(name: &str, name_levels: &[Option<usize>]) -> Option<usize> {
+pub(crate) fn trailing_group(name: &str, name_levels: &[Option<usize>]) -> Option<usize> {
     let last = name.len().checked_sub(1)?;
     if !name.ends_with(')') || name_levels[last] != Some(0) {
         return None;
@@ -548,7 +548,7 @@ fn trailing_group(name: &str, name_levels: &[Option<usize>]) -> Option<usize> {
 /// An opening bracket sits at the depth outside it and a closing bracket at
 /// the depth it returns to, so a matched pair shares one level. Depth never
 /// goes below zero.
-fn levels(name: &str) -> Vec<Option<usize>> {
+pub(crate) fn levels(name: &str) -> Vec<Option<usize>> {
     let bytes = name.as_bytes();
     let mut result = Vec::with_capacity(bytes.len());
     let mut depth = 0_usize;
