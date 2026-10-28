@@ -152,7 +152,7 @@ fn dwarf_locations_map_only_units_in_the_explicit_source_run() {
     render_text(&report, false, &mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains(
-        "source correlation: scan 7: 2 mappings, 1/1 mapped symbols (100.0%), 8 / 8 mapped symbol bytes (100.0%), 0 unmapped symbols (0 bytes)"
+        "source correlation: scan 7: 2 mappings, 1/1 mapped symbol (100.0%), 8 / 8 mapped symbol bytes (100.0%), 0 unmapped symbols (0 bytes)"
     ));
     assert!(text.contains("source identities: 2, 0 without artifact evidence"));
     let mut csv_out = Vec::new();

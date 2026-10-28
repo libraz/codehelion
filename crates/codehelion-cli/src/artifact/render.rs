@@ -1,9 +1,15 @@
 //! Human-readable and CSV artifact report rendering.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
+
+use codehelion_artifact::short_name::short_name;
+
 use super::correlation::{self, AttributionBasis, RefactorSavingsAssumption};
 use super::metrics;
-use super::model::{self, ReportFact, column};
+use super::model::{ArtifactReport, ReportFact, column};
 use super::{Context, Result, Write, csv};
+use crate::report::render::format::noun_form_of;
 
 mod compare;
 mod csv;
@@ -45,10 +51,16 @@ pub(super) const fn attribution_basis_field(basis: AttributionBasis) -> &'static
 pub(super) fn refactor_savings_assumption_text(assumption: &RefactorSavingsAssumption) -> String {
     match assumption {
         RefactorSavingsAssumption::SharedImplementationRetainsCopies { copies } => {
-            format!("shared implementation retains {copies} copy/copies")
+            format!(
+                "shared implementation retains {}",
+                counted(*copies, "copy", "copies")
+            )
         }
         RefactorSavingsAssumption::CallOverheadPerReplacedMember { bytes } => {
-            format!("call overhead is {bytes} bytes per replaced member")
+            format!(
+                "call overhead is {} per replaced member",
+                counted(*bytes, "byte", "bytes")
+            )
         }
         RefactorSavingsAssumption::InliningOutcomeUnknown => {
             "compiler inlining outcome is unknown".to_owned()
@@ -143,13 +155,93 @@ pub(super) fn render_fact_lines<R>(
 pub(super) fn render_omitted(
     total: usize,
     listed: usize,
-    what: &str,
+    singular: &str,
+    plural: &str,
     indent: &str,
     out: &mut impl Write,
 ) -> Result<()> {
     let omitted = total.saturating_sub(listed);
     if omitted > 0 {
-        writeln!(out, "{indent}{omitted} more {what}")?;
+        writeln!(
+            out,
+            "{indent}{omitted} more {}",
+            noun(omitted, singular, plural)
+        )?;
     }
     Ok(())
+}
+
+/// The singular or plural noun for `count`, judged by its magnitude.
+pub(super) fn noun<'a>(count: impl TryInto<i128>, singular: &'a str, plural: &'a str) -> &'a str {
+    let magnitude = count.try_into().map_or(u128::MAX, i128::unsigned_abs);
+    noun_form_of(
+        u64::try_from(magnitude).unwrap_or(u64::MAX),
+        singular,
+        plural,
+    )
+}
+
+/// `1 symbol` / `3 symbols`.
+pub(super) fn counted(
+    count: impl TryInto<i128> + Copy + std::fmt::Display,
+    singular: &str,
+    plural: &str,
+) -> String {
+    format!("{count} {}", noun(count, singular, plural))
+}
+
+/// `+1 member` / `-3 members`, the noun following the magnitude.
+pub(super) fn signed_counted(delta: i128, singular: &str, plural: &str) -> String {
+    format!("{delta:+} {}", noun(delta, singular, plural))
+}
+
+/// Symbol names by fingerprint, for lists that identify symbols by fingerprint only.
+///
+/// Symbols can share a fingerprint, so each entry holds the distinct full names
+/// in file order; a fingerprint with no named symbol maps to an empty list.
+pub(super) fn symbol_names(report: &ArtifactReport) -> HashMap<&str, Vec<&str>> {
+    let mut names: HashMap<&str, Vec<&str>> = HashMap::with_capacity(report.symbols.len());
+    for symbol in &report.symbols {
+        let entry = names.entry(symbol.fingerprint.as_str()).or_default();
+        if let Some(name) = symbol.name.as_deref()
+            && !entry.contains(&name)
+        {
+            entry.push(name);
+        }
+    }
+    names
+}
+
+/// The names behind one fingerprint as a text report prints them: each
+/// shortened unless `verbose`, joined with ` | `, or `<unnamed>` when none.
+pub(super) fn listed_names(
+    names: &HashMap<&str, Vec<&str>>,
+    fingerprint: &str,
+    verbose: bool,
+) -> String {
+    match names.get(fingerprint).map(Vec::as_slice) {
+        None | Some([]) => display_name(None, verbose).into_owned(),
+        Some(found) => found
+            .iter()
+            .map(|name| display_name(Some(name), verbose))
+            .collect::<Vec<_>>()
+            .join(" | "),
+    }
+}
+
+/// The names behind one fingerprint in full, joined with ` | `, or empty.
+pub(super) fn joined_names(names: &HashMap<&str, Vec<&str>>, fingerprint: &str) -> String {
+    names
+        .get(fingerprint)
+        .map_or_else(String::new, |found| found.join(" | "))
+}
+
+/// A symbol name as a text report prints it: shortened unless `verbose`, and
+/// `<unnamed>` when the symbol has none.
+pub(super) fn display_name(name: Option<&str>, verbose: bool) -> Cow<'_, str> {
+    match name {
+        Some(name) if verbose => Cow::Borrowed(name),
+        Some(name) => short_name(name),
+        None => Cow::Borrowed("<unnamed>"),
+    }
 }

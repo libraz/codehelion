@@ -387,7 +387,7 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
     match args.format {
         ArtifactFormat::Json => serde_json::to_writer_pretty(&mut rendered, &report)?,
         ArtifactFormat::Csv => render_compare_csv(&report, &mut rendered)?,
-        ArtifactFormat::Text => render_compare_text(&report, &mut rendered)?,
+        ArtifactFormat::Text => render_compare_text(&report, args.verbose, &mut rendered)?,
     }
     rendered.push(b'\n');
     if let Some(path) = &args.output {

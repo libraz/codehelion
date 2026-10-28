@@ -99,7 +99,7 @@ fn group_attribution_reports_exact_noncanonical_byte_splits() {
     assert!(text.contains("source 04040404040404040404040404040404"));
     assert!(text.contains("artifact 05050505050505050505050505050505"));
     assert!(text.contains("model schema: refactor-savings-model-v1"));
-    assert!(text.contains("shared implementation retains 1 copy/copies"));
+    assert!(text.contains("shared implementation retains 1 copy"));
     assert_clone_group_savings_are_in_json_and_csv(&report);
     assert_eq!(
         serde_json::to_vec(&savings).unwrap(),
@@ -332,7 +332,7 @@ fn a_containing_symbol_size_is_reported_apart_from_every_duplicated_byte_total()
     render_text(&report, false, &mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(
-        text.contains("in 1 symbol(s) totalling 48 observed bytes"),
+        text.contains("in 1 symbol totalling 48 observed bytes"),
         "{text}"
     );
     assert!(

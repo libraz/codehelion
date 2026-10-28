@@ -323,7 +323,10 @@ fn walk(value: &serde_json::Value, is_hex: &dyn Fn(&serde_json::Value) -> bool) 
     match value {
         serde_json::Value::Object(members) => {
             for (key, member) in members {
-                if matches!(key.as_str(), "fingerprint" | "content_fingerprint") {
+                if matches!(
+                    key.as_str(),
+                    "fingerprint" | "content_fingerprint" | "counterpart_fingerprint"
+                ) {
                     assert!(member.is_null() || is_hex(member), "{key}: {member}");
                 }
                 walk(member, is_hex);

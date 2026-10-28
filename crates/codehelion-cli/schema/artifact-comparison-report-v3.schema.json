@@ -172,7 +172,12 @@
           "type": "string",
           "description": "Owner key derived from the name, judged on the earlier artifact for a removal and on the later one otherwise."
         },
-        "ownership": { "$ref": "#/$defs/ownership_class" }
+        "ownership": { "$ref": "#/$defs/ownership_class" },
+        "counterpart_fingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{32}$",
+          "description": "Fingerprint of the other half of a replacement. A removed and an added symbol carry each other's fingerprint when their name belongs to exactly one symbol on each side and to exactly one removed and one added entry; null otherwise."
+        }
       }
     },
     "ownership_class": {

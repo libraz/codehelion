@@ -479,12 +479,17 @@ fn check_stems(output: &str, format: &str, names: Names) {
                 "{output}"
             );
             for want in expected {
+                let instances = want.instances.len();
                 let line = format!(
-                    "  {} ({}): {} bodies in {} instances, {} bytes",
+                    "  {} ({}): {} bodies in {instances} {}, {} bytes",
                     want.stem,
                     want.ownership,
                     want.bodies,
-                    want.instances.len(),
+                    if instances == 1 {
+                        "instance"
+                    } else {
+                        "instances"
+                    },
                     want.size
                 );
                 assert!(output.lines().any(|found| found == line), "{output}");
@@ -583,7 +588,8 @@ fn check_stem_deltas(output: &str, format: &str, names: Names) {
                 "{output}"
             );
             if let Some((stem, _)) = expected {
-                let line = format!("  {stem} (other): {bodies} -> {bodies} bodies, +1 bytes");
+                let noun = if bodies == 1 { "body" } else { "bodies" };
+                let line = format!("  {stem} (other): {bodies} -> {bodies} {noun}, +1 byte");
                 assert!(
                     output.contains(&format!("stem delta:\n{line}\n")),
                     "{output}"

@@ -72,7 +72,7 @@ fn comparison_uses_fingerprint_for_additions_and_names_for_modifications() {
         &json,
     );
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     assert!(
         String::from_utf8(text)
             .unwrap()
@@ -399,7 +399,7 @@ fn a_changed_immediate_is_reported_even_though_it_normalizes_away() {
         &json,
     );
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("resized narrowed"), "{text}");
     assert!(text.contains("-2 bytes"), "{text}");
@@ -528,7 +528,7 @@ fn comparison_text_folds_every_symbol_change_that_carries_no_name() {
     assert_eq!(report.symbol_deltas.len(), 2);
 
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(
         text.contains("note: 2 of 2 listed symbol changes have no name"),
@@ -559,7 +559,7 @@ fn comparison_text_lists_named_symbol_changes_and_folds_only_the_rest() {
     assert_eq!(report.symbol_deltas.len(), 3);
 
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("removed named_symbol"), "{text}");
     assert!(
@@ -580,7 +580,7 @@ fn comparison_json_keeps_the_symbol_changes_the_text_folded() {
         Vec::new(),
     );
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     assert!(
         String::from_utf8(text)
             .unwrap()
@@ -624,7 +624,7 @@ fn comparison_text_states_which_direction_each_byte_difference_moved() {
     );
 
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(
         text.contains("observed size: -32 bytes (smaller)"),
@@ -651,7 +651,7 @@ fn comparison_text_reads_a_grown_artifact_as_larger() {
     report.duplicated_data_delta_bytes = Some(-8);
 
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("observed size: +16 bytes (larger)"), "{text}");
     assert!(
@@ -686,7 +686,7 @@ fn comparison_warns_when_build_variant_evidence_differs() {
         Some("build variants differ; size and symbol changes may reflect build-condition changes")
     );
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     assert!(
         String::from_utf8(text)
             .unwrap()
@@ -722,7 +722,7 @@ fn comparison_warns_when_neither_build_variant_is_supplied() {
         Some("no build variants were supplied; build-condition differences cannot be assessed")
     );
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     assert!(
         String::from_utf8(text)
             .unwrap()
@@ -966,7 +966,7 @@ fn comparison_states_differing_architectures_in_every_rendering() {
         None,
     );
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     assert!(String::from_utf8(text).unwrap().contains(statement));
     let mut csv = Vec::new();
     render_compare_csv(&report, &mut csv).unwrap();
@@ -1020,4 +1020,378 @@ fn a_changed_identity_is_described_as_the_removal_and_addition_it_is_listed_as()
             .any(|assumption| assumption == SYMBOL_IDENTITY_CHANGED)
     );
     assert!(SYMBOL_IDENTITY_CHANGED.contains("one removed and one added symbol"));
+}
+
+/// One symbol of a pairing fixture: its name, the seed its identity follows,
+/// and its size. The same seed and size on both sides is the same bytes.
+type PairingEntry = (Option<&'static str>, &'static str, u64);
+
+/// One before/after arrangement of symbols and what a comparison of it says.
+struct PairingRow {
+    label: &'static str,
+    before: Vec<PairingEntry>,
+    after: Vec<PairingEntry>,
+    /// Entries in `symbol_deltas`.
+    deltas: usize,
+    /// Whether the removed and the added delta name each other.
+    paired: bool,
+}
+
+fn pairing_comparison(before: &[PairingEntry], after: &[PairingEntry]) -> ArtifactComparisonReport {
+    let symbols = |entries: &[PairingEntry]| {
+        entries
+            .iter()
+            .map(|(name, seed, size)| comparison_symbol(*name, seed.as_bytes(), *size))
+            .collect::<Vec<_>>()
+    };
+    symbol_comparison(symbols(before), symbols(after))
+}
+
+/// Every arrangement the pairing rule is checked against.
+fn pairing_rows() -> Vec<PairingRow> {
+    const N: Option<&str> = Some("n");
+    vec![
+        PairingRow {
+            label: "P1 one matched",
+            before: vec![(N, "m", 4)],
+            after: vec![(N, "m", 4)],
+            deltas: 0,
+            paired: false,
+        },
+        PairingRow {
+            label: "P2 two and two, one removed and one added",
+            before: vec![(N, "r", 8), (N, "m1", 4)],
+            after: vec![(N, "m1", 4), (N, "m2", 4)],
+            deltas: 2,
+            paired: false,
+        },
+        PairingRow {
+            label: "P3 two before, one removed",
+            before: vec![(N, "m1", 4), (N, "r", 8)],
+            after: vec![(N, "m1", 4)],
+            deltas: 1,
+            paired: false,
+        },
+        PairingRow {
+            label: "P4 unnamed removed and added",
+            before: vec![(None, "r", 8)],
+            after: vec![(None, "a", 4)],
+            deltas: 2,
+            paired: false,
+        },
+        PairingRow {
+            label: "P5 unnamed matched",
+            before: vec![(None, "m", 4)],
+            after: vec![(None, "m", 4)],
+            deltas: 0,
+            paired: false,
+        },
+        PairingRow {
+            label: "P6 two matched",
+            before: vec![(N, "m1", 4), (N, "m2", 4)],
+            after: vec![(N, "m1", 4), (N, "m2", 4)],
+            deltas: 0,
+            paired: false,
+        },
+        PairingRow {
+            label: "P7 two and two, one matched and one added",
+            before: vec![(N, "m1", 4), (N, "m2", 4)],
+            after: vec![(N, "m1", 4), (N, "a", 4)],
+            deltas: 2,
+            paired: false,
+        },
+        PairingRow {
+            label: "P8 one before, two after",
+            before: vec![(N, "m1", 4)],
+            after: vec![(N, "m1", 4), (N, "a", 4)],
+            deltas: 1,
+            paired: false,
+        },
+        PairingRow {
+            label: "S1 one removed, one added",
+            before: vec![(N, "r", 8)],
+            after: vec![(N, "a", 4)],
+            deltas: 2,
+            paired: true,
+        },
+        PairingRow {
+            label: "S2 name repeated before",
+            before: vec![(N, "r1", 8), (N, "r2", 6)],
+            after: vec![(N, "a", 4)],
+            deltas: 3,
+            paired: false,
+        },
+        PairingRow {
+            label: "S3 name repeated after",
+            before: vec![(N, "r", 8)],
+            after: vec![(N, "a1", 4), (N, "a2", 6)],
+            deltas: 3,
+            paired: false,
+        },
+    ]
+}
+
+/// A removed and an added symbol name each other only when their name belongs
+/// to one symbol on each side and to one removed and one added entry; every
+/// other arrangement leaves `counterpart_fingerprint` null and the text
+/// listing one line per entry.
+#[test]
+fn counterpart_pairs_table() {
+    for row in &pairing_rows() {
+        assert_pairing(row.label, &pairing_comparison(&row.before, &row.after), row);
+    }
+
+    // R1: one content group where `n` is resized against `m` and the other
+    // `n` is removed. Both sides hold one `n`, but no `n` was added.
+    let shared = codehelion_artifact::ArtifactFingerprint::from_content("content", b"shared");
+    let in_group = |name: &str, seed: &[u8], size: u64| {
+        let mut symbol = comparison_symbol(Some(name), seed, size);
+        symbol.content_fingerprint = Some(shared);
+        symbol
+    };
+    let report = symbol_comparison(
+        vec![in_group("m", b"m", 3), in_group("n", b"n", 5)],
+        vec![in_group("n", b"n-after", 4)],
+    );
+    let kinds: Vec<_> = report
+        .symbol_deltas
+        .iter()
+        .map(|delta| delta.kind)
+        .collect();
+    assert_eq!(kinds.len(), 2, "{kinds:?}");
+    assert!(
+        kinds.contains(&"resized") && kinds.contains(&"removed"),
+        "{kinds:?}"
+    );
+    assert_pairing(
+        "R1 resized and removed with one name",
+        &report,
+        &PairingRow {
+            label: "R1",
+            before: Vec::new(),
+            after: Vec::new(),
+            deltas: 2,
+            paired: false,
+        },
+    );
+}
+
+/// Check one comparison against the pairing its row expects, in JSON, CSV and
+/// text.
+fn assert_pairing(label: &str, report: &ArtifactComparisonReport, row: &PairingRow) {
+    let json = serde_json::to_value(report).unwrap();
+    assert_valid_schema(
+        "https://github.com/libraz/codehelion/blob/main/crates/codehelion-cli/schema/artifact-comparison-report-v3.schema.json",
+        ARTIFACT_COMPARISON_REPORT_JSON_SCHEMA,
+        &json,
+    );
+    let deltas = json["symbol_deltas"].as_array().unwrap();
+    assert_eq!(deltas.len(), row.deltas, "{label}");
+    for delta in deltas {
+        assert!(
+            delta.get("counterpart_fingerprint").is_some(),
+            "{label}: the key is always written: {delta}"
+        );
+    }
+    let of_kind = |kind: &str| {
+        deltas
+            .iter()
+            .filter(|delta| delta["kind"] == kind)
+            .collect::<Vec<_>>()
+    };
+    if row.paired {
+        let (removed, added) = (of_kind("removed"), of_kind("added"));
+        assert_eq!((removed.len(), added.len()), (1, 1), "{label}");
+        assert_eq!(
+            removed[0]["counterpart_fingerprint"], added[0]["fingerprint"],
+            "{label}"
+        );
+        assert_eq!(
+            added[0]["counterpart_fingerprint"], removed[0]["fingerprint"],
+            "{label}"
+        );
+    } else {
+        for delta in deltas {
+            assert!(
+                delta["counterpart_fingerprint"].is_null(),
+                "{label}: {delta}"
+            );
+        }
+    }
+
+    // The CSV column carries the same value on the same entry.
+    let records: Vec<_> = compare_csv_records(report)
+        .into_iter()
+        .filter(|record| record[compare_column::RECORD_TYPE] == "symbol-delta")
+        .collect();
+    assert_eq!(records.len(), deltas.len(), "{label}");
+    for delta in deltas {
+        let record = records
+            .iter()
+            .find(|record| {
+                record[compare_column::FINGERPRINT] == delta["fingerprint"].as_str().unwrap()
+                    && record[compare_column::CHANGE_KIND] == delta["kind"].as_str().unwrap()
+            })
+            .unwrap_or_else(|| unreachable!("{label}: no CSV record for {delta}"));
+        assert_eq!(
+            record[compare_column::COUNTERPART_FINGERPRINT],
+            delta["counterpart_fingerprint"].as_str().unwrap_or(""),
+            "{label}"
+        );
+    }
+
+    // The text writes a pair as one `replaced` line and every other named
+    // entry as one line of its own.
+    let text = rendered_compare_text(report);
+    let listed = text
+        .lines()
+        .filter(|line| {
+            ["added", "removed", "resized", "modified", "replaced"]
+                .iter()
+                .any(|kind| line.starts_with(&format!("  {kind} ")))
+        })
+        .count();
+    let named = deltas
+        .iter()
+        .filter(|delta| !delta["name"].is_null())
+        .count();
+    assert_eq!(listed, named - usize::from(row.paired), "{label}\n{text}");
+    let replaced = text
+        .lines()
+        .filter(|line| line.starts_with("  replaced "))
+        .count();
+    assert_eq!(replaced, usize::from(row.paired), "{label}\n{text}");
+    if row.paired {
+        let (removed, added) = (of_kind("removed")[0], of_kind("added")[0]);
+        let net = removed["size_delta_bytes"].as_i64().unwrap()
+            + added["size_delta_bytes"].as_i64().unwrap();
+        let line = format!(
+            "  replaced n {} -> {} {net:+} bytes",
+            removed["fingerprint"].as_str().unwrap(),
+            added["fingerprint"].as_str().unwrap()
+        );
+        assert!(text.lines().any(|found| found == line), "{label}\n{text}");
+        assert!(!text.contains("  removed n "), "{label}\n{text}");
+        assert!(!text.contains("  added n "), "{label}\n{text}");
+    }
+    if named < deltas.len() {
+        let unnamed = deltas.len() - named;
+        assert!(
+            text.contains(&format!(
+                "note: {unnamed} of {} listed symbol changes have no name",
+                deltas.len()
+            )),
+            "{label}\n{text}"
+        );
+    }
+}
+
+/// The text orders every line, `replaced` ones included, by the size change it
+/// states, and breaks a tie by fingerprint.
+#[test]
+fn replaced_line_sorts_by_net_delta() {
+    let report = pairing_comparison(
+        &[
+            (Some("p"), "p-old", 100),
+            (Some("q"), "q-old", 7),
+            (Some("w"), "w-old", 9),
+            (Some("y_removed"), "y", 30),
+            (Some("z_removed"), "z", 50),
+        ],
+        &[
+            (Some("p"), "p-new", 98),
+            (Some("q"), "q-new", 80),
+            (Some("w"), "w-new", 9),
+            (Some("x_added"), "x", 50),
+        ],
+    );
+    let text = rendered_compare_text(&report);
+    let delta = |kind: &str, name: &str| {
+        report
+            .symbol_deltas
+            .iter()
+            .find(|delta| delta.kind == kind && delta.name.as_deref() == Some(name))
+            .unwrap()
+    };
+    let replaced = |name: &str, net: &str| {
+        let (removed, added) = (delta("removed", name), delta("added", name));
+        format!(
+            "  replaced {name} {} -> {} {net} bytes\n",
+            removed.fingerprint, added.fingerprint
+        )
+    };
+    let position = |line: &str| {
+        text.find(line)
+            .unwrap_or_else(|| unreachable!("missing {line:?} in\n{text}"))
+    };
+
+    let (x_line, z_line) = (
+        format!(
+            "  added x_added {} +50 bytes\n",
+            delta("added", "x_added").fingerprint
+        ),
+        format!(
+            "  removed z_removed {} -50 bytes\n",
+            delta("removed", "z_removed").fingerprint
+        ),
+    );
+    let (first, second) =
+        if delta("added", "x_added").fingerprint < delta("removed", "z_removed").fingerprint {
+            (x_line, z_line)
+        } else {
+            (z_line, x_line)
+        };
+    let y_line = format!(
+        "  removed y_removed {} -30 bytes\n",
+        delta("removed", "y_removed").fingerprint
+    );
+    let order = [
+        position(&replaced("q", "+73")),
+        position(&first),
+        position(&second),
+        position(&y_line),
+        position(&replaced("p", "-2")),
+        position(&replaced("w", "+0")),
+    ];
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+}
+
+/// The coarse summaries come first: ownership, then stems, then the symbol
+/// list, then the duplicate groups under a heading of their own.
+#[test]
+fn compare_text_orders_summaries_before_symbol_changes() {
+    let report = pairing_comparison(
+        &[
+            (Some("probe<f::$_0>"), "probe-0", 10),
+            (Some("probe<f::$_1>"), "probe-1", 10),
+        ],
+        &[(Some("probe<f::$_0>"), "probe-0", 10)],
+    );
+    assert!(!report.stem_deltas.is_empty());
+    assert!(!report.duplicate_group_deltas.is_empty());
+    let text = rendered_compare_text(&report);
+    let position = |heading: &str| {
+        text.find(heading)
+            .unwrap_or_else(|| unreachable!("missing {heading:?} in\n{text}"))
+    };
+
+    let order = [
+        position("data segment bytes:"),
+        position("ownership delta:"),
+        position("stem delta:"),
+        position("symbol changes:"),
+        position("duplicate group changes:"),
+        position("assumption:"),
+    ];
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+    assert!(
+        text.contains("duplicate group changes:\n  exact "),
+        "{text}"
+    );
+    assert!(
+        !text.lines().any(|line| line.starts_with("  duplicate ")),
+        "{text}"
+    );
+    let none = pairing_comparison(&[(Some("a"), "a", 4)], &[(Some("a"), "a", 4)]);
+    assert!(!rendered_compare_text(&none).contains("duplicate group changes:"));
 }

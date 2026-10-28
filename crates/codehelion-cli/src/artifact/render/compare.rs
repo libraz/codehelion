@@ -2,11 +2,16 @@
 
 use codehelion_artifact::ownership::Ownership;
 
-use super::{render_fact_lines, render_omitted, write_fact_columns};
+use std::collections::HashMap;
+
+use super::{
+    counted, display_name, noun, render_fact_lines, render_omitted, signed_counted,
+    write_fact_columns,
+};
 use crate::artifact::model::{
     ArtifactComparisonReport, AssumptionScope, COMPARE_CSV_HEADER, COMPARISON_FACTS,
-    OwnershipDeltaReport, StemDelta, compare_column, comparison_assumptions, ownership_label,
-    pairs_both_artifacts,
+    OwnershipDeltaReport, StemDelta, SymbolDelta, compare_column, comparison_assumptions,
+    ownership_label, pairs_both_artifacts, symbol_change,
 };
 use crate::artifact::{Result, Write, csv, optional_f64};
 
@@ -33,13 +38,7 @@ pub(in crate::artifact) fn render_compare_csv(
         write_compare_csv_row(out, &row)?;
     }
     for delta in &report.symbol_deltas {
-        let mut row = compare_csv_row(report, "symbol-delta");
-        delta.kind.clone_into(&mut row[compare_column::CHANGE_KIND]);
-        row[compare_column::NAME] = csv(delta.name.as_deref().unwrap_or(""));
-        row[compare_column::FINGERPRINT].clone_from(&delta.fingerprint);
-        row[compare_column::SYMBOL_SIZE_DELTA_BYTES] = delta.size_delta_bytes.to_string();
-        row[compare_column::OWNER] = csv(&delta.owner);
-        ownership_label(delta.ownership).clone_into(&mut row[compare_column::OWNERSHIP]);
+        let row = symbol_delta_row(report, delta);
         write_compare_csv_row(out, &row)?;
     }
     for owner in &report.ownership_deltas.owners {
@@ -117,6 +116,21 @@ pub(in crate::artifact) fn render_compare_csv(
     Ok(())
 }
 
+/// The CSV record for one changed symbol.
+fn symbol_delta_row(report: &ArtifactComparisonReport, delta: &SymbolDelta) -> Vec<String> {
+    let mut row = compare_csv_row(report, "symbol-delta");
+    delta.kind.clone_into(&mut row[compare_column::CHANGE_KIND]);
+    row[compare_column::NAME] = csv(delta.name.as_deref().unwrap_or(""));
+    row[compare_column::FINGERPRINT].clone_from(&delta.fingerprint);
+    row[compare_column::SYMBOL_SIZE_DELTA_BYTES] = delta.size_delta_bytes.to_string();
+    row[compare_column::OWNER] = csv(&delta.owner);
+    ownership_label(delta.ownership).clone_into(&mut row[compare_column::OWNERSHIP]);
+    if let Some(counterpart) = &delta.counterpart {
+        row[compare_column::COUNTERPART_FINGERPRINT].clone_from(counterpart);
+    }
+    row
+}
+
 fn compare_csv_row(report: &ArtifactComparisonReport, record_type: &str) -> Vec<String> {
     let mut row = vec![String::new(); COMPARE_CSV_HEADER.len()];
     record_type.clone_into(&mut row[compare_column::RECORD_TYPE]);
@@ -161,16 +175,17 @@ fn write_compare_csv_row(out: &mut impl Write, row: &[String]) -> Result<()> {
 #[allow(clippy::too_many_lines)] // The comparison order is its public text contract.
 pub(in crate::artifact) fn render_compare_text(
     report: &ArtifactComparisonReport,
+    verbose: bool,
     out: &mut impl Write,
 ) -> Result<()> {
     render_fact_lines(COMPARISON_FACTS, report, out)?;
     if let Some(containment) = &report.containment {
         writeln!(
             out,
-            "untrusted containment: input {} bytes, worker timeout {}s, worker memory {} bytes",
-            containment.max_input_bytes,
+            "untrusted containment: input {}, worker timeout {}s, worker memory {}",
+            counted(containment.max_input_bytes, "byte", "bytes"),
             containment.worker_timeout_seconds,
-            containment.worker_memory_limit_bytes,
+            counted(containment.worker_memory_limit_bytes, "byte", "bytes"),
         )?;
     }
     // Every statement comes from one description of this comparison, and the
@@ -195,12 +210,16 @@ pub(in crate::artifact) fn render_compare_text(
     if let Some(calibration) = &report.calibration {
         writeln!(
             out,
-            "calibration: scan {} group {} — estimated {} bytes, verified {} bytes, absolute error {} bytes, relative error {}",
+            "calibration: scan {} group {} — estimated {}, verified {}, absolute error {}, relative error {}",
             calibration.source_run,
             calibration.clone_group_fingerprint,
-            calibration.estimated_refactor_savings_bytes.0,
-            calibration.verified_savings_bytes.0,
-            calibration.absolute_error_bytes,
+            counted(
+                calibration.estimated_refactor_savings_bytes.0,
+                "byte",
+                "bytes"
+            ),
+            counted(calibration.verified_savings_bytes.0, "byte", "bytes"),
+            counted(calibration.absolute_error_bytes, "byte", "bytes"),
             calibration
                 .relative_error
                 .map_or_else(|| "unavailable".to_owned(), |value| format!("{value:.4}")),
@@ -260,19 +279,25 @@ pub(in crate::artifact) fn render_compare_text(
             signed_bytes(delta.delta_bytes, "smaller", "larger")
         )?;
     }
+    render_ownership_deltas(&report.ownership_deltas, out)?;
+    render_stem_deltas(&report.stem_deltas, out)?;
     if !report.symbol_deltas.is_empty() {
         writeln!(out, "symbol changes:")?;
     }
-    render_symbol_deltas(&report.symbol_deltas, out)?;
+    render_symbol_deltas(&report.symbol_deltas, verbose, out)?;
+    if !report.duplicate_group_deltas.is_empty() {
+        writeln!(out, "duplicate group changes:")?;
+    }
     for delta in &report.duplicate_group_deltas {
         writeln!(
             out,
-            "  duplicate {} {} {:+} bytes, {:+} members",
-            delta.kind, delta.fingerprint, delta.duplicated_bytes_delta, delta.members_delta,
+            "  {} {} {}, {}",
+            delta.kind,
+            delta.fingerprint,
+            signed_counted(delta.duplicated_bytes_delta, "byte", "bytes"),
+            signed_counted(delta.members_delta, "member", "members"),
         )?;
     }
-    render_ownership_deltas(&report.ownership_deltas, out)?;
-    render_stem_deltas(&report.stem_deltas, out)?;
     for assumption in assumptions
         .iter()
         .filter(|assumption| assumption.scope != AssumptionScope::BuildVariant)
@@ -282,37 +307,115 @@ pub(in crate::artifact) fn render_compare_text(
     Ok(())
 }
 
+/// One rendered line of the symbol changes list, with its sort keys.
+struct DeltaLine<'a> {
+    magnitude: u128,
+    fingerprint: &'a str,
+    text: String,
+}
+
 /// Changed symbols, one line each while a name identifies them.
+///
+/// A removed and an added symbol that name each other as counterparts are one
+/// `replaced` line carrying the net change; the report keeps both entries.
 ///
 /// A stripped artifact leaves every changed symbol nameless, and one line per
 /// content fingerprint then says nothing a reader can act on: the before and
 /// after of one symbol carry different fingerprints, so no two of those lines
 /// can be paired. They become one line stating how many there are and how to
 /// get names into the next comparison. The report keeps every entry.
-fn render_symbol_deltas(deltas: &[super::model::SymbolDelta], out: &mut impl Write) -> Result<()> {
+fn render_symbol_deltas(deltas: &[SymbolDelta], verbose: bool, out: &mut impl Write) -> Result<()> {
+    let added_by_name: HashMap<&str, &SymbolDelta> = deltas
+        .iter()
+        .filter(|delta| delta.kind == symbol_change::ADDED && delta.counterpart.is_some())
+        .filter_map(|delta| Some((delta.name.as_deref()?, delta)))
+        .collect();
+    let mut lines = Vec::new();
     let mut nameless = 0_usize;
     for delta in deltas {
+        let size = delta.size_delta_bytes;
         match delta.name.as_deref() {
-            Some(name) => writeln!(
-                out,
-                "  {} {} {} {:+} bytes",
-                delta.kind, name, delta.fingerprint, delta.size_delta_bytes
-            )?,
+            Some(name) => {
+                // The added half of a replacement is shown on the removed
+                // half's line.
+                if delta.kind == symbol_change::ADDED && delta.counterpart.is_some() {
+                    continue;
+                }
+                let shown = display_name(Some(name), verbose);
+                let partner = if delta.kind == symbol_change::REMOVED && delta.counterpart.is_some()
+                {
+                    added_by_name.get(name).copied()
+                } else {
+                    None
+                };
+                if let Some(added) = partner {
+                    let net = size + added.size_delta_bytes;
+                    lines.push(DeltaLine {
+                        magnitude: net.unsigned_abs(),
+                        fingerprint: &added.fingerprint,
+                        text: format!(
+                            "  replaced {shown} {} -> {} {}",
+                            delta.fingerprint,
+                            added.fingerprint,
+                            signed_counted(net, "byte", "bytes")
+                        ),
+                    });
+                } else {
+                    lines.push(DeltaLine {
+                        magnitude: size.unsigned_abs(),
+                        fingerprint: &delta.fingerprint,
+                        text: format!(
+                            "  {} {shown} {} {}",
+                            delta.kind,
+                            delta.fingerprint,
+                            signed_counted(size, "byte", "bytes")
+                        ),
+                    });
+                }
+            }
             // A change found on both sides is identified by the one
             // fingerprint they share, so it stays actionable unnamed.
-            None if pairs_both_artifacts(delta.kind) => writeln!(
-                out,
-                "  {} {} {:+} bytes",
-                delta.kind, delta.fingerprint, delta.size_delta_bytes
-            )?,
+            None if pairs_both_artifacts(delta.kind) => lines.push(DeltaLine {
+                magnitude: size.unsigned_abs(),
+                fingerprint: &delta.fingerprint,
+                text: format!(
+                    "  {} {} {}",
+                    delta.kind,
+                    delta.fingerprint,
+                    signed_counted(size, "byte", "bytes")
+                ),
+            }),
             None => nameless += 1,
         }
     }
+    lines.sort_by(|left, right| {
+        right
+            .magnitude
+            .cmp(&left.magnitude)
+            .then_with(|| left.fingerprint.cmp(right.fingerprint))
+    });
+    for line in &lines {
+        writeln!(out, "{}", line.text)?;
+    }
     if nameless > 0 {
+        let total = deltas.len();
+        let (subject, possessive) = if nameless == 1 {
+            (
+                format!(
+                    "1 of {total} listed symbol {}",
+                    noun(total, "change", "changes")
+                ),
+                "has no name; its",
+            )
+        } else {
+            (
+                format!("{nameless} of {total} listed symbol changes"),
+                "have no name; their",
+            )
+        };
         writeln!(
             out,
-            "  note: {nameless} of {} listed symbol changes have no name; their before and after cannot be paired — compare artifacts that keep their symbol names (an unstripped symbol table or the WASM name section)",
-            deltas.len()
+            "  note: {subject} {possessive} before and after cannot be paired — compare artifacts that keep their symbol names (an unstripped symbol table or the WASM name section)"
         )?;
     }
     Ok(())
@@ -329,9 +432,9 @@ fn render_ownership_deltas(deltas: &OwnershipDeltaReport, out: &mut impl Write) 
         .iter()
         .map(|class| {
             format!(
-                "{} {:+} bytes",
+                "{} {}",
                 ownership_label(class.ownership),
-                class.delta_bytes
+                signed_counted(class.delta_bytes, "byte", "bytes")
             )
         })
         .collect();
@@ -345,17 +448,17 @@ fn render_ownership_deltas(deltas: &OwnershipDeltaReport, out: &mut impl Write) 
     for owner in owners.iter().take(LISTED_OWNERS) {
         writeln!(
             out,
-            "  {} ({}): {:+} bytes",
+            "  {} ({}): {}",
             owner.key,
             ownership_label(owner.ownership),
-            owner.delta_bytes
+            signed_counted(owner.delta_bytes, "byte", "bytes")
         )?;
     }
-    render_omitted(owners.len(), LISTED_OWNERS, "owners", "  ", out)?;
+    render_omitted(owners.len(), LISTED_OWNERS, "owner", "owners", "  ", out)?;
     writeln!(
         out,
-        "  outside symbols: {:+} bytes",
-        deltas.outside_symbols_delta_bytes
+        "  outside symbols: {}",
+        signed_counted(deltas.outside_symbols_delta_bytes, "byte", "bytes")
     )?;
     Ok(())
 }
@@ -370,15 +473,15 @@ fn render_stem_deltas(deltas: &[StemDelta], out: &mut impl Write) -> Result<()> 
     for delta in deltas.iter().take(LISTED_OWNERS) {
         writeln!(
             out,
-            "  {} ({}): {} -> {} bodies, {:+} bytes",
+            "  {} ({}): {} -> {}, {}",
             delta.stem,
             ownership_label(delta.ownership),
             delta.before_bodies,
-            delta.after_bodies,
-            delta.delta_bytes
+            counted(delta.after_bodies, "body", "bodies"),
+            signed_counted(delta.delta_bytes, "byte", "bytes")
         )?;
     }
-    render_omitted(deltas.len(), LISTED_OWNERS, "stems", "  ", out)
+    render_omitted(deltas.len(), LISTED_OWNERS, "stem", "stems", "  ", out)
 }
 
 /// One byte difference written so its sign cannot be read backwards: the
@@ -391,5 +494,5 @@ fn signed_bytes(delta: i128, decreased: &str, increased: &str) -> String {
         -1 => decreased,
         _ => "no change",
     };
-    format!("{delta:+} bytes ({direction})")
+    format!("{} ({direction})", signed_counted(delta, "byte", "bytes"))
 }

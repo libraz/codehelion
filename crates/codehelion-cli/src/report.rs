@@ -134,7 +134,7 @@ pub use ranking::{
 
 pub(crate) use ranking::append_stored_identity_stage;
 
-mod render;
+pub(crate) mod render;
 
 pub(crate) fn render_partition_artifact_guidance(
     reports: &[Report],

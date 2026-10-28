@@ -81,7 +81,11 @@ pub(super) fn member_unit(member: &Member) -> String {
 
 /// The singular or plural of a noun whose plural is not its singular and an
 /// `s`.
-pub(super) const fn noun_form_of<'a>(
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "the artifact renderers share this helper"
+)]
+pub(crate) const fn noun_form_of<'a>(
     count: u64,
     singular: &'a str,
     plural_form: &'a str,

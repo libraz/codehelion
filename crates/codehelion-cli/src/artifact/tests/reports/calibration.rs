@@ -183,6 +183,7 @@ fn calibration_request(
         format: ArtifactFormat::Text,
         output: None,
         force: false,
+        verbose: false,
         max_bytes: DEFAULT_ARTIFACT_MAX_BYTES,
         timeout_seconds: DEFAULT_ARTIFACT_TIMEOUT_SECONDS,
         max_memory_bytes: None,

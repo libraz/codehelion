@@ -142,7 +142,7 @@ fn exact_generic_instantiation_key_maps_the_definition_origin() {
     assert!(
         String::from_utf8(text)
             .unwrap()
-            .contains("1 instantiations across 2 translation units")
+            .contains("1 instantiation across 2 translation units")
     );
     assert_eq!(
         correlation.generic_origins[0].specializations[0].observed_symbol_bytes,

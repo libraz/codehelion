@@ -21,13 +21,13 @@ use codehelion_artifact::ownership::{OwnDeclaration, Ownership};
 pub(super) use columns::{ARTIFACT_CSV_HEADER, COMPARE_CSV_HEADER, column, compare_column};
 #[cfg(test)]
 pub(super) use columns::{EVERY_RECORD, RECORD_COLUMNS};
+#[cfg(test)]
+pub(super) use comparison::SYMBOL_IDENTITY_CHANGED;
 pub(super) use comparison::{
     ArtifactComparisonReport, BuildVariantEvidence, CalibrationReport, ComparisonArtifact,
     ComparisonBuildVariant, SymbolDelta, code_section_bytes, data_segment_bytes,
-    pairs_both_artifacts,
+    pairs_both_artifacts, symbol_change,
 };
-#[cfg(test)]
-pub(super) use comparison::{SYMBOL_IDENTITY_CHANGED, symbol_change};
 pub(super) use compression::CompressedSizeReport;
 pub(super) use facts::{ARTIFACT_FACTS, COMPARISON_FACTS, ReportFact};
 pub(super) use ownership::{

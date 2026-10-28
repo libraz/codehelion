@@ -650,3 +650,36 @@ fn an_owner_delta_record_is_written_for_every_changed_owner() {
         );
     }
 }
+
+/// Dead-code, retained-size and exact duplicate-member records carry the full
+/// name of their symbol; a nameless symbol and a data member leave it empty.
+#[test]
+fn csv_names_dead_code_retained_and_duplicate_members() {
+    let report = listed_symbols_report("copy_a");
+    let fingerprint = |offset| listed_symbol_at(&report, offset).fingerprint.clone();
+    let (root, helper) = (fingerprint(0), fingerprint(30));
+    let (first_copy, second_copy) = (fingerprint(10), fingerprint(20));
+    let name_of = |record_type: &str, symbol: &str| {
+        let records = artifact_csv_records_of(&report, record_type);
+        let record = records
+            .iter()
+            .find(|record| record[column::FINGERPRINT] == symbol)
+            .unwrap_or_else(|| unreachable!("no {record_type} record for {symbol}"));
+        record[column::NAME].clone()
+    };
+
+    assert_eq!(name_of("dead-code", &first_copy), "copy_a");
+    assert_eq!(name_of("dead-code", &second_copy), "");
+    assert_eq!(name_of("retained-size", &root), "root");
+    assert_eq!(name_of("retained-size", &helper), "");
+    assert_eq!(name_of("duplicate-member", &first_copy), "copy_a");
+    assert_eq!(name_of("duplicate-member", &second_copy), "");
+
+    let members = artifact_csv_records_of(&report, "duplicate-member");
+    let data: Vec<_> = members
+        .iter()
+        .filter(|record| record[column::KIND] == "data")
+        .collect();
+    assert_eq!(data.len(), 2, "{members:?}");
+    assert!(data.iter().all(|record| record[column::NAME].is_empty()));
+}

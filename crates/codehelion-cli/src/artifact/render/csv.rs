@@ -3,8 +3,8 @@
 use codehelion_artifact::ownership::Ownership;
 
 use super::{
-    artifact_import_kind_label, attribution_basis_field, attribution_column, optional_bytes,
-    stated_bytes, summary_column, write_fact_columns,
+    artifact_import_kind_label, attribution_basis_field, attribution_column, joined_names,
+    optional_bytes, stated_bytes, summary_column, symbol_names, write_fact_columns,
 };
 use crate::artifact::correlation::AttributionBasis;
 use crate::artifact::model::{
@@ -17,6 +17,9 @@ use crate::artifact::{Context, Result, Write, csv};
 pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Write) -> Result<()> {
     writeln!(out, "{}", ARTIFACT_CSV_HEADER.join(","))?;
     let correlation = report.correlation.as_ref();
+    let names = symbol_names(report);
+    // The full names behind a fingerprint, or empty when none is named.
+    let name_of = |fingerprint: &str| csv(&joined_names(&names, fingerprint));
     let mut summary = artifact_csv_row("summary", report);
     write_fact_columns(ARTIFACT_FACTS, report, ARTIFACT_CSV_HEADER, &mut summary)?;
     // Every size category the classification states, written to the column
@@ -170,6 +173,10 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
                 let mut row = artifact_csv_row("duplicate-member", report);
                 kind.clone_into(&mut row[column::KIND]);
                 row[column::FINGERPRINT].clone_from(&member.symbol);
+                // A data member is a segment, which has no name.
+                if kind != "data" {
+                    row[column::NAME] = name_of(&member.symbol);
+                }
                 row[column::OFFSET] = member.offset.to_string();
                 row[column::SIZE] = member.size.to_string();
                 write_artifact_csv_row(out, &row)?;
@@ -185,6 +192,7 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
         for symbol in &dead_code.symbols {
             let mut row = artifact_csv_row("dead-code", report);
             row[column::FINGERPRINT].clone_from(symbol);
+            row[column::NAME] = name_of(symbol);
             status.clone_into(&mut row[column::DEAD_CODE_STATUS]);
             write_artifact_csv_row(out, &row)?;
         }
@@ -193,6 +201,7 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
         for item in retained {
             let mut row = artifact_csv_row("retained-size", report);
             row[column::FINGERPRINT].clone_from(&item.symbol);
+            row[column::NAME] = name_of(&item.symbol);
             row[column::RETAINED_BYTES] = item.retained_bytes.to_string();
             write_artifact_csv_row(out, &row)?;
         }

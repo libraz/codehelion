@@ -96,7 +96,7 @@ fn source_map_outcomes_reach_every_rendering() {
 
     let text = rendered_text(&report, false);
     assert!(
-        text.contains("module.wasm.map: resolved to /tmp/module.wasm.map (1 sources)"),
+        text.contains("module.wasm.map: resolved to /tmp/module.wasm.map (1 source)"),
         "{text}"
     );
     assert!(

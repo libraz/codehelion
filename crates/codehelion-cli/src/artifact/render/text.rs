@@ -1,11 +1,15 @@
 //! Human-readable rendering of one artifact report.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
+
 use codehelion_artifact::metrics::ReportedSize;
 use codehelion_artifact::ownership::Ownership;
 
 use super::{
-    artifact_import_kind_label, attribution_basis_label, optional_bytes,
-    refactor_savings_assumption_text, render_fact_lines, render_omitted, stated_bytes,
+    artifact_import_kind_label, attribution_basis_label, counted, display_name, listed_names, noun,
+    optional_bytes, refactor_savings_assumption_text, render_fact_lines, render_omitted,
+    stated_bytes, symbol_names,
 };
 use crate::artifact::model::{
     ARTIFACT_FACTS, ArtifactReport, AssumptionScope, DuplicateGroupReport, NameStemReport,
@@ -32,11 +36,11 @@ pub(in crate::artifact) fn render_text(
     if let Some(containment) = &report.containment {
         writeln!(
             out,
-            "untrusted containment: input {} bytes, worker timeout {}s, worker memory {} bytes, \
+            "untrusted containment: input {}, worker timeout {}s, worker memory {}, \
              debug-derived structures {}",
-            containment.max_input_bytes,
+            counted(containment.max_input_bytes, "byte", "bytes"),
             containment.worker_timeout_seconds,
-            containment.worker_memory_limit_bytes,
+            counted(containment.worker_memory_limit_bytes, "byte", "bytes"),
             containment.max_debug_derived_items,
         )?;
     }
@@ -61,10 +65,10 @@ pub(in crate::artifact) fn render_text(
         for section in &report.section_details {
             writeln!(
                 out,
-                "  {}: offset {}, {} bytes{}",
+                "  {}: offset {}, {}{}",
                 section.name.as_deref().unwrap_or("<unnamed>"),
                 section.offset,
-                section.size,
+                counted(section.size, "byte", "bytes"),
                 if section.executable {
                     " (executable)"
                 } else {
@@ -123,9 +127,9 @@ pub(in crate::artifact) fn render_text(
                     ..
                 } => writeln!(
                     out,
-                    "  {}: resolved to {local_path} ({} sources)",
+                    "  {}: resolved to {local_path} ({})",
                     map.uri,
-                    sources.len()
+                    counted(sources.len(), "source", "sources")
                 )?,
                 SourceMapResolutionStatus::Unavailable { reason } => {
                     writeln!(out, "  {}: unavailable ({reason})", map.uri)?;
@@ -136,17 +140,29 @@ pub(in crate::artifact) fn render_text(
     if let Some(correlation) = &report.correlation {
         writeln!(
             out,
-            "source correlation: scan {}: {} mappings, {}/{} mapped symbols ({:.1}%), {} / {} mapped symbol bytes ({:.1}%), {} unmapped symbols ({} bytes)",
+            "source correlation: scan {}: {}, {}/{} ({:.1}%), {} / {} ({:.1}%), {} ({})",
             correlation.source_run,
-            correlation.mappings,
+            counted(correlation.mappings, "mapping", "mappings"),
             correlation.mapped_symbols,
-            correlation.artifact_symbols,
+            counted(
+                correlation.artifact_symbols,
+                "mapped symbol",
+                "mapped symbols"
+            ),
             correlation.mapping_coverage * 100.0,
             correlation.mapped_symbol_bytes,
-            report.symbols.iter().map(|symbol| symbol.size).sum::<u64>(),
+            counted(
+                report.symbols.iter().map(|symbol| symbol.size).sum::<u64>(),
+                "mapped symbol byte",
+                "mapped symbol bytes"
+            ),
             correlation.mapped_symbol_bytes_ratio * 100.0,
-            correlation.unmapped_symbols,
-            correlation.unmapped_symbol_bytes,
+            counted(
+                correlation.unmapped_symbols,
+                "unmapped symbol",
+                "unmapped symbols"
+            ),
+            counted(correlation.unmapped_symbol_bytes, "byte", "bytes"),
         )?;
         if !correlation.unmapped_symbol_reasons.is_empty() {
             writeln!(out, "unmapped symbol reasons:")?;
@@ -173,15 +189,22 @@ pub(in crate::artifact) fn render_text(
             for attribution in &correlation.clone_group_attributions {
                 writeln!(
                     out,
-                    "  {} ({}): {} / {} noncanonical members attributed, observed duplicated bytes: {}, line-proportional duplicated bytes: {} (estimated), in {} symbol(s) totalling {} observed bytes",
+                    "  {} ({}): {} / {} attributed, observed duplicated bytes: {}, line-proportional duplicated bytes: {} (estimated), in {} totalling {}",
                     attribution.clone_group_fingerprint,
                     attribution.source_build_variant_fingerprint,
                     attribution.attributed_noncanonical_members,
-                    attribution.members.saturating_sub(1),
+                    counted(
+                        attribution.members.saturating_sub(1),
+                        "noncanonical member",
+                        "noncanonical members"
+                    ),
                     optional_bytes(attribution.duplicated_bytes),
                     optional_bytes(attribution.estimated_duplicated_bytes),
-                    attribution.containing_symbols,
-                    optional_bytes(attribution.containing_symbol_bytes),
+                    counted(attribution.containing_symbols, "symbol", "symbols"),
+                    attribution.containing_symbol_bytes.map_or_else(
+                        || "unavailable observed bytes".to_owned(),
+                        |bytes| counted(bytes, "observed byte", "observed bytes")
+                    ),
                 )?;
             }
             writeln!(
@@ -197,14 +220,18 @@ pub(in crate::artifact) fn render_text(
             for unit in &correlation.multiply_emitted_units {
                 writeln!(
                     out,
-                    "  {} ({}){}: {} bodies, {} observed bytes, mapping {:?}",
+                    "  {} ({}){}: {}, {}, mapping {:?}",
                     unit.source_fingerprint,
                     unit.source_build_variant_fingerprint,
                     unit.name
                         .as_deref()
                         .map_or_else(String::new, |name| format!(" {name}")),
-                    unit.emitted_bodies,
-                    unit.observed_symbol_bytes,
+                    counted(unit.emitted_bodies, "body", "bodies"),
+                    counted(
+                        unit.observed_symbol_bytes,
+                        "observed byte",
+                        "observed bytes"
+                    ),
                     unit.mapping_confidence,
                 )?;
             }
@@ -218,13 +245,22 @@ pub(in crate::artifact) fn render_text(
             for estimate in &correlation.estimated_refactor_savings {
                 writeln!(
                     out,
-                    "  {} (source {}, artifact {}): {} estimated bytes from {} {} duplicate bytes; mapping {:?}, clone {:.3}, model {:?}, savings {:?}",
+                    "  {} (source {}, artifact {}): {} from {} {} {}; mapping {:?}, clone {:.3}, model {:?}, savings {:?}",
                     estimate.clone_group_fingerprint,
                     estimate.source_build_variant_fingerprint,
                     estimate.artifact_build_variant_fingerprint,
-                    estimate.estimated_refactor_savings_bytes.0,
+                    counted(
+                        estimate.estimated_refactor_savings_bytes.0,
+                        "estimated byte",
+                        "estimated bytes"
+                    ),
                     estimate.duplicated_bytes,
                     attribution_basis_label(estimate.duplicated_bytes_basis),
+                    noun(
+                        estimate.duplicated_bytes,
+                        "duplicate byte",
+                        "duplicate bytes"
+                    ),
                     estimate.mapping_confidence,
                     estimate.clone_confidence,
                     estimate.model_confidence,
@@ -245,16 +281,28 @@ pub(in crate::artifact) fn render_text(
             for origin in &correlation.generic_origins {
                 writeln!(
                     out,
-                    "  {} [{}] ({}): {} observed bytes, {} normalized duplicate bytes, {} retained-size sum, {} symbols, {} instantiations across {} translation units",
+                    "  {} [{}] ({}): {}, {}, {} retained-size sum, {}, {} across {}",
                     origin.definition,
                     origin.origin_fingerprint,
                     origin.origin_build_variant_fingerprint,
-                    origin.observed_symbol_bytes,
-                    origin.normalized_instruction_duplicated_bytes,
+                    counted(
+                        origin.observed_symbol_bytes,
+                        "observed byte",
+                        "observed bytes"
+                    ),
+                    counted(
+                        origin.normalized_instruction_duplicated_bytes,
+                        "normalized duplicate byte",
+                        "normalized duplicate bytes"
+                    ),
                     optional_bytes(origin.retained_size_sum),
-                    origin.artifact_symbols,
-                    origin.instantiations,
-                    origin.translation_units,
+                    counted(origin.artifact_symbols, "symbol", "symbols"),
+                    counted(origin.instantiations, "instantiation", "instantiations"),
+                    counted(
+                        origin.translation_units,
+                        "translation unit",
+                        "translation units"
+                    ),
                 )?;
                 for specialization in &origin.specializations {
                     let arguments = if specialization.type_arguments.is_empty() {
@@ -264,11 +312,19 @@ pub(in crate::artifact) fn render_text(
                     };
                     writeln!(
                         out,
-                        "    {}: {} observed bytes, {} symbols across {} translation units ({arguments})",
+                        "    {}: {}, {} across {} ({arguments})",
                         specialization.instantiation_key,
-                        specialization.observed_symbol_bytes,
-                        specialization.artifact_symbols,
-                        specialization.translation_units,
+                        counted(
+                            specialization.observed_symbol_bytes,
+                            "observed byte",
+                            "observed bytes"
+                        ),
+                        counted(specialization.artifact_symbols, "symbol", "symbols"),
+                        counted(
+                            specialization.translation_units,
+                            "translation unit",
+                            "translation units"
+                        ),
                     )?;
                 }
             }
@@ -278,11 +334,15 @@ pub(in crate::artifact) fn render_text(
             for origin in &correlation.macro_origins {
                 writeln!(
                     out,
-                    "  {} ({}): {} observed bytes across {} symbols ({})",
+                    "  {} ({}): {} across {} ({})",
                     origin.origin_fingerprint,
                     origin.origin_build_variant_fingerprint,
-                    origin.observed_symbol_bytes,
-                    origin.artifact_symbols,
+                    counted(
+                        origin.observed_symbol_bytes,
+                        "observed byte",
+                        "observed bytes"
+                    ),
+                    counted(origin.artifact_symbols, "symbol", "symbols"),
                     origin.definition_paths.join(", "),
                 )?;
             }
@@ -291,19 +351,34 @@ pub(in crate::artifact) fn render_text(
     if report.capabilities.normalized_duplicates {
         writeln!(
             out,
-            "duplicates: exact {} groups, {} observed duplicate bytes; normalized {} groups, {} observed duplicate bytes",
-            report.duplicates.exact_groups,
-            report.duplicates.exact_duplicated_bytes,
-            report.duplicates.normalized_groups,
-            report.duplicates.normalized_duplicated_bytes,
+            "duplicates: exact {}, {}; normalized {}, {}",
+            counted(report.duplicates.exact_groups, "group", "groups"),
+            counted(
+                report.duplicates.exact_duplicated_bytes,
+                "observed duplicate byte",
+                "observed duplicate bytes"
+            ),
+            counted(report.duplicates.normalized_groups, "group", "groups"),
+            counted(
+                report.duplicates.normalized_duplicated_bytes,
+                "observed duplicate byte",
+                "observed duplicate bytes"
+            ),
         )?;
     } else {
         writeln!(
             out,
-            "duplicates: exact {} groups, {} observed duplicate bytes; normalized unavailable (no normalizer for this architecture)",
-            report.duplicates.exact_groups, report.duplicates.exact_duplicated_bytes,
+            "duplicates: exact {}, {}; normalized unavailable (no normalizer for this architecture)",
+            counted(report.duplicates.exact_groups, "group", "groups"),
+            counted(
+                report.duplicates.exact_duplicated_bytes,
+                "observed duplicate byte",
+                "observed duplicate bytes"
+            ),
         )?;
     }
+    let names = symbol_names(report);
+    let label = |fingerprint: &str| listed_names(&names, fingerprint, verbose);
     writeln!(out, "size categories:")?;
     // One line per category the classification states, in its order, each
     // naming the evidence behind it. A reader who came for size reads this
@@ -339,11 +414,11 @@ pub(in crate::artifact) fn render_text(
         };
         writeln!(
             out,
-            "dead code {verdict}: {} symbols",
-            dead_code.symbols.len()
+            "dead code {verdict}: {}",
+            counted(dead_code.symbols.len(), "symbol", "symbols")
         )?;
         for symbol in &dead_code.symbols {
-            writeln!(out, "  {symbol}")?;
+            writeln!(out, "  {} {symbol}", label(symbol))?;
         }
         render_assumptions(&assumptions, AssumptionScope::DeadCode, out)?;
     } else {
@@ -356,7 +431,13 @@ pub(in crate::artifact) fn render_text(
     if let Some(retained) = &report.retained_sizes {
         writeln!(out, "retained sizes (overlapping dominator regions):")?;
         for item in retained {
-            writeln!(out, "  {} {} bytes", item.symbol, item.retained_bytes)?;
+            writeln!(
+                out,
+                "  {} {}: {}",
+                label(&item.symbol),
+                item.symbol,
+                counted(item.retained_bytes, "byte", "bytes")
+            )?;
         }
     } else {
         // The conditions come from the walk that withdrew the values, so this
@@ -375,16 +456,28 @@ pub(in crate::artifact) fn render_text(
     render_ownership(&report.ownership, &assumptions, out)?;
     render_name_stems(&report.name_stems, verbose, &assumptions, out)?;
     match &report.toolchain_holdings {
-        Some(holdings) => render_holdings(holdings, &assumptions, out)?,
+        Some(holdings) => render_holdings(holdings, verbose, &assumptions, out)?,
         // The retained-size line above already named the conditions.
         None => writeln!(
             out,
             "toolchain holders: unavailable (same conditions as retained sizes)"
         )?,
     }
-    render_groups("exact", &report.duplicate_groups.exact, out)?;
-    render_groups("normalized", &report.duplicate_groups.normalized, out)?;
-    render_groups("data", &report.duplicate_groups.data, out)?;
+    render_groups(
+        "exact",
+        &report.duplicate_groups.exact,
+        Some(&names),
+        verbose,
+        out,
+    )?;
+    render_groups(
+        "normalized",
+        &report.duplicate_groups.normalized,
+        Some(&names),
+        verbose,
+        out,
+    )?;
+    render_groups("data", &report.duplicate_groups.data, None, verbose, out)?;
     if verbose {
         for import in &report.import_details {
             writeln!(
@@ -479,10 +572,10 @@ fn render_ownership(
         .iter()
         .map(|class| {
             format!(
-                "{} {} bytes ({} symbols)",
+                "{} {} ({})",
                 ownership_label(class.ownership),
-                class.size_bytes,
-                class.symbols
+                counted(class.size_bytes, "byte", "bytes"),
+                counted(class.symbols, "symbol", "symbols")
             )
         })
         .collect();
@@ -502,18 +595,18 @@ fn render_ownership(
             .map_or_else(String::new, |family| format!(", {}", family_label(family)));
         writeln!(
             out,
-            "  {} ({}{family}): {} bytes, {} symbols",
+            "  {} ({}{family}): {}, {}",
             owner.key,
             ownership_label(owner.ownership),
-            owner.size_bytes,
-            owner.symbols
+            counted(owner.size_bytes, "byte", "bytes"),
+            counted(owner.symbols, "symbol", "symbols")
         )?;
     }
-    render_omitted(owners.len(), LISTED_OWNERS, "owners", "  ", out)?;
+    render_omitted(owners.len(), LISTED_OWNERS, "owner", "owners", "  ", out)?;
     writeln!(
         out,
-        "  outside symbols: {} bytes",
-        ownership.outside_symbols_bytes
+        "  outside symbols: {}",
+        counted(ownership.outside_symbols_bytes, "byte", "bytes")
     )?;
     render_assumptions(assumptions, AssumptionScope::Ownership, out)
 }
@@ -536,24 +629,26 @@ fn render_name_stems(
     for stem in stems.iter().take(LISTED_OWNERS) {
         writeln!(
             out,
-            "  {} ({}): {} bodies in {} instances, {} bytes",
+            "  {} ({}): {} in {}, {}",
             stem.stem,
             ownership_label(stem.ownership),
-            stem.bodies,
-            stem.instances,
-            stem.size_bytes
+            counted(stem.bodies, "body", "bodies"),
+            counted(stem.instances, "instance", "instances"),
+            counted(stem.size_bytes, "byte", "bytes")
         )?;
         if verbose {
             for instance in &stem.instance_details {
                 writeln!(
                     out,
-                    "    {}: {} bodies, {} bytes",
-                    instance.instance, instance.bodies, instance.size_bytes
+                    "    {}: {}, {}",
+                    instance.instance,
+                    counted(instance.bodies, "body", "bodies"),
+                    counted(instance.size_bytes, "byte", "bytes")
                 )?;
             }
         }
     }
-    render_omitted(stems.len(), LISTED_OWNERS, "stems", "  ", out)?;
+    render_omitted(stems.len(), LISTED_OWNERS, "stem", "stems", "  ", out)?;
     writeln!(
         out,
         "  note: a stem groups bodies whose names differ only in template arguments, closure numbering or parameter lists; one source template written once can account for all of them, so the bytes are what the artifact spends, not what consolidating source would remove"
@@ -564,6 +659,7 @@ fn render_name_stems(
 /// The largest holders with their heads, then the shared toolchain code.
 fn render_holdings(
     holdings: &ToolchainHoldingsReport,
+    verbose: bool,
     assumptions: &[ReportAssumption<'_>],
     out: &mut impl Write,
 ) -> Result<()> {
@@ -574,40 +670,48 @@ fn render_holdings(
     for holding in holdings.holdings.iter().take(LISTED_HOLDERS) {
         writeln!(
             out,
-            "  {} ({}) {}: {} bytes in {} symbols, {} bytes in {} symbols absorbed",
-            holding.holder_name.as_deref().unwrap_or("<unnamed>"),
+            "  {} ({}) {}: {} in {}, {} in {} absorbed",
+            display_name(holding.holder_name.as_deref(), verbose),
             ownership_label(holding.holder_ownership),
             holding.holder,
-            holding.held_bytes,
-            holding.held_symbols,
-            holding.absorbed_bytes,
-            holding.absorbed_symbols,
+            counted(holding.held_bytes, "byte", "bytes"),
+            counted(holding.held_symbols, "symbol", "symbols"),
+            counted(holding.absorbed_bytes, "byte", "bytes"),
+            counted(holding.absorbed_symbols, "symbol", "symbols"),
         )?;
         for head in holding.heads.iter().take(LISTED_HEADS) {
             writeln!(
                 out,
-                "    head {} {}: {} bytes",
-                head.name.as_deref().unwrap_or("<unnamed>"),
+                "    head {} {}: {}",
+                display_name(head.name.as_deref(), verbose),
                 head.symbol,
-                head.held_bytes
+                counted(head.held_bytes, "byte", "bytes")
             )?;
         }
-        render_omitted(holding.heads.len(), LISTED_HEADS, "heads", "    ", out)?;
+        render_omitted(
+            holding.heads.len(),
+            LISTED_HEADS,
+            "head",
+            "heads",
+            "    ",
+            out,
+        )?;
     }
     render_omitted(
         holdings.holdings.len(),
         LISTED_HOLDERS,
+        "holder",
         "holders",
         "  ",
         out,
     )?;
     writeln!(
         out,
-        "  shared: {} bytes in {} symbols, {} bytes in {} symbols absorbed",
-        holdings.shared_bytes,
-        holdings.shared_symbols,
-        holdings.shared_absorbed_bytes,
-        holdings.shared_absorbed_symbols,
+        "  shared: {} in {}, {} in {} absorbed",
+        counted(holdings.shared_bytes, "byte", "bytes"),
+        counted(holdings.shared_symbols, "symbol", "symbols"),
+        counted(holdings.shared_absorbed_bytes, "byte", "bytes"),
+        counted(holdings.shared_absorbed_symbols, "symbol", "symbols"),
     )?;
     for shared in holdings.shared.iter().take(LISTED_SHARED) {
         let callers: Vec<String> = shared
@@ -617,7 +721,10 @@ fn render_holdings(
             .map(|caller| {
                 format!(
                     "{} ({})",
-                    caller.name.as_deref().unwrap_or(caller.symbol.as_str()),
+                    caller.name.as_deref().map_or_else(
+                        || Cow::Borrowed(caller.symbol.as_str()),
+                        |name| display_name(Some(name), verbose)
+                    ),
                     ownership_label(caller.ownership)
                 )
             })
@@ -630,10 +737,10 @@ fn render_holdings(
         };
         writeln!(
             out,
-            "    {} {}: {} bytes{}, called by {}{more}",
-            shared.name.as_deref().unwrap_or("<unnamed>"),
+            "    {} {}: {}{}, called by {}{more}",
+            display_name(shared.name.as_deref(), verbose),
             shared.symbol,
-            shared.held_bytes,
+            counted(shared.held_bytes, "byte", "bytes"),
             if shared.root { " (root)" } else { "" },
             if callers.is_empty() {
                 "nothing".to_owned()
@@ -645,6 +752,7 @@ fn render_holdings(
     render_omitted(
         holdings.shared.len(),
         LISTED_SHARED,
+        "shared entry",
         "shared entries",
         "    ",
         out,
@@ -652,7 +760,15 @@ fn render_holdings(
     render_assumptions(assumptions, AssumptionScope::ToolchainHoldings, out)
 }
 
-fn render_groups(kind: &str, groups: &[DuplicateGroupReport], out: &mut impl Write) -> Result<()> {
+/// One duplicate group list. Symbol groups name their members from `names`;
+/// data groups pass `None`, because a data member is a segment, not a symbol.
+fn render_groups(
+    kind: &str,
+    groups: &[DuplicateGroupReport],
+    names: Option<&HashMap<&str, Vec<&str>>>,
+    verbose: bool,
+    out: &mut impl Write,
+) -> Result<()> {
     if groups.is_empty() {
         return Ok(());
     }
@@ -660,17 +776,29 @@ fn render_groups(kind: &str, groups: &[DuplicateGroupReport], out: &mut impl Wri
     for group in groups {
         writeln!(
             out,
-            "  {}: {} observed duplicate bytes, {} members",
+            "  {}: {}, {}",
             group.fingerprint,
-            group.duplicated_bytes,
-            group.members.len()
+            counted(
+                group.duplicated_bytes,
+                "observed duplicate byte",
+                "observed duplicate bytes"
+            ),
+            counted(group.members.len(), "member", "members")
         )?;
         for member in &group.members {
-            writeln!(
-                out,
-                "    {} offset {} size {}",
-                member.symbol, member.offset, member.size
-            )?;
+            let name = names.map(|names| listed_names(names, &member.symbol, verbose));
+            match name {
+                Some(name) => writeln!(
+                    out,
+                    "    {name} {} offset {} size {}",
+                    member.symbol, member.offset, member.size
+                )?,
+                None => writeln!(
+                    out,
+                    "    {} offset {} size {}",
+                    member.symbol, member.offset, member.size
+                )?,
+            }
         }
     }
     Ok(())

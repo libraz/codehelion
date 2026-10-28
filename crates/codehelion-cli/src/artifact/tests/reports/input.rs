@@ -120,6 +120,7 @@ fn comparison_applies_the_input_format_assertion_to_both_artifacts() {
         format: ArtifactFormat::Text,
         output: None,
         force: false,
+        verbose: false,
         max_bytes: DEFAULT_ARTIFACT_MAX_BYTES,
         timeout_seconds: DEFAULT_ARTIFACT_TIMEOUT_SECONDS,
         max_memory_bytes: None,

@@ -109,7 +109,8 @@ pub struct ArtifactArgs {
     #[arg(long, requires = "output")]
     pub force: bool,
     /// Add every extracted import, relocation, data segment, and symbol to a
-    /// text report; JSON and CSV already carry them regardless of this flag.
+    /// text report, and print symbol names in full; JSON and CSV already carry
+    /// them regardless of this flag.
     #[arg(short, long)]
     pub verbose: bool,
     /// Reject an artifact larger than this many bytes before parsing it.
@@ -216,7 +217,8 @@ pub struct ArtifactReportArgs {
     #[arg(long, requires = "output")]
     pub force: bool,
     /// Add every extracted import, relocation, data segment, and symbol to a
-    /// text report; JSON and CSV already carry them regardless of this flag.
+    /// text report, and print symbol names in full; JSON and CSV already carry
+    /// them regardless of this flag.
     #[arg(short, long)]
     pub verbose: bool,
 }
@@ -289,6 +291,10 @@ pub struct ArtifactCompareArgs {
     /// Replace an existing output file.
     #[arg(long, requires = "output")]
     pub force: bool,
+    /// Print symbol names in full in a text report; JSON and CSV always carry
+    /// them in full.
+    #[arg(short, long)]
+    pub verbose: bool,
     /// Reject either artifact larger than this many bytes before parsing it.
     #[arg(long, default_value_t = DEFAULT_ARTIFACT_MAX_BYTES)]
     pub max_bytes: u64,

@@ -259,7 +259,7 @@ fn a_toolchain_chain_is_held_by_its_caller() {
     assert!(text.contains("  outside symbols: 5 bytes"), "{text}");
     assert!(
         text.contains(&format!(
-            "  parse (own) {parse}: 10 bytes in 3 symbols, 4 bytes in 1 symbols absorbed"
+            "  parse (own) {parse}: 10 bytes in 3 symbols, 4 bytes in 1 symbol absorbed"
         )),
         "{text}"
     );

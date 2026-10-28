@@ -115,7 +115,7 @@ fn every_comparison_fact_reaches_text_csv_and_json() {
         Some(variant("after.json")),
     );
     let mut text = Vec::new();
-    render_compare_text(&report, &mut text).unwrap();
+    render_compare_text(&report, false, &mut text).unwrap();
     let mut csv = Vec::new();
     render_compare_csv(&report, &mut csv).unwrap();
     assert_facts_reach_every_rendering(

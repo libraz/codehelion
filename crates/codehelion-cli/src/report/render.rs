@@ -213,7 +213,11 @@ impl Report {
     }
 }
 
-mod format;
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "the artifact renderers share its plural helper"
+)]
+pub(crate) mod format;
 mod groups;
 mod notes;
 mod seams;

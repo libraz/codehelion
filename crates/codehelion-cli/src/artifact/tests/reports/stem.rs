@@ -214,11 +214,11 @@ fn text_lists_the_stems_between_ownership_and_the_toolchain_holders() {
 
     assert!(
         text.contains(&format!(
-            "{HEADING}\n  probe<> (other): 3 bodies in 3 instances, 948 bytes\n  std::__2::deque<> (toolchain): 2 bodies in 1 instances, 180 bytes\n{NOTE}\n  assumption: {ASSUMPTION}\n"
+            "{HEADING}\n  probe<> (other): 3 bodies in 3 instances, 948 bytes\n  std::__2::deque<> (toolchain): 2 bodies in 1 instance, 180 bytes\n{NOTE}\n  assumption: {ASSUMPTION}\n"
         )),
         "{text}"
     );
-    assert!(!text.contains("probe<f::$_0>: 1 bodies"), "{text}");
+    assert!(!text.contains("probe<f::$_0>: 1 body"), "{text}");
     let ownership = text.find("ownership:").unwrap();
     let stems = text.find(HEADING).unwrap();
     let holders = text.find("toolchain holders").unwrap();
@@ -232,7 +232,7 @@ fn verbose_text_lists_each_instance_under_its_stem() {
 
     assert!(
         text.contains(
-            "  probe<> (other): 3 bodies in 3 instances, 948 bytes\n    probe<f::$_0>: 1 bodies, 340 bytes\n    probe<f::$_1>: 1 bodies, 304 bytes\n    probe<f::$_2>: 1 bodies, 304 bytes\n  std::__2::deque<> (toolchain): 2 bodies in 1 instances, 180 bytes\n    std::__2::deque<int>: 2 bodies, 180 bytes\n"
+            "  probe<> (other): 3 bodies in 3 instances, 948 bytes\n    probe<f::$_0>: 1 body, 340 bytes\n    probe<f::$_1>: 1 body, 304 bytes\n    probe<f::$_2>: 1 body, 304 bytes\n  std::__2::deque<> (toolchain): 2 bodies in 1 instance, 180 bytes\n    std::__2::deque<int>: 2 bodies, 180 bytes\n"
         ),
         "{text}"
     );
@@ -456,7 +456,7 @@ fn comparison_text_lists_stem_deltas_after_the_ownership_delta() {
     let text = rendered_compare_text(&report);
 
     assert!(
-        text.contains("stem delta:\n  probe<> (other): 3 -> 1 bodies, -608 bytes\n"),
+        text.contains("stem delta:\n  probe<> (other): 3 -> 1 body, -608 bytes\n"),
         "{text}"
     );
     let owners = text.find("ownership delta:").unwrap();
@@ -525,4 +525,154 @@ fn a_comparison_without_stem_changes_writes_an_empty_array() {
         serde_json::to_value(&report).unwrap()["stem_deltas"],
         serde_json::json!([])
     );
+}
+
+/// Fail when a plural noun follows a count of exactly one, whichever words
+/// sit between the number and the noun.
+fn assert_counts_agree(text: &str) {
+    const PLURALS: [&str; 17] = [
+        "bytes",
+        "symbols",
+        "bodies",
+        "members",
+        "groups",
+        "instances",
+        "instantiations",
+        "mappings",
+        "sources",
+        "copies",
+        "owners",
+        "stems",
+        "heads",
+        "holders",
+        "entries",
+        "changes",
+        "units",
+    ];
+    const SINGULARS: [&str; 17] = [
+        "byte",
+        "symbol",
+        "body",
+        "member",
+        "group",
+        "instance",
+        "instantiation",
+        "mapping",
+        "source",
+        "copy",
+        "owner",
+        "stem",
+        "head",
+        "holder",
+        "entry",
+        "change",
+        "unit",
+    ];
+    for line in text.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        for (index, word) in words.iter().enumerate() {
+            let number = word
+                .trim_start_matches('(')
+                .rsplit(['/', '+', '-'])
+                .next()
+                .unwrap_or_default();
+            if number != "1" {
+                continue;
+            }
+            // The noun agreeing with the count is the first plural or
+            // singular noun within the next few words.
+            for noun in words.iter().skip(index + 1).take(3) {
+                let noun = noun.trim_end_matches([',', ')', ';', ':', '.']);
+                assert!(
+                    !PLURALS.contains(&noun),
+                    "a count of one is followed by {noun:?}: {line}"
+                );
+                if SINGULARS.contains(&noun) || noun.starts_with(|c: char| c.is_ascii_digit()) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Every noun follows the count right before it: one of a thing is singular
+/// and any other number, zero included, is plural.
+#[test]
+fn counts_agree_with_their_numbers() {
+    // Analysis: one dead symbol, one body per instance, one stem past the cap.
+    let mut artifact = artifact_of(&[("root", 4), ("dead", 6)]);
+    artifact.capabilities.call_graph = true;
+    artifact.symbols[0].exported = true;
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None);
+    let text = rendered_text(&report, false);
+    assert!(text.contains("dead code definitive: 1 symbol\n"), "{text}");
+    assert_counts_agree(&text);
+
+    let verbose = rendered_text(&report_of(&six_symbols()), true);
+    assert!(
+        verbose.contains("probe<f::$_0>: 1 body, 340 bytes"),
+        "{verbose}"
+    );
+    assert!(
+        verbose.contains("deque<int>: 2 bodies, 180 bytes"),
+        "{verbose}"
+    );
+    assert_counts_agree(&verbose);
+
+    let names: Vec<String> = (0..11)
+        .flat_map(|index| {
+            [
+                format!("s{index:02}<int>()"),
+                format!("s{index:02}<long>()"),
+            ]
+        })
+        .collect();
+    let entries: Vec<(&str, u64)> = names.iter().map(|name| (name.as_str(), 10)).collect();
+    let capped = rendered_text(&report_of(&entries), false);
+    assert!(capped.contains("\n  1 more stem\n"), "{capped}");
+    assert_counts_agree(&capped);
+
+    // Comparison: bodies, bytes and members.
+    let stems = rendered_compare_text(&comparison_of(&probes_before(), &PROBES[..1]));
+    assert!(
+        stems.contains("probe<> (other): 3 -> 1 body, -608 bytes\n"),
+        "{stems}"
+    );
+    assert_counts_agree(&stems);
+
+    let grown = rendered_compare_text(&comparison_of(&[("solo()", 4)], &[("solo()", 5)]));
+    assert!(grown.contains(" +1 byte\n"), "{grown}");
+    assert_counts_agree(&grown);
+
+    let groups = rendered_compare_text(&symbol_comparison(
+        symbols_of(&[("a", 10), ("b", 10)]),
+        symbols_of(&[("a", 10), ("b", 10), ("c", 10)]),
+    ));
+    assert!(groups.contains(", +1 member\n"), "{groups}");
+    assert_counts_agree(&groups);
+
+    // The note for symbols without names counts its own entries.
+    let note = " has no name; its before and after cannot be paired — compare artifacts that keep their symbol names (an unstripped symbol table or the WASM name section)\n";
+    let alone = rendered_compare_text(&symbol_comparison(
+        vec![comparison_symbol(None, b"nameless", 4)],
+        Vec::new(),
+    ));
+    assert!(
+        alone.contains(&format!("  note: 1 of 1 listed symbol change{note}")),
+        "{alone}"
+    );
+    let among = rendered_compare_text(&symbol_comparison(
+        vec![
+            comparison_symbol(None, b"nameless", 4),
+            comparison_symbol(Some("one"), b"one", 6),
+            comparison_symbol(Some("two"), b"two", 8),
+        ],
+        Vec::new(),
+    ));
+    assert!(
+        among.contains(&format!("  note: 1 of 3 listed symbol changes{note}")),
+        "{among}"
+    );
+    assert_counts_agree(&alone);
+    assert_counts_agree(&among);
 }

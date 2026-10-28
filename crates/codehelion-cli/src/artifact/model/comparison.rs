@@ -125,6 +125,11 @@ pub(in crate::artifact) struct SymbolDelta {
     /// Stem of the name, taken from the same side as the owner.
     #[serde(skip)]
     pub(in crate::artifact) stem: Option<codehelion_artifact::stem::NameStem>,
+    /// Fingerprint of the other half of a replacement: set on a removed and an
+    /// added symbol that share a name which belongs to exactly one symbol on
+    /// each side.
+    #[serde(rename = "counterpart_fingerprint")]
+    pub(in crate::artifact) counterpart: Option<String>,
 }
 
 /// What a comparison established about one symbol, as [`SymbolDelta::kind`]
@@ -201,7 +206,7 @@ impl SymbolContent {
 
 /// How a name whose content identity changed is classified, which is not as
 /// [`symbol_change::MODIFIED`].
-pub(in crate::artifact) const SYMBOL_IDENTITY_CHANGED: &str = "symbol identity is content-derived; a name whose identity changed is listed as one removed and one added symbol, and counted in modified_named_symbols";
+pub(in crate::artifact) const SYMBOL_IDENTITY_CHANGED: &str = "symbol identity is content-derived; a name whose identity changed is recorded as one removed and one added symbol, each naming the other in counterpart_fingerprint when the name belongs to exactly one symbol on each side, shown as one replaced line in text, and counted in modified_named_symbols";
 
 /// One equality-group change. `kind` identifies the independent equality
 /// relation so a normalized match is never presented as an exact-byte match.
@@ -516,6 +521,7 @@ pub(in crate::artifact) fn symbol_deltas(
                         owner,
                         ownership,
                         stem,
+                        counterpart: None,
                     });
                 }
                 (Some(earlier), None) => {
@@ -529,6 +535,7 @@ pub(in crate::artifact) fn symbol_deltas(
                         owner,
                         ownership,
                         stem,
+                        counterpart: None,
                     });
                 }
                 (None, Some(later)) => {
@@ -542,6 +549,7 @@ pub(in crate::artifact) fn symbol_deltas(
                         owner,
                         ownership,
                         stem,
+                        counterpart: None,
                     });
                 }
                 (None, None) => break,
@@ -555,7 +563,61 @@ pub(in crate::artifact) fn symbol_deltas(
             .cmp(&left.size_delta_bytes.unsigned_abs())
             .then_with(|| left.fingerprint.cmp(&right.fingerprint))
     });
+    pair_replacements(before, after, &mut result);
     result
+}
+
+/// How many symbols of each name an artifact carries.
+fn name_counts(artifact: &ArtifactIr) -> BTreeMap<&str, usize> {
+    let mut counts = BTreeMap::new();
+    for name in artifact
+        .symbols
+        .iter()
+        .filter_map(|symbol| symbol.name.as_deref())
+    {
+        *counts.entry(name).or_default() += 1;
+    }
+    counts
+}
+
+/// Link the removed and the added delta of a name that belongs to exactly one
+/// symbol on each side, so each carries the other's fingerprint.
+///
+/// Counting symbols rather than identities is what keeps two same-named,
+/// same-content symbols from reading as one and being paired by mistake.
+fn pair_replacements(before: &ArtifactIr, after: &ArtifactIr, deltas: &mut [SymbolDelta]) {
+    let (before_counts, after_counts) = (name_counts(before), name_counts(after));
+    let pairs: Vec<(usize, usize)> = {
+        let mut removed: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        let mut added: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (index, delta) in deltas.iter().enumerate() {
+            let Some(name) = delta.name.as_deref() else {
+                continue;
+            };
+            match delta.kind {
+                symbol_change::REMOVED => removed.entry(name).or_default().push(index),
+                symbol_change::ADDED => added.entry(name).or_default().push(index),
+                _ => {}
+            }
+        }
+        removed
+            .iter()
+            .filter_map(|(name, removed)| {
+                let added = added.get(name)?;
+                (removed.len() == 1
+                    && added.len() == 1
+                    && before_counts.get(name) == Some(&1)
+                    && after_counts.get(name) == Some(&1))
+                .then(|| (removed[0], added[0]))
+            })
+            .collect()
+    };
+    for (removed, added) in pairs {
+        let removed_fingerprint = deltas[removed].fingerprint.clone();
+        let added_fingerprint = deltas[added].fingerprint.clone();
+        deltas[removed].counterpart = Some(added_fingerprint);
+        deltas[added].counterpart = Some(removed_fingerprint);
+    }
 }
 
 /// Name and owner label for one symbol in its artifact's format context.

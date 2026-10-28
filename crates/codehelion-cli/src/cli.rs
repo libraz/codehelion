@@ -806,6 +806,14 @@ mod tests {
         for args in [
             vec!["codehelion", "artifact", "analyze", "fixture.wasm", "-v"],
             vec!["codehelion", "artifact", "report", "--analysis", "1", "-v"],
+            vec![
+                "codehelion",
+                "artifact",
+                "compare",
+                "a.wasm",
+                "b.wasm",
+                "-v",
+            ],
         ] {
             let parsed = Cli::try_parse_from(args).expect("a single -v parses");
             match parsed.command {
@@ -814,6 +822,9 @@ mod tests {
                 } => assert!(args.verbose),
                 Command::Artifact {
                     action: ArtifactAction::Report(args),
+                } => assert!(args.verbose),
+                Command::Artifact {
+                    action: ArtifactAction::Compare(args),
                 } => assert!(args.verbose),
                 other => unreachable!("unexpected command: {other:?}"),
             }
@@ -824,6 +835,14 @@ mod tests {
         for args in [
             vec!["codehelion", "artifact", "analyze", "fixture.wasm", "-vv"],
             vec!["codehelion", "artifact", "report", "--analysis", "1", "-vv"],
+            vec![
+                "codehelion",
+                "artifact",
+                "compare",
+                "a.wasm",
+                "b.wasm",
+                "-vv",
+            ],
         ] {
             let error = Cli::try_parse_from(args)
                 .expect_err("a repeated -v is rejected rather than silently accepted");

@@ -191,3 +191,27 @@ fn every_command_line_rejection_exits_with_the_usage_status() {
     assert!(stderr.contains("refusing to overwrite"), "{stderr}");
     assert!(!stderr.contains("no local database"), "{stderr}");
 }
+
+/// The three artifact commands that print a text report offer one `-v`, and say
+/// that it also prints symbol names in full.
+#[test]
+fn artifact_verbose_help_says_symbol_names_are_printed_in_full() {
+    let inventory = "Add every extracted import, relocation, data segment, and symbol to a text report, and print symbol names in full; JSON and CSV already carry them regardless of this flag";
+    let compare =
+        "Print symbol names in full in a text report; JSON and CSV always carry them in full";
+    for (subcommand, sentence) in [
+        ("analyze", inventory),
+        ("report", inventory),
+        ("compare", compare),
+    ] {
+        let output = cmd()
+            .args(["artifact", subcommand, "--help"])
+            .output()
+            .expect("artifact help");
+        assert!(output.status.success(), "{output:?}");
+        let help = String::from_utf8(output.stdout).expect("help output");
+        let flattened = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flattened.contains("-v, --verbose"), "{subcommand}: {help}");
+        assert!(flattened.contains(sentence), "{subcommand}: {help}");
+    }
+}

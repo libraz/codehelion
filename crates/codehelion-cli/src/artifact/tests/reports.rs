@@ -318,6 +318,55 @@ fn symbol_comparison(
     )
 }
 
+/// An analysis in which every list that identifies symbols by fingerprint has
+/// entries: a reachable root and helper, two unreachable byte-identical copies
+/// (dead code and one exact duplicate group), and two equal data segments.
+///
+/// `copy_name` names the first copy; the second copy and the helper have no
+/// name, so each list shows both a named and a nameless entry.
+fn listed_symbols_report(copy_name: &str) -> ArtifactReport {
+    let mut artifact = WasmBackend.parse(b"\0asm\x01\0\0\0").unwrap();
+    artifact.capabilities.call_graph = true;
+    artifact.capabilities.independent_data_segments = true;
+    let mut root = comparison_symbol(Some("root"), b"root", 3);
+    root.exported = true;
+    let mut helper = comparison_symbol(None, b"helper", 4);
+    helper.offset = 30;
+    let mut first_copy = comparison_symbol(Some(copy_name), b"copy-a", 2);
+    first_copy.offset = 10;
+    let mut second_copy = comparison_symbol(None, b"copy-b", 2);
+    second_copy.offset = 20;
+    artifact.calls.push(codehelion_artifact::ArtifactCall {
+        caller: root.fingerprint,
+        target: Some(helper.fingerprint),
+        unresolved: None,
+    });
+    artifact.symbols = vec![root, helper, first_copy, second_copy];
+    for offset in [64_u64, 96] {
+        artifact
+            .data_segments
+            .push(codehelion_artifact::ArtifactDataSegment {
+                fingerprint: codehelion_artifact::ArtifactFingerprint::from_content(
+                    "data",
+                    b"0123456789abcdef",
+                ),
+                section: Some(2),
+                offset,
+                bytes: b"0123456789abcdef".to_vec(),
+            });
+    }
+    ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None)
+}
+
+/// The report symbol at `offset` in [`listed_symbols_report`].
+fn listed_symbol_at(report: &ArtifactReport, offset: u64) -> &SymbolReport {
+    report
+        .symbols
+        .iter()
+        .find(|symbol| symbol.offset == offset)
+        .unwrap()
+}
+
 /// Every size category reaches text, CSV and JSON under the name the schema
 /// declares, carrying its own value.
 ///
@@ -483,7 +532,7 @@ fn rendered_text(report: &ArtifactReport, verbose: bool) -> String {
 /// The comparison text a renderer produced, as one string.
 fn rendered_compare_text(report: &ArtifactComparisonReport) -> String {
     let mut rendered = Vec::new();
-    render_compare_text(report, &mut rendered).unwrap();
+    render_compare_text(report, false, &mut rendered).unwrap();
     String::from_utf8(rendered).unwrap()
 }
 

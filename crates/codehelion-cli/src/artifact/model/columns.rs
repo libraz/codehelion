@@ -260,17 +260,18 @@ pub(in crate::artifact) const RECORD_COLUMNS: &[RecordColumns] = &[
         columns: &[
             column::KIND,
             column::FINGERPRINT,
+            column::NAME,
             column::OFFSET,
             column::SIZE,
         ],
     },
     RecordColumns {
         record_type: "dead-code",
-        columns: &[column::FINGERPRINT, column::DEAD_CODE_STATUS],
+        columns: &[column::FINGERPRINT, column::NAME, column::DEAD_CODE_STATUS],
     },
     RecordColumns {
         record_type: "retained-size",
-        columns: &[column::FINGERPRINT, column::RETAINED_BYTES],
+        columns: &[column::FINGERPRINT, column::NAME, column::RETAINED_BYTES],
     },
     RecordColumns {
         record_type: "owner",
@@ -621,6 +622,7 @@ pub(in crate::artifact) const COMPARE_CSV_HEADER: &[&str] = &[
     "stem_parameterized",
     "before_bodies",
     "after_bodies",
+    "counterpart_fingerprint",
 ];
 
 /// Column positions in [`COMPARE_CSV_HEADER`].
@@ -675,4 +677,5 @@ pub(in crate::artifact) mod compare_column {
     pub(in crate::artifact) const STEM_PARAMETERIZED: usize = 58;
     pub(in crate::artifact) const BEFORE_BODIES: usize = 59;
     pub(in crate::artifact) const AFTER_BODIES: usize = 60;
+    pub(in crate::artifact) const COUNTERPART_FINGERPRINT: usize = 61;
 }
