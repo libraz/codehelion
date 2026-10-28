@@ -431,6 +431,67 @@ fn render(template: &Path, directory: &Path) -> Result<String, FixtureError> {
     Ok(text.replace(DIRECTORY_PLACEHOLDER, escaped))
 }
 
+/// Append `value` as an unsigned LEB128 integer.
+fn push_leb128(out: &mut Vec<u8>, mut value: usize) {
+    loop {
+        let low = u8::try_from(value & 0x7f).unwrap_or(0);
+        value >>= 7;
+        if value == 0 {
+            out.push(low);
+            return;
+        }
+        out.push(low | 0x80);
+    }
+}
+
+/// Append one section: its id, its payload length as LEB128, then the payload.
+fn push_section(module: &mut Vec<u8>, id: u8, payload: &[u8]) {
+    module.push(id);
+    push_leb128(module, payload.len());
+    module.extend_from_slice(payload);
+}
+
+/// A WebAssembly module with one `() -> ()` function per entry of `functions`.
+///
+/// Each entry is a function name and the function body as the code section
+/// stores it after its size prefix: the local declarations and the expression
+/// ending in `0x0B`. The names are written to a `name` custom section, so the
+/// analysis records one named symbol per function. Every length is a real
+/// unsigned LEB128 integer, so names and bodies may be any size.
+#[must_use]
+pub fn wasm_module(functions: &[(&str, &[u8])]) -> Vec<u8> {
+    let count = functions.len();
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+    // One function type, `() -> ()`.
+    push_section(&mut module, 0x01, &[0x01, 0x60, 0x00, 0x00]);
+    let mut declarations = Vec::new();
+    push_leb128(&mut declarations, count);
+    declarations.extend(std::iter::repeat_n(0x00, count));
+    push_section(&mut module, 0x03, &declarations);
+    let mut code = Vec::new();
+    push_leb128(&mut code, count);
+    for (_, body) in functions {
+        push_leb128(&mut code, body.len());
+        code.extend_from_slice(body);
+    }
+    push_section(&mut module, 0x0a, &code);
+
+    // Subsection 1 of the name section maps function indices to names.
+    let mut entries = Vec::new();
+    push_leb128(&mut entries, count);
+    for (index, (name, _)) in functions.iter().enumerate() {
+        push_leb128(&mut entries, index);
+        push_leb128(&mut entries, name.len());
+        entries.extend_from_slice(name.as_bytes());
+    }
+    let mut payload = Vec::new();
+    push_leb128(&mut payload, "name".len());
+    payload.extend_from_slice(b"name");
+    push_section(&mut payload, 0x01, &entries);
+    push_section(&mut module, 0x00, &payload);
+    module
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -776,5 +837,56 @@ mod tests {
     fn a_fixture_that_is_not_there_is_an_error_rather_than_a_path() {
         let error = rust("no-such-fixture").unwrap_err();
         assert!(matches!(error, FixtureError::Missing(_)), "{error:?}");
+    }
+
+    /// Read one unsigned LEB128 integer, returning it and the bytes it took.
+    fn read_leb128(bytes: &[u8]) -> (usize, usize) {
+        let mut value = 0_usize;
+        for (index, byte) in bytes.iter().enumerate() {
+            value |= usize::from(byte & 0x7f) << (7 * index);
+            if byte & 0x80 == 0 {
+                return (value, index + 1);
+            }
+        }
+        panic!("unterminated LEB128");
+    }
+
+    /// Split a module into `(section id, payload)` pairs.
+    fn sections(module: &[u8]) -> Vec<(u8, &[u8])> {
+        let mut rest = &module[8..];
+        let mut found = Vec::new();
+        while let Some((&id, tail)) = rest.split_first() {
+            let (length, taken) = read_leb128(tail);
+            found.push((id, &tail[taken..taken + length]));
+            rest = &tail[taken + length..];
+        }
+        found
+    }
+
+    #[test]
+    fn a_wasm_module_lays_out_its_sections_with_real_lengths() {
+        let long = "n".repeat(300);
+        let body = vec![0x00; 200];
+        let module = wasm_module(&[("short", &[0x00, 0x0b]), (&long, &body)]);
+
+        assert_eq!(&module[..8], b"\0asm\x01\0\0\0");
+        let found = sections(&module);
+        let ids: Vec<u8> = found.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [0x01, 0x03, 0x0a, 0x00]);
+        assert_eq!(found[1].1, [0x02, 0x00, 0x00]);
+        // Count, then each body behind its own length: 2-byte for 200.
+        let code = found[2].1;
+        assert_eq!(code[..4], [0x02, 0x02, 0x00, 0x0b]);
+        assert_eq!(read_leb128(&code[4..]), (200, 2));
+        assert_eq!(code.len(), 4 + 2 + 200);
+        let names = found[3].1;
+        assert_eq!(&names[..5], b"\x04name");
+        let (subsection, rest) = (names[5], &names[6..]);
+        assert_eq!(subsection, 0x01);
+        let (length, taken) = read_leb128(rest);
+        assert_eq!(length, rest.len() - taken);
+        let entries = &rest[taken..];
+        assert_eq!(&entries[..5], &[0x02, 0x00, 0x05, b's', b'h']);
+        assert!(entries.ends_with(long.as_bytes()));
     }
 }
