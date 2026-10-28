@@ -377,3 +377,30 @@ fn text_reports_ownership_classes_and_toolchain_holders() {
     let retained = text.find("retained sizes").unwrap();
     assert!(retained < ownership && ownership < holders, "{text}");
 }
+
+/// The compressed sizes follow the data segment line and lead the section
+/// list, so the lines that were already there keep their relative order.
+#[test]
+fn text_places_compressed_sizes_between_data_segments_and_section_sizes() {
+    let mut artifact = ArtifactIr::empty(BinaryFormat::Elf, b"fixture");
+    artifact
+        .sections
+        .push(codehelion_artifact::ArtifactSection {
+            name: Some(".text".to_owned()),
+            offset: 16,
+            size: 32,
+            executable: true,
+        });
+    artifact.compressed_sizes = vec![codehelion_artifact::compression::CompressedSize {
+        algorithm: CompressionAlgorithm::Gzip,
+        parameters: "level 9".to_owned(),
+        encoder: "flate2 (miniz_oxide)".to_owned(),
+        bytes: 20,
+    }];
+    let report = ArtifactReport::from_ir(FilePath::new("fixture.so"), &artifact, None, None);
+    let text = rendered_text(&report, false);
+    let data = text.find("data segment bytes:").unwrap();
+    let compressed = text.find("compressed bytes (").unwrap();
+    let sections = text.find("section sizes:").unwrap();
+    assert!(data < compressed && compressed < sections, "{text}");
+}

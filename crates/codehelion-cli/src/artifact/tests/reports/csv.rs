@@ -106,6 +106,12 @@ fn report_of_every_record_kind() -> ArtifactReport {
         }
         .for_report(),
     );
+    report.compressed_sizes = vec![CompressedSizeReport {
+        algorithm: CompressionAlgorithm::Gzip,
+        parameters: "level 9".to_owned(),
+        encoder: "flate2 (miniz_oxide)".to_owned(),
+        bytes: 40,
+    }];
     report.archive_members = vec![ArchiveMemberReport {
         name: "member.o".to_owned(),
         fingerprint: "bb".repeat(16),

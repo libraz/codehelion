@@ -91,6 +91,10 @@ pub(in crate::artifact) const ARTIFACT_CSV_HEADER: &[&str] = &[
     "relocations",
     "source_mappings",
     "data_segments",
+    "compression_algorithm",
+    "compression_parameters",
+    "compression_encoder",
+    "compressed_bytes",
 ];
 
 /// The columns one kind of record in the artifact CSV carries.
@@ -154,6 +158,15 @@ pub(in crate::artifact) const RECORD_COLUMNS: &[RecordColumns] = &[
             column::RELOCATIONS,
             column::SOURCE_MAPPINGS,
             column::DATA_SEGMENTS,
+        ],
+    },
+    RecordColumns {
+        record_type: "compressed-size",
+        columns: &[
+            column::COMPRESSION_ALGORITHM,
+            column::COMPRESSION_PARAMETERS,
+            column::COMPRESSION_ENCODER,
+            column::COMPRESSED_BYTES,
         ],
     },
     RecordColumns {
@@ -510,6 +523,10 @@ pub(in crate::artifact) mod column {
     pub(in crate::artifact) const SOURCE_MAPPINGS: usize = 80;
     #[cfg(test)]
     pub(in crate::artifact) const DATA_SEGMENTS: usize = 81;
+    pub(in crate::artifact) const COMPRESSION_ALGORITHM: usize = 82;
+    pub(in crate::artifact) const COMPRESSION_PARAMETERS: usize = 83;
+    pub(in crate::artifact) const COMPRESSION_ENCODER: usize = 84;
+    pub(in crate::artifact) const COMPRESSED_BYTES: usize = 85;
 }
 
 /// Every comparison CSV column, in the order they are written, under the same
@@ -566,6 +583,12 @@ pub(in crate::artifact) const COMPARE_CSV_HEADER: &[&str] = &[
     "symbols_added",
     "symbols_removed",
     "modified_named_symbols",
+    "compression_algorithm",
+    "compression_parameters",
+    "compression_encoder",
+    "before_compressed_bytes",
+    "after_compressed_bytes",
+    "compressed_delta_bytes",
 ];
 
 /// Column positions in [`COMPARE_CSV_HEADER`].
@@ -610,4 +633,10 @@ pub(in crate::artifact) mod compare_column {
     pub(in crate::artifact) const OWNER: usize = 37;
     pub(in crate::artifact) const OWNERSHIP: usize = 38;
     pub(in crate::artifact) const OUTSIDE_SYMBOLS_DELTA_BYTES: usize = 39;
+    pub(in crate::artifact) const COMPRESSION_ALGORITHM: usize = 51;
+    pub(in crate::artifact) const COMPRESSION_PARAMETERS: usize = 52;
+    pub(in crate::artifact) const COMPRESSION_ENCODER: usize = 53;
+    pub(in crate::artifact) const BEFORE_COMPRESSED_BYTES: usize = 54;
+    pub(in crate::artifact) const AFTER_COMPRESSED_BYTES: usize = 55;
+    pub(in crate::artifact) const COMPRESSED_DELTA_BYTES: usize = 56;
 }

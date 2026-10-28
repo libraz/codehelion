@@ -48,6 +48,8 @@ fn macho_fixture() -> Vec<u8> {
 
 #[path = "cli/artifact.rs"]
 mod artifact;
+#[path = "cli/artifact_size.rs"]
+mod artifact_size;
 #[path = "cli/cache.rs"]
 mod cache;
 #[path = "cli/config.rs"]

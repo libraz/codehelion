@@ -22,6 +22,16 @@ pub(in crate::artifact) fn render_compare_csv(
         .outside_symbols_delta_bytes
         .to_string();
     write_compare_csv_row(out, &summary)?;
+    for delta in &report.compressed_deltas {
+        let mut row = compare_csv_row(report, "compressed-delta");
+        row[compare_column::COMPRESSION_ALGORITHM] = delta.algorithm.to_string();
+        row[compare_column::COMPRESSION_PARAMETERS] = csv(&delta.parameters);
+        row[compare_column::COMPRESSION_ENCODER] = csv(&delta.encoder);
+        row[compare_column::BEFORE_COMPRESSED_BYTES] = delta.before_bytes.to_string();
+        row[compare_column::AFTER_COMPRESSED_BYTES] = delta.after_bytes.to_string();
+        row[compare_column::COMPRESSED_DELTA_BYTES] = delta.delta_bytes.to_string();
+        write_compare_csv_row(out, &row)?;
+    }
     for delta in &report.symbol_deltas {
         let mut row = compare_csv_row(report, "symbol-delta");
         delta.kind.clone_into(&mut row[compare_column::CHANGE_KIND]);
@@ -227,6 +237,18 @@ pub(in crate::artifact) fn render_compare_text(
         report.after.data_segment_bytes,
         signed_bytes(report.data_segment_delta_bytes, "smaller", "larger")
     )?;
+    for delta in &report.compressed_deltas {
+        writeln!(
+            out,
+            "compressed bytes ({}, {}, {}): {} before, {} after, {}",
+            delta.algorithm,
+            delta.parameters,
+            delta.encoder,
+            delta.before_bytes,
+            delta.after_bytes,
+            signed_bytes(delta.delta_bytes, "smaller", "larger")
+        )?;
+    }
     if !report.symbol_deltas.is_empty() {
         writeln!(out, "symbol changes:")?;
     }

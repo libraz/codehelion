@@ -40,6 +40,14 @@ pub(in crate::artifact) fn render_csv(report: &ArtifactReport, out: &mut impl Wr
     summary[column::SAVINGS_CONFIDENCE] = format!("{:?}", report.sizes.savings_confidence);
     summary[column::ARTIFACT_SYMBOLS] = report.symbols.len().to_string();
     write_artifact_csv_row(out, &summary)?;
+    for size in &report.compressed_sizes {
+        let mut row = artifact_csv_row("compressed-size", report);
+        row[column::COMPRESSION_ALGORITHM] = size.algorithm.to_string();
+        row[column::COMPRESSION_PARAMETERS] = csv(&size.parameters);
+        row[column::COMPRESSION_ENCODER] = csv(&size.encoder);
+        row[column::COMPRESSED_BYTES] = size.bytes.to_string();
+        write_artifact_csv_row(out, &row)?;
+    }
     for symbol in &report.symbols {
         let mut row = artifact_csv_row("symbol", report);
         row[column::FINGERPRINT].clone_from(&symbol.fingerprint);

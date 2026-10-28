@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Subcommand, ValueEnum};
+use clap::{ArgAction, Subcommand, ValueEnum};
+use codehelion_artifact::compression::CompressionAlgorithm;
 use serde::{Deserialize, Serialize};
 
 /// Output format for compiled-artifact analysis.
@@ -33,6 +34,29 @@ pub enum ArtifactInputFormat {
     Archive,
     /// PE image or COFF relocatable object.
     PeCoff,
+}
+
+/// Compression algorithm whose output length is measured for a whole artifact.
+///
+/// A separate type from [`CompressionAlgorithm`] for the same reason as
+/// [`ArtifactInputFormat`]: the command line names the choice, the library
+/// type implements it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionChoice {
+    /// Gzip at level 9.
+    Gzip,
+    /// Brotli at quality 11.
+    Brotli,
+}
+
+impl From<CompressionChoice> for CompressionAlgorithm {
+    fn from(choice: CompressionChoice) -> Self {
+        match choice {
+            CompressionChoice::Gzip => Self::Gzip,
+            CompressionChoice::Brotli => Self::Brotli,
+        }
+    }
 }
 
 /// Default maximum number of artifact bytes read by one command invocation.
@@ -114,6 +138,9 @@ pub struct ArtifactArgs {
     /// runs on Linux only; elsewhere it is refused.
     #[arg(long)]
     pub untrusted: bool,
+    /// Also measure the compressed size of the whole artifact with this algorithm; repeat for several.
+    #[arg(long = "compressed", value_enum, action = ArgAction::Append)]
+    pub compressed: Vec<CompressionChoice>,
     /// JSON manifest you write describing the conditions this artifact was
     /// built under.
     ///
@@ -284,6 +311,9 @@ pub struct ArtifactCompareArgs {
     /// runs on Linux only; elsewhere it is refused.
     #[arg(long)]
     pub untrusted: bool,
+    /// Also measure the compressed size of the whole artifact with this algorithm; repeat for several.
+    #[arg(long = "compressed", value_enum, action = ArgAction::Append)]
+    pub compressed: Vec<CompressionChoice>,
     /// Source scan that produced the clone group being calibrated.
     ///
     /// Must be used with `--clone-group` and both build-variant manifests; a

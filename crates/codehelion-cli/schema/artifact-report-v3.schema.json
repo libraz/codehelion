@@ -38,6 +38,11 @@
       "type": "integer", "minimum": 0,
       "description": "Bytes read for this artifact, repeated from sizes.observed_bytes."
     },
+    "compressed_sizes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/compressed_size" },
+      "description": "Compressed length of the complete artifact per requested algorithm; empty unless --compressed was given."
+    },
     "code_section_bytes": { "type": "integer", "minimum": 0 },
     "data_segment_bytes": { "type": "integer", "minimum": 0 },
     "symbols": {
@@ -365,6 +370,16 @@
           "description": "True only when every call endpoint resolved and every symbol fingerprint is unique. Shared identities or a missing endpoint leave a candidate list and an assumption naming the reason."
         },
         "assumptions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "compressed_size": {
+      "type": "object",
+      "required": ["algorithm", "parameters", "encoder", "bytes"],
+      "properties": {
+        "algorithm": { "enum": ["gzip", "brotli"] },
+        "parameters": { "type": "string" },
+        "encoder": { "type": "string" },
+        "bytes": { "type": "integer", "minimum": 0 }
       }
     },
     "retained_size": {

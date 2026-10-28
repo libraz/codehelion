@@ -42,6 +42,19 @@ pub(in crate::artifact) fn render_text(
     writeln!(out, "observed bytes: {}", report.observed_bytes)?;
     writeln!(out, "code section bytes: {}", report.code_section_bytes)?;
     writeln!(out, "data segment bytes: {}", report.data_segment_bytes)?;
+    for size in &report.compressed_sizes {
+        writeln!(
+            out,
+            "compressed bytes ({}, {}, {}): {}",
+            size.algorithm, size.parameters, size.encoder, size.bytes
+        )?;
+    }
+    if !report.compressed_sizes.is_empty() {
+        writeln!(
+            out,
+            "  note: the compressed size covers the whole artifact; it is not divided among symbols, and an external compressor at the same level can differ by a fraction of a percent"
+        )?;
+    }
     if !report.section_details.is_empty() {
         writeln!(out, "section sizes:")?;
         for section in &report.section_details {

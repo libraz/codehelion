@@ -71,7 +71,7 @@ fn build_variant_fingerprint_normalizes_json_whitespace_and_member_order() {
 fn input_limit_is_checked_before_reading_or_parsing() {
     let file = tempfile::NamedTempFile::new().unwrap();
     fs::write(file.path(), b"more than eight bytes").unwrap();
-    let error = inspect(file.path(), 8, None, None, None, false).unwrap_err();
+    let error = inspect(file.path(), 8, None, None, None, false, &[], "compression").unwrap_err();
     assert!(error.to_string().contains("configured maximum of 8 bytes"));
 }
 
@@ -124,6 +124,7 @@ fn comparison_applies_the_input_format_assertion_to_both_artifacts() {
         timeout_seconds: DEFAULT_ARTIFACT_TIMEOUT_SECONDS,
         max_memory_bytes: None,
         untrusted: false,
+        compressed: Vec::new(),
         source_run: None,
         clone_group: None,
         db: None,

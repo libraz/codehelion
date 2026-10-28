@@ -8,6 +8,7 @@ use super::ArtifactContainment;
 use super::assumption::{
     CONTAINER_WIDE_OBSERVED_BYTES, VERIFIED_SAVINGS_NEEDS_CONTROL, qualify_sizes,
 };
+use super::compression::{CompressedDelta, compressed_deltas};
 use super::ownership::{DEFINING_PATH, NO_OWN_DECLARED, OwnershipDeltaReport, declared_ownership};
 use crate::artifact::{
     ARTIFACT_COMPARISON_REPORT_SCHEMA_VERSION, ArtifactIr, BTreeMap, BTreeSet, BinaryFormat,
@@ -30,6 +31,7 @@ pub(in crate::artifact) struct ArtifactComparisonReport {
     pub(in crate::artifact) code_section_delta_bytes: i128,
     /// Signed change in data segment bytes, the other half of that question.
     pub(in crate::artifact) data_segment_delta_bytes: i128,
+    pub(in crate::artifact) compressed_deltas: Vec<CompressedDelta>,
     pub(in crate::artifact) calibration: Option<CalibrationReport>,
     pub(in crate::artifact) symbol_changes: SymbolChanges,
     pub(in crate::artifact) symbol_deltas: Vec<SymbolDelta>,
@@ -319,6 +321,7 @@ impl ArtifactComparisonReport {
                 data_segment_bytes(after),
                 data_segment_bytes(before),
             ),
+            compressed_deltas: compressed_deltas(before, after),
             calibration: None,
             symbol_changes: SymbolChanges {
                 added,

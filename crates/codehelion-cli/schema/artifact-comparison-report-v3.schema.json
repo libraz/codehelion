@@ -27,6 +27,11 @@
       "type": "integer",
       "description": "Signed change in data segment bytes, the other half of that question."
     },
+    "compressed_deltas": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/compressed_delta" },
+      "description": "Compressed length of each whole artifact per requested algorithm; empty unless --compressed was given."
+    },
     "calibration": { "$ref": "#/$defs/calibration" },
     "symbol_changes": { "$ref": "#/$defs/symbol_changes" },
     "symbol_deltas": { "type": "array", "items": { "$ref": "#/$defs/symbol_delta" } },
@@ -204,6 +209,20 @@
       "properties": {
         "key": { "type": "string" },
         "ownership": { "$ref": "#/$defs/ownership_class" },
+        "delta_bytes": { "type": "integer" }
+      }
+    },
+    "compressed_delta": {
+      "type": "object",
+      "required": [
+        "algorithm", "parameters", "encoder", "before_bytes", "after_bytes", "delta_bytes"
+      ],
+      "properties": {
+        "algorithm": { "enum": ["gzip", "brotli"] },
+        "parameters": { "type": "string" },
+        "encoder": { "type": "string" },
+        "before_bytes": { "type": "integer", "minimum": 0 },
+        "after_bytes": { "type": "integer", "minimum": 0 },
         "delta_bytes": { "type": "integer" }
       }
     },

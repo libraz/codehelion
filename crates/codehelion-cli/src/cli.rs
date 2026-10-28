@@ -20,9 +20,10 @@ mod seam;
 
 pub use artifact::{
     ArtifactAction, ArtifactArgs, ArtifactCalibrationArgs, ArtifactCompareArgs, ArtifactFormat,
-    ArtifactInputFormat, ArtifactIsolatedArgs, ArtifactReportArgs, DEFAULT_ARTIFACT_MAX_BYTES,
-    DEFAULT_ARTIFACT_TIMEOUT_SECONDS, MAX_ARTIFACT_TIMEOUT_SECONDS, UNTRUSTED_ARTIFACT_MAX_BYTES,
-    UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES, UNTRUSTED_ARTIFACT_TIMEOUT_SECONDS,
+    ArtifactInputFormat, ArtifactIsolatedArgs, ArtifactReportArgs, CompressionChoice,
+    DEFAULT_ARTIFACT_MAX_BYTES, DEFAULT_ARTIFACT_TIMEOUT_SECONDS, MAX_ARTIFACT_TIMEOUT_SECONDS,
+    UNTRUSTED_ARTIFACT_MAX_BYTES, UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES,
+    UNTRUSTED_ARTIFACT_TIMEOUT_SECONDS,
 };
 pub use maintenance::{
     BASELINE_FILE_NAME, BaselineAction, BaselineArgs, BaselineCreateArgs, CacheAction,

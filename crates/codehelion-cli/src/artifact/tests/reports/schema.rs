@@ -51,6 +51,12 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
     artifact.observed_bytes = 128;
     artifact.architecture = Some("wasm32".to_owned());
     artifact.skipped_architectures = vec!["wasm64".to_owned()];
+    artifact.compressed_sizes = vec![codehelion_artifact::compression::CompressedSize {
+        algorithm: CompressionAlgorithm::Brotli,
+        parameters: "quality 11, window 22".to_owned(),
+        encoder: "brotli (rust)".to_owned(),
+        bytes: 96,
+    }];
     artifact.symbols = vec![
         normalizable_symbol(10, &[1, 2], &[9]),
         normalizable_symbol(20, &[1, 3], &[9]),
@@ -166,6 +172,7 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
     }]);
 
     let value = serde_json::to_value(&report).unwrap();
+    assert!(value["compressed_sizes"][0].is_object());
     assert!(value["symbols"].as_array().is_some_and(|s| !s.is_empty()));
     assert!(value["duplicate_groups"]["exact"][0].is_object());
     assert!(value["duplicate_groups"]["normalized"][0].is_object());
@@ -187,6 +194,10 @@ fn artifact_json_field_names_appear_in_the_shipped_schema() {
         ),
         (&value["capabilities"], &defs["capabilities"]["properties"]),
         (&value["dead_code"], &defs["dead_code"]["properties"]),
+        (
+            &value["compressed_sizes"][0],
+            &defs["compressed_size"]["properties"],
+        ),
         (&value["symbols"][0], &defs["symbol"]["properties"]),
         (&value["section_details"][0], &defs["section"]["properties"]),
         (&value["import_details"][0], &defs["import"]["properties"]),
@@ -365,6 +376,14 @@ fn comparison_json_field_names_appear_in_the_shipped_schema() {
     let mut after = before.clone();
     after.symbols = vec![normalizable_symbol(20, &[1, 2, 3], &[9])];
     after.symbols[0].name = Some("strtof".to_owned());
+    let measured = |bytes| codehelion_artifact::compression::CompressedSize {
+        algorithm: CompressionAlgorithm::Gzip,
+        parameters: "level 9".to_owned(),
+        encoder: "flate2 (miniz_oxide)".to_owned(),
+        bytes,
+    };
+    before.compressed_sizes = vec![measured(120)];
+    after.compressed_sizes = vec![measured(100)];
     let report = ArtifactComparisonReport::new(
         std::path::Path::new("before.wasm"),
         &before,
@@ -381,6 +400,10 @@ fn comparison_json_field_names_appear_in_the_shipped_schema() {
         (
             &value["symbol_deltas"][0],
             &defs["symbol_delta"]["properties"],
+        ),
+        (
+            &value["compressed_deltas"][0],
+            &defs["compressed_delta"]["properties"],
         ),
         (
             &value["ownership_deltas"],

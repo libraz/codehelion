@@ -187,6 +187,7 @@ fn calibration_request(
         timeout_seconds: DEFAULT_ARTIFACT_TIMEOUT_SECONDS,
         max_memory_bytes: None,
         untrusted: false,
+        compressed: Vec::new(),
         source_run,
         clone_group: clone_group.map(ToOwned::to_owned),
         db: db.map(ToOwned::to_owned),

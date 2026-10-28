@@ -40,6 +40,28 @@ fn artifact_compare_help_exposes_the_input_format_assertion() {
         ));
 }
 
+/// Both commands that can measure a compressed size offer the flag and say
+/// what it measures.
+#[test]
+fn artifact_help_offers_compressed_size_on_analyze_and_compare() {
+    for subcommand in ["analyze", "compare"] {
+        let output = cmd()
+            .args(["artifact", subcommand, "--help"])
+            .output()
+            .expect("artifact help");
+        assert!(output.status.success(), "{output:?}");
+        let help = String::from_utf8(output.stdout).expect("help output");
+        assert!(help.contains("--compressed <COMPRESSED>"), "{help}");
+        assert!(help.contains("- gzip:"), "{help}");
+        assert!(help.contains("- brotli:"), "{help}");
+        assert!(
+            help.contains("compressed size of the whole artifact"),
+            "{help}"
+        );
+        assert!(help.contains("repeat for several"), "{help}");
+    }
+}
+
 /// The flag's own help says the same thing the artifact document does.
 #[test]
 fn build_variant_help_says_the_two_conditions_are_not_matched_against_each_other() {

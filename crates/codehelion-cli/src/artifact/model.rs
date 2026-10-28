@@ -8,6 +8,7 @@ use super::{
 mod assumption;
 mod columns;
 mod comparison;
+mod compression;
 mod facts;
 mod ownership;
 
@@ -26,6 +27,7 @@ pub(super) use comparison::{
 };
 #[cfg(test)]
 pub(super) use comparison::{SYMBOL_IDENTITY_CHANGED, symbol_change};
+pub(super) use compression::CompressedSizeReport;
 pub(super) use facts::{ARTIFACT_FACTS, COMPARISON_FACTS, ReportFact};
 pub(super) use ownership::{
     OwnershipDeltaReport, OwnershipReport, ToolchainHoldingsReport, declared_ownership,
@@ -44,6 +46,7 @@ pub(super) struct ArtifactReport {
     pub(super) format: BinaryFormat,
     pub(super) fingerprint: String,
     pub(super) observed_bytes: u64,
+    pub(super) compressed_sizes: Vec<CompressedSizeReport>,
     pub(super) architecture: Option<String>,
     pub(super) skipped_architectures: Vec<String>,
     pub(super) code_section_bytes: u64,
@@ -206,6 +209,7 @@ impl ArtifactReport {
             format: artifact.format,
             fingerprint: artifact.fingerprint.to_hex(),
             observed_bytes: artifact.observed_bytes,
+            compressed_sizes: compression::compressed_sizes_of(artifact),
             architecture: artifact.architecture.clone(),
             skipped_architectures: artifact.skipped_architectures.clone(),
             code_section_bytes: code_section_bytes(artifact),

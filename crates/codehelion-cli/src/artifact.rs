@@ -18,7 +18,9 @@ use codehelion_artifact::ArtifactBackend;
 #[cfg(test)]
 use codehelion_artifact::wasm::WasmBackend;
 use codehelion_artifact::{
-    ARTIFACT_IR_SCHEMA_VERSION, ArtifactFormat as BinaryFormat, ArtifactIr, metrics,
+    ARTIFACT_IR_SCHEMA_VERSION, ArtifactFormat as BinaryFormat, ArtifactIr,
+    compression::CompressionAlgorithm,
+    metrics,
     metrics::{EstimatedRefactorSavingsBytes, EvidenceConfidence, VerifiedSavingsBytes},
 };
 use codehelion_store::artifact::{
@@ -36,7 +38,9 @@ use codehelion_store::query::{
 use serde::Serialize;
 
 use crate::Outcome;
-use crate::cli::{ArtifactArgs, ArtifactCompareArgs, ArtifactFormat, ArtifactReportArgs};
+use crate::cli::{
+    ArtifactArgs, ArtifactCompareArgs, ArtifactFormat, ArtifactReportArgs, CompressionChoice,
+};
 #[cfg(test)]
 use crate::cli::{
     ArtifactInputFormat, UNTRUSTED_ARTIFACT_MAX_BYTES, UNTRUSTED_ARTIFACT_MAX_MEMORY_BYTES,
@@ -148,6 +152,8 @@ fn run_direct(args: &ArtifactArgs, out: &mut impl Write) -> Result<Outcome> {
         args.debug_file.as_deref(),
         args.arch.as_deref(),
         args.untrusted,
+        &compression_algorithms(&args.compressed),
+        "compression",
     )?;
     worker::set_stage("source-map correlation");
     let source_maps = resolve_wasm_source_maps(&args.path, &artifact, args.max_bytes);
@@ -338,6 +344,8 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
         None,
         args.arch.as_deref(),
         args.untrusted,
+        &compression_algorithms(&args.compressed),
+        "compression before artifact",
     )?;
     worker::set_stage("parsing after artifact");
     let after = inspect(
@@ -347,6 +355,8 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
         None,
         args.arch.as_deref(),
         args.untrusted,
+        &compression_algorithms(&args.compressed),
+        "compression after artifact",
     )?;
     let before_variant = read_build_variant(args.before_build_variant.as_deref())?;
     let after_variant = read_build_variant(args.after_build_variant.as_deref())?;
@@ -386,6 +396,11 @@ fn compare_direct(args: &ArtifactCompareArgs, out: &mut impl Write) -> Result<Ou
         out.write_all(&rendered)?;
     }
     Ok(Outcome::Success)
+}
+
+/// The library algorithms behind the `--compressed` choices.
+fn compression_algorithms(choices: &[CompressionChoice]) -> Vec<CompressionAlgorithm> {
+    choices.iter().copied().map(Into::into).collect()
 }
 
 mod model;

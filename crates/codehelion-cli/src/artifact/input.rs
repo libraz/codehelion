@@ -7,6 +7,7 @@ use std::path::Path as FilePath;
 
 use anyhow::{Context, Result, bail};
 use codehelion_artifact::archive::ArchiveBackend;
+use codehelion_artifact::compression::{CompressionAlgorithm, compressed_sizes};
 use codehelion_artifact::dwarf::DwarfBudget;
 use codehelion_artifact::elf::ElfBackend;
 use codehelion_artifact::macho::MachOBackend;
@@ -69,6 +70,7 @@ pub(super) fn untrusted_ceilings(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // one parse request; the callers pass each knob they hold
 pub(super) fn inspect(
     path: &std::path::Path,
     max_bytes: u64,
@@ -76,6 +78,8 @@ pub(super) fn inspect(
     debug_file: Option<&std::path::Path>,
     architecture: Option<&str>,
     untrusted: bool,
+    compression: &[CompressionAlgorithm],
+    compression_stage: &str,
 ) -> Result<ArtifactIr> {
     // An operator who capped how many bytes an untrusted artifact may be read
     // from has already capped the structures those bytes expand into: each one
@@ -102,14 +106,14 @@ pub(super) fn inspect(
             None => (None, None),
         },
     };
-    match parse_input_format_within(
+    let mut artifact = match parse_input_format_within(
         &bytes,
         required_format,
         debug_companion.as_deref(),
         architecture,
         budget,
     ) {
-        Ok(artifact) => Ok(artifact),
+        Ok(artifact) => artifact,
         Err(error) if let Some(path) = automatically_discovered => {
             // An automatically discovered bundle is optional evidence. Its
             // malformed bytes or a stale UUID must not make a valid artifact
@@ -120,10 +124,16 @@ pub(super) fn inspect(
                 "warning: automatically discovered dSYM {} was ignored: {error}",
                 path.display()
             );
-            Ok(artifact)
+            artifact
         }
-        Err(error) => Err(error),
+        Err(error) => return Err(error),
+    };
+    // Measured here because the bytes are not kept past this function.
+    if !compression.is_empty() {
+        super::worker::set_stage(compression_stage);
+        artifact.compressed_sizes = compressed_sizes(&bytes, compression)?;
     }
+    Ok(artifact)
 }
 
 /// One conventional dSYM companion discovered next to a Mach-O artifact.

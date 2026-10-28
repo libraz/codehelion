@@ -607,6 +607,7 @@ fn untrusted_containment_reaches_every_rendering() {
 mod assumption;
 mod calibration;
 mod compare;
+mod compression;
 mod csv;
 mod facts;
 mod input;

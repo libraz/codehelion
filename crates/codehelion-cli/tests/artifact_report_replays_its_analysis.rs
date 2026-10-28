@@ -204,6 +204,84 @@ fn a_report_of_an_uncontained_analysis_states_no_containment() {
     assert_eq!(containment(&replayed), serde_json::Value::Null);
 }
 
+/// The compressed size is measured while the analysis runs and the input is
+/// not read again, so a re-render can only restate what was recorded.
+#[test]
+fn a_report_restates_the_compressed_sizes_its_analysis_measured() {
+    let directory = fixture_directory();
+    for format in FORMATS {
+        let (live, replayed) =
+            analyzed_and_replayed(directory.path(), format, &["--compressed", "gzip"]);
+        assert_eq!(
+            live, replayed,
+            "the {format} rendering of a saved analysis differs from the analysis itself"
+        );
+    }
+
+    let (live, replayed) =
+        analyzed_and_replayed(directory.path(), "json", &["--compressed", "gzip"]);
+    let measured: serde_json::Value = serde_json::from_str(&replayed).expect("valid JSON");
+    assert_eq!(measured["compressed_sizes"][0]["algorithm"], "gzip");
+    assert!(
+        measured["compressed_sizes"][0]["bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "{measured}"
+    );
+    assert_eq!(live, replayed);
+    let (_, text) = analyzed_and_replayed(directory.path(), "text", &["--compressed", "gzip"]);
+    assert!(
+        text.contains("compressed bytes (gzip, level 9, flate2 (miniz_oxide)): "),
+        "{text}"
+    );
+    let (_, csv) = analyzed_and_replayed(directory.path(), "csv", &["--compressed", "gzip"]);
+    assert!(csv.contains("\ncompressed-size,"), "{csv}");
+}
+
+/// The recorded sizes outlive the file they were measured from.
+#[test]
+fn a_report_restates_compressed_sizes_after_its_input_is_deleted() {
+    let directory = fixture_directory();
+    let database = directory.path().join("deleted.sqlite");
+    let live = stdout_of(
+        cmd()
+            .current_dir(directory.path())
+            .args(["artifact", "analyze", "module.wasm", "--compressed", "gzip"])
+            .arg("--db")
+            .arg(&database)
+            .assert(),
+    );
+    std::fs::remove_file(directory.path().join("module.wasm")).expect("remove the input");
+    let replayed = stdout_of(
+        cmd()
+            .current_dir(directory.path())
+            .args(["artifact", "report"])
+            .arg("--db")
+            .arg(&database)
+            .assert(),
+    );
+    assert!(
+        replayed.contains("compressed bytes (gzip, level 9"),
+        "{replayed}"
+    );
+    assert_eq!(live, replayed);
+}
+
+/// An analysis recorded without the flag is not given a measurement later.
+#[test]
+fn a_report_of_an_unmeasured_analysis_states_no_compressed_size() {
+    let directory = fixture_directory();
+    for format in FORMATS {
+        let (live, replayed) = analyzed_and_replayed(directory.path(), format, &[]);
+        assert_eq!(live, replayed);
+        assert!(!replayed.contains("compressed bytes"), "{replayed}");
+        assert!(!replayed.contains("compressed-size"), "{replayed}");
+    }
+    let (_, json) = analyzed_and_replayed(directory.path(), "json", &[]);
+    let json: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(json["compressed_sizes"], serde_json::json!([]));
+}
+
 /// Every rendering states the ceilings a saved analysis ran under.
 ///
 /// Only a host that can install the untrusted preset can produce such an
