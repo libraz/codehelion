@@ -27,6 +27,7 @@ pub mod native;
 pub mod ownership;
 #[cfg(feature = "pe")]
 pub mod pe;
+pub mod short_name;
 pub mod stem;
 pub mod support;
 pub mod symbols;

@@ -547,7 +547,8 @@ pub(crate) fn trailing_group(name: &str, name_levels: &[Option<usize>]) -> Optio
 ///
 /// An opening bracket sits at the depth outside it and a closing bracket at
 /// the depth it returns to, so a matched pair shares one level. Depth never
-/// goes below zero.
+/// goes below zero. A `>` right after `-` is the arrow of a function type, not
+/// a closing bracket.
 pub(crate) fn levels(name: &str) -> Vec<Option<usize>> {
     let bytes = name.as_bytes();
     let mut result = Vec::with_capacity(bytes.len());
@@ -570,6 +571,7 @@ pub(crate) fn levels(name: &str) -> Vec<Option<usize>> {
                 result.push(Some(depth));
                 depth += 1;
             }
+            b'>' if at > 0 && bytes[at - 1] == b'-' => result.push(Some(depth)),
             b')' | b']' | b'}' | b'>' => {
                 depth = depth.saturating_sub(1);
                 result.push(Some(depth));

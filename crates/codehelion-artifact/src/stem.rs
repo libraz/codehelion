@@ -244,6 +244,15 @@ mod tests {
             Some(("alloc::vec::Vec<>", "alloc::vec::Vec<u8>", true)),
         ),
         (
+            "core::ptr::drop_in_place<alloc::boxed::Box<dyn core::ops::function::FnOnce() -> i32>>",
+            false,
+            Some((
+                "core::ptr::drop_in_place<>",
+                "core::ptr::drop_in_place<alloc::boxed::Box<dyn core::ops::function::FnOnce() -> i32>>",
+                true,
+            )),
+        ),
+        (
             "<alloc::vec::Vec<u8> as core::fmt::Debug>::fmt",
             false,
             Some((
