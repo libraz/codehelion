@@ -58,7 +58,11 @@ pub(super) fn plural(count: u64, noun: &str) -> String {
 }
 
 /// The singular or plural noun for `count`.
-pub(super) fn noun_form(count: u64, noun: &str) -> String {
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "the seam renderers share this helper"
+)]
+pub(crate) fn noun_form(count: u64, noun: &str) -> String {
     if count == 1 {
         noun.to_string()
     } else {

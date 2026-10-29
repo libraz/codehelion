@@ -46,6 +46,7 @@ use serde::Serialize;
 
 use crate::cli::{GuardArgs, HistoryArgs, SeamArgs, SeamCommonArgs, SeamFormat};
 use crate::config::{self, Config, ResolvedConfig};
+use crate::report::render::format::noun_form;
 use crate::{Outcome, scan};
 
 /// Version of the JSON these commands emit.
@@ -692,7 +693,7 @@ fn render_guard(report: &codehelion_seam::GuardReport, ledger_seams: usize) -> R
         writeln!(text, "guard: no seams are written down in codehelion.toml")?;
         return Ok(text);
     }
-    let seams = plural(ledger_seams, "seam");
+    let seams = noun_form(u64::try_from(ledger_seams).unwrap_or(u64::MAX), "seam");
     if report.is_empty() {
         writeln!(
             text,
@@ -738,15 +739,6 @@ fn render_lookup(lookups: &[codehelion_seam::PathLookup]) -> Result<String> {
         }
     }
     Ok(text)
-}
-
-/// A noun as a count of that many, so a report does not say "1 seams".
-fn plural(count: usize, noun: &str) -> String {
-    if count == 1 {
-        noun.to_string()
-    } else {
-        format!("{noun}s")
-    }
 }
 
 /// The leading part of a settings digest a text report prints.
