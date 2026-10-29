@@ -6,21 +6,20 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/libraz/codehelion/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.98%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/libraz/codehelion)
-[![docs](https://img.shields.io/badge/docs-guides-0a5ca8)](docs/ja/introduction.md)
 
-Rust / C / C++ の重複ロジックを検出し、スキャンをまたいで同じ重複を追い続けるツールです。
+**codehelion は、Rust / C / C++ の重複ロジックを検出し、スキャンをまたいで同じ重複を追い続けるツールです。** ソースをそのまま読むので、ビルドもコンパイルデータベースもネットワークも要りません。各 finding には内容から導いた識別子が付くため、ある重複について下した判断は、無関係な編集をはさんでもその重複に付いたまま残ります。何もマシンの外に出ず、読んだコードを実行することもありません。
 
-codehelion はソースを直接読みます。ビルドも compilation database もネットワークも要りません。完全一致・リネーム・欠落を伴うコピーを検出し、判定に使った複数の指標を並べて報告し、各 finding には無関係な編集では変わらない内容由来の識別子を付けます。一度判断した重複は判断済みのまま残り、数か月後のスキャンを前回のスキャンと突き合わせられます。
+**こんなときに使えます:**
 
-処理はすべて実行したマシンの中で完結します。ソースコードも解析結果も外部に送信せず、ネットワークへの依存を持たず、実行分類ごとの許可フラグを渡さないかぎり読み取ったコードを実行しません。
+- **簡単にはビルドできないツリーを調べたい** — Rust / C / C++ の混在、vendor されたコード、移植の途中でも、エラー耐性のある lexer 1 つでコンパイラなしに読めます。
+- **数か月かけて重複を減らしたい** — 出発点を baseline に記録し、残すと決めたものを抑制しておけば、以降のスキャンで増えたものが分かります。
+- **CI で新しいコピーを止めたい** — パーセンテージではなく、baseline に無い重複が現れたときに失敗させられます。SARIF は code scanning のビューに載せられます。
+- **対になったファイルを揃えておきたい** — 2 つのフロントエンドや en/ja の文書の組を seam として宣言すると、片側だけに触れた変更を `guard` が報告します。
+- **バイナリや WASM が大きくなった理由を知りたい** — コードのバイトを自分のコードと toolchain に分け、テンプレートの本体を name stem ごとに集計し、2 つのビルドを比較できます。
 
-codehelion は 1.0 前で、部分ごとに成熟度が違います。
+📖 **[ドキュメント](https://github.com/libraz/codehelion/blob/main/docs/ja/introduction.md)** &nbsp;·&nbsp; **[はじめかた](https://github.com/libraz/codehelion/blob/main/docs/ja/getting-started.md)** &nbsp;·&nbsp; **[制限](https://github.com/libraz/codehelion/blob/main/docs/ja/limitations.md)**
 
-**固まっている面** — Fast / Structural モードでのスキャン、text レポート、`report` と `explain` による記録済み実行の再描画、JSON 出力、`artifact analyze` によるコンパイル済み成果物の読み取り。いずれも精度を実測しており、実プロジェクトで使われています。これらに破壊的変更が入る場合はリリースノートに書きます。
-
-**まだ形が定まっていない面** — Semantic モード、baseline、SARIF、seam の追跡と `guard`、`artifact compare`、成果物レポートのコード所有者、calibration、`history`、そして抑制を調整する設定キー。いずれも文書化もテストもされていますが、約束に値するだけの実利用を経ていないため、リリース間で変わり得ます。該当するページには冒頭にその旨を書いています。
-
-データベースのレイアウトはどちらの面でも安定した面ではありません。スキャンし直せば作り直されます。
+> codehelion は 1.0 前です。Fast / Structural のスキャン、text と JSON のレポート、`artifact analyze` は固まっていて、それ以外はリリース間で変わり得ます（[成熟度](https://github.com/libraz/codehelion/blob/main/docs/ja/introduction.md#成熟度)）。セキュリティ上の問題は [SECURITY.md](https://github.com/libraz/codehelion/blob/main/SECURITY.md) の手順で報告してください。
 
 ## レポートの見え方
 
@@ -50,28 +49,21 @@ supplemental: 556 siblings (--show-siblings; 116 dropped by search ceilings), 1,
 open one: codehelion explain 64f5bc34 · list every group: --limit 0
 ```
 
-各フィールドの意味と、`-v` / `-vv` が追加するものは[レポートの読み方](docs/ja/reading-a-report.md)にあります。
+各フィールドの意味は[レポートの読み方](https://github.com/libraz/codehelion/blob/main/docs/ja/reading-a-report.md)にあります。
 
-## 1 回のスキャンの流れ
+## できること
 
-![1 回のスキャンが行うこと](docs/images/pipeline-ja.svg)
-
-ソースを lexer が読んで正規化し、内容で索引し、候補ペアを作り、アラインメントで検証し、canonical member を基準にグループ化します。実行結果はローカルの SQLite に記録され、text・JSON・SARIF のレポートはその記録からのエクスポートです。発火したリソース上限はすべてレポートに計上されるため、探索を完了できなかった実行は何を未検査のまま残したかを述べます。
-
-![各解析モードが測るもの](docs/images/modes-ja.svg)
-
-## 特長
-
-- **ビルド不要のスキャン** — エラー耐性のある lexer が Rust / C / C++ のソースを直接読むため、言語が混在するツリーも一度に、同じ基準で走査できます。コンパイラ・ビルドシステム・`compile_commands.json` はいずれも不要です。
-- **安定した finding ID** — finding は行番号ではなく内容の fingerprint で名前を持ちます。同じ入力からは常に同じ識別子と同じグループ順序が得られ、これが抑制設定と baseline をリファクタリングをまたいで持続させます。
-- **単一スコアではなく根拠** — 欠落を伴うクローンは lexical / structural / control-flow / type / API の similarity を個別に報告し、clone confidence・maintenance risk・refactoring difficulty を並べて示します。そのモードで測れない次元は推測せず、測定なしとして報告します。
-- **見える上限** — 発火したリソース上限（ファイルサイズ・parse timeout・候補 budget）はすべてレポートに計上されます。
-- **所有者別の成果物サイズ** — `artifact analyze` は WASM / ELF / Mach-O / PE/COFF を実行せずに読み、コードのバイトを自分のコード・toolchain・それ以外に分けます。呼び出しグラフを持つ形式（WASM・ELF とそのアーカイブ）では、toolchain のコードをリンクに残している関数も名指しします。
-- **構造としてのローカル実行** — ネットワークアクセスの禁止と対象ツリーを実行しない方針は、運用上の約束ではなく lint と依存ポリシーで強制しています。`clippy.toml` が scan path でのプロセス起動とソケットを禁止し、`cargo-deny` が主要な HTTP スタックを依存グラフごと拒否します。
+- **ビルド不要のスキャン** — エラー耐性のある lexer が Rust / C / C++ を直接読むため、言語が混在するツリーも一度に、同じ基準で走査できます。Semantic モードは別プロセスの helper からコンパイラ由来の情報を加えます。[解析モード](https://github.com/libraz/codehelion/blob/main/docs/ja/analysis-modes.md)
+- **安定した finding ID** — 行番号ではなく内容の fingerprint で名前を付けるので、同じ入力からは同じ ID が同じ順序で出て、抑制と baseline がリファクタリングをまたいで保たれます。[安定した識別子](https://github.com/libraz/codehelion/blob/main/docs/ja/stable-ids.md) · [baseline](https://github.com/libraz/codehelion/blob/main/docs/ja/baselines.md) · [抑制](https://github.com/libraz/codehelion/blob/main/docs/ja/suppression.md)
+- **単一スコアではなく根拠** — lexical / structural / control-flow / type / API の similarity を別々に報告し、そのモードで測れない指標は測定なしとして示します。[レポートの読み方](https://github.com/libraz/codehelion/blob/main/docs/ja/reading-a-report.md) · [クローンの型](https://github.com/libraz/codehelion/blob/main/docs/ja/clone-types.md)
+- **順序付けたレポート** — 実プロジェクト 8 件のラベル付きスナップショットで、上位 10 件に誤りが 1 つも入りません（p@10 1.0000、MAP 0.9290）。端から端まで読むと適合率は 0.5920 です。[精度](https://github.com/libraz/codehelion/blob/main/docs/ja/accuracy.md)
+- **seam と CI のゲート** — 一緒に変えるべきファイルを `guard` が確かめ、`scan --fail-on-findings` は変更が増やした重複でゲートします。[seam の追跡](https://github.com/libraz/codehelion/blob/main/docs/ja/seam-tracking.md) · [継続的インテグレーション](https://github.com/libraz/codehelion/blob/main/docs/ja/continuous-integration.md)
+- **成果物のサイズ** — WASM / ELF / Mach-O / PE/COFF を実行せずに読み、所有者別のコードのバイト、toolchain のコードをリンクに残している関数、name stem、圧縮後サイズ、2 つのビルドの比較を出します。[成果物解析](https://github.com/libraz/codehelion/blob/main/docs/ja/artifact-analysis.md)
+- **構造としてのローカル実行** — ネットワークを使わず対象ツリーを実行しないことを lint と依存ポリシーで強制し、発火したリソース上限はすべてレポートに計上します。[ローカル実行と信頼](https://github.com/libraz/codehelion/blob/main/docs/ja/security.md)
 
 ## インストール
 
-各[リリース](https://github.com/libraz/codehelion/releases)にビルド済みバイナリが添付されているので、試すためにコンパイルする必要はありません。アーカイブに入っているのは `codehelion` という自己完結の実行ファイル 1 つで、SQLite は同梱されています。
+各[リリース](https://github.com/libraz/codehelion/releases)に、SQLite を同梱した自己完結の `codehelion` バイナリと `SHA256SUMS` が添付されます。
 
 | プラットフォーム | アーカイブ |
 |---|---|
@@ -80,58 +72,43 @@ open one: codehelion explain 64f5bc34 · list every group: --limit 0
 | macOS Apple silicon | `codehelion-<version>-macos-aarch64.tar.gz` |
 | Windows x86-64 | `codehelion-<version>-windows-x86_64.zip` |
 
-`SHA256SUMS` も併せて添付されます。Rust ツールチェインがあるなら、`cargo install` が同じバイナリをソースからビルドします。
-
-```sh
-cargo install codehelion
+```bash
+cargo install codehelion   # ソースからビルドする場合。Rust 1.98 以降が必要
 ```
 
-こちらの経路では、任意の Rust Semantic helper を含め Rust 1.98 以降が必要です。
+Semantic モードでは言語ごとの helper も必要です。helper と `codehelion doctor` は[はじめかた](https://github.com/libraz/codehelion/blob/main/docs/ja/getting-started.md)にあります。
 
-```sh
+## クイックスタート
+
+```bash
 codehelion scan --mode structural     # ツリーを読み、重複を報告する
 codehelion explain 64f5bc34           # グループを 1 つ開く
-codehelion report --format json --output report.json
+codehelion artifact analyze app.wasm  # ビルドのバイトがどこに行っているか
 ```
 
-Semantic モードでは、解析したい言語ごとの helper も必要です。ビルド済みの helper アーカイブ（`codehelion-helpers-<version>-...`）は Linux x86-64・macOS Apple silicon・Windows x86-64 に添付されています。それ以外では `cargo install codehelion-backend-rust` と `codehelion-backend-clang` がビルドします。このマシンに何があるかは `codehelion doctor` が報告します。導入手順は[はじめかた](docs/ja/getting-started.md)にあります。
+→ [はじめかた](https://github.com/libraz/codehelion/blob/main/docs/ja/getting-started.md) · [コマンドライン](https://github.com/libraz/codehelion/blob/main/docs/ja/cli.md)
 
-## CI で使う
+## ソースからビルド
 
-baseline を渡した `scan --fail-on-findings` は、baseline に無い重複が現れたときに終了コード `3` を返します。これは変更が「増やしたもの」に対するゲートであって、数字を上げれば答えたことになるパーセンテージに対するものではありません。`guard --deny-asymmetric` は、変更が seam の一部に触れて残りに触れていないときに `3` を返します。`--format sarif` は code scanning のビューにアップロードできます。3 つとも[継続的インテグレーション](docs/ja/continuous-integration.md)にあります。
+```bash
+make check   # format-check + lint + 境界検査 + test + doc
+make eval    # コーパスに対する検出精度
+```
+
+残りは `make help` にあります。規約とガードレールは [CONTRIBUTING.md](https://github.com/libraz/codehelion/blob/main/CONTRIBUTING.md) にあります。
 
 ## ドキュメント
 
-まずここから: [はじめに](docs/ja/introduction.md)、[はじめかた](docs/ja/getting-started.md)、[解析モード](docs/ja/analysis-modes.md)。
+- **学ぶ** — [はじめに](https://github.com/libraz/codehelion/blob/main/docs/ja/introduction.md) · [はじめかた](https://github.com/libraz/codehelion/blob/main/docs/ja/getting-started.md) · [解析モード](https://github.com/libraz/codehelion/blob/main/docs/ja/analysis-modes.md) · [用語集](https://github.com/libraz/codehelion/blob/main/docs/ja/glossary.md)
+- **出力を読む** — [レポートの読み方](https://github.com/libraz/codehelion/blob/main/docs/ja/reading-a-report.md) · [クローンの型](https://github.com/libraz/codehelion/blob/main/docs/ja/clone-types.md) · [グループ化](https://github.com/libraz/codehelion/blob/main/docs/ja/grouping.md) · [安定した識別子](https://github.com/libraz/codehelion/blob/main/docs/ja/stable-ids.md)
+- **プロジェクトで使う** — [リファクタのループ](https://github.com/libraz/codehelion/blob/main/docs/ja/refactoring-workflow.md) · [baseline](https://github.com/libraz/codehelion/blob/main/docs/ja/baselines.md) · [抑制](https://github.com/libraz/codehelion/blob/main/docs/ja/suppression.md) · [設定](https://github.com/libraz/codehelion/blob/main/docs/ja/configuration.md) · [seam の追跡](https://github.com/libraz/codehelion/blob/main/docs/ja/seam-tracking.md) · [継続的インテグレーション](https://github.com/libraz/codehelion/blob/main/docs/ja/continuous-integration.md) · [コマンドライン](https://github.com/libraz/codehelion/blob/main/docs/ja/cli.md)
+- **成果物** — [成果物解析](https://github.com/libraz/codehelion/blob/main/docs/ja/artifact-analysis.md) · [calibration](https://github.com/libraz/codehelion/blob/main/docs/ja/calibration.md)
+- **詳細** — [制限](https://github.com/libraz/codehelion/blob/main/docs/ja/limitations.md) · [精度](https://github.com/libraz/codehelion/blob/main/docs/ja/accuracy.md) · [ローカル実行と信頼](https://github.com/libraz/codehelion/blob/main/docs/ja/security.md) · [アーキテクチャ](https://github.com/libraz/codehelion/blob/main/docs/ja/architecture.md)
 
-出力を読む: [レポートの読み方](docs/ja/reading-a-report.md)、[クローンの型](docs/ja/clone-types.md)、[グループ化](docs/ja/grouping.md)、[安定した識別子](docs/ja/stable-ids.md)、[用語集](docs/ja/glossary.md)。
+## 含まないもの（Non-goals）
 
-プロジェクトで使う: [リファクタのループ](docs/ja/refactoring-workflow.md)、[baseline](docs/ja/baselines.md)、[抑制](docs/ja/suppression.md)、[設定](docs/ja/configuration.md)、[seam の追跡](docs/ja/seam-tracking.md)、[継続的インテグレーション](docs/ja/continuous-integration.md)、[コマンドライン](docs/ja/cli.md)。
-
-成果物: [成果物解析](docs/ja/artifact-analysis.md)、[calibration](docs/ja/calibration.md)。
-
-頼る前に読むもの: [制限](docs/ja/limitations.md)、[精度](docs/ja/accuracy.md)、[ローカル実行と信頼](docs/ja/security.md)、[アーキテクチャ](docs/ja/architecture.md)。
-
-## 主張しないこと
-
-finding が測るのは保守性であってサイズではありません。示すのは読み手が同期を取り続ける必要のあるコードであり、コンパイラが出力するバイト数ではありません。最適化器はソース上で重複したままのコードを畳みますし、成果物の圧縮後のサイズは非圧縮のサイズほどには動きません。そちらは [`codehelion artifact analyze`](docs/ja/artifact-analysis.md) が別に測ります。codehelion はミラー整合性検査ツールでもありません。見つけた重複を報告するだけで、すべてのコピーを見つけたとは主張しません。全体は[制限](docs/ja/limitations.md)にあります。
-
-実測した内容は次のとおりです。実プロジェクト 8 件のラベル付きスナップショットに対し、既定の priority 順では上位 10 件に誤りが 1 つも入りません（p@10 1.0000、MAP 0.9290）。同じ判定を端から端まで読むと 0.5920 で、末尾は約半分がノイズです。レポートを単に並べるのではなく順序付けているのはこのためです。両方の数字とコーパス、再現手順は[精度](docs/ja/accuracy.md)にあります。
-
-## 開発
-
-```sh
-make format        # 自動修正: clippy --fix + cargo fmt
-make check         # format-check + lint + 境界検査 + test + doc
-make eval          # コーパスに対する検出精度
-```
-
-残りは `make help` にあります。ガードレールは、設定を固定した `rustfmt`、`pedantic` + `nursery` を警告エラー扱いにした `clippy`（`unsafe` は禁止）、依存関係の advisory・ban・license を確認する `cargo-deny`、そしてクローンエンジンが成果物リーダーに依存したり compiler API が CLI に届いたりすると落ちる 2 つの境界検査です。テストは対象コードと同時に書きます。
-
-## 貢献
-
-[CONTRIBUTING.md](CONTRIBUTING.md) を参照してください。セキュリティ上の問題は公開 issue ではなく [SECURITY.md](SECURITY.md) の手順で報告してください。
+codehelion が測るのは保守性であってサイズではありません。報告されたクローンを消しても、ビルドした成果物が小さくなるとは限りません。すべてのコピーを見つけること、意味的な等価性の証明、コーディング規約や脆弱性の検査、自動リファクタリングは対象外で、GUI やホスト型サービスもありません。詳しくは[制限](https://github.com/libraz/codehelion/blob/main/docs/ja/limitations.md)を参照してください。
 
 ## ライセンス
 
-[Apache License, Version 2.0](LICENSE) で提供します。
+[Apache-2.0](https://github.com/libraz/codehelion/blob/main/LICENSE)

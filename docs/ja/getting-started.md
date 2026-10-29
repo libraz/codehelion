@@ -99,6 +99,8 @@ codehelion doctor
 
 `doctor` は、このマシンにあるコンポーネント、各 helper が問い合わせに何を答えたか、実行が使うローカルデータベースはどれかを報告します。導入されていない helper は「任意で、いまは無い」として報告され、それによって失敗することはありません。
 
+各リリースには Linux x86-64・macOS Apple silicon・Windows x86-64 向けのビルド済み helper アーカイブ（`codehelion-helpers-<version>-...`）も添付されているので、これらのプラットフォームではツールチェインなしで helper を導入できます。
+
 ## 任意: 成果物解析
 
 `artifact` コマンドは、コンパイル済み成果物（WASM・ELF・Mach-O・PE/COFF・静的アーカイブ）のバイト列を、ロードも実行もせずに読みます。

@@ -206,6 +206,9 @@ other functions in the same member.
 
 ## Name stems
 
+> **Pre-1.0 surface.** This is documented and tested, but has not had the real
+> use that would make it worth a promise, so it can change between releases.
+
 Several bodies of one artifact can differ only in a template argument, a closure
 number or a parameter list: `int probe<f::$_0>(char const*, f::$_0)`,
 `int probe<f::$_1>(char const*, f::$_1)` and `int probe<f::$_2>(char const*, f::$_2)`
@@ -288,6 +291,9 @@ Shortening only affects what the text shows. The fingerprint on the same line is
 what identifies the symbol, and comparisons never use the shortened name.
 
 ## Compressed size
+
+> **Pre-1.0 surface.** This is documented and tested, but has not had the real
+> use that would make it worth a promise, so it can change between releases.
 
 ```sh
 codehelion artifact analyze path/to/binary --compressed gzip --compressed brotli

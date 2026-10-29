@@ -6,44 +6,24 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/libraz/codehelion/blob/main/LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.98%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/libraz/codehelion)
-[![docs](https://img.shields.io/badge/docs-guides-0a5ca8)](docs/en/introduction.md)
 
-Find duplicated logic in Rust, C and C++ — and keep finding the same duplication
-across scans.
+**codehelion finds duplicated logic in Rust, C and C++, and keeps tracking the same duplication from one scan to the next.** It reads sources as they are, with no build, no compilation database and no network, and names every finding by an identifier derived from its content, so a decision you made about a duplicate stays attached to it through unrelated edits. Nothing leaves the machine, and the tool does not run the code it reads.
 
-codehelion reads sources directly: no build, no compilation database, no
-network. It detects identical, renamed and gapped copies, judges each one on
-several measures it reports side by side, and names every finding by a
-content-derived identifier that survives unrelated edits — so duplication you
-have already ruled on stays ruled on, and a scan months later can be measured
-against the one before it.
+**Reach for it when you need to:**
 
-Everything runs on the machine you start it on. Sources and results are never
-sent anywhere, the tool has no network dependency, and it does not execute the
-code it reads unless you pass a flag that permits a specific class of execution.
+- **Scan a tree you cannot easily build** — mixed Rust, C and C++, vendored code or a half-finished port, read by one error-tolerant lexer with no compiler.
+- **Pay down duplication over months** — record where you start in a baseline, suppress what you decided to keep, and see what each later scan adds.
+- **Stop new copies in CI** — fail on duplication the baseline does not carry, not on a percentage, and upload SARIF to a code-scanning view.
+- **Keep paired files in step** — declare a seam such as two frontends or an en/ja document pair, and `guard` reports a change that touched one side only.
+- **Explain why a binary or WASM module grew** — split its code bytes between your code and the toolchain, total template bodies under one name stem, and compare two builds.
 
-codehelion is pre-1.0, and its parts are not all at the same stage.
+📖 **[Documentation](https://github.com/libraz/codehelion/blob/main/docs/en/introduction.md)** &nbsp;·&nbsp; **[Getting started](https://github.com/libraz/codehelion/blob/main/docs/en/getting-started.md)** &nbsp;·&nbsp; **[Limitations](https://github.com/libraz/codehelion/blob/main/docs/en/limitations.md)**
 
-**Settled** — scanning a tree in Fast or Structural mode, the text report,
-replaying a recorded run with `report` and `explain`, the JSON export, and
-reading a compiled artifact with `artifact analyze`. These have measured accuracy
-and have been used on real projects; a breaking change to one gets a release
-note.
-
-**Still finding its shape** — Semantic mode, baselines, SARIF, seam tracking and
-`guard`, `artifact compare`, code ownership in artifact reports, calibration,
-`history`, and the configuration keys that tune suppression. Each is documented
-and tested, and none has had the real use that would make it worth a promise, so
-each can change between releases. The page for every one of them says so at the
-top.
-
-The on-disk database layout is not a stable surface either way; a scan recreates
-it.
+> codehelion is pre-1.0. Fast and Structural scanning, the text and JSON reports and `artifact analyze` are settled; the rest can change between releases ([Maturity](https://github.com/libraz/codehelion/blob/main/docs/en/introduction.md#maturity)). Report security issues through [SECURITY.md](https://github.com/libraz/codehelion/blob/main/SECURITY.md).
 
 ## What a report looks like
 
-Structural mode, run against codehelion's own tree, showing the first two
-groups:
+Structural mode, run against codehelion's own tree, showing the first two groups:
 
 ```text
 codehelion scan · structural mode · ~/src/codehelion
@@ -69,51 +49,21 @@ supplemental: 556 siblings (--show-siblings; 116 dropped by search ceilings), 1,
 open one: codehelion explain 64f5bc34 · list every group: --limit 0
 ```
 
-Every field, and what `-v` and `-vv` add:
-[Reading a report](docs/en/reading-a-report.md).
+Every field is explained in [Reading a report](https://github.com/libraz/codehelion/blob/main/docs/en/reading-a-report.md).
 
-## How one scan works
+## What's inside
 
-![What one scan does](docs/images/pipeline.svg)
+- **Build-free scanning** — an error-tolerant lexer reads Rust, C and C++ directly, so a mixed-language tree is scanned once on one basis; Semantic mode adds compiler evidence through separate helpers. [Analysis modes](https://github.com/libraz/codehelion/blob/main/docs/en/analysis-modes.md)
+- **Stable finding IDs** — content fingerprints rather than line numbers, so the same input gives the same IDs in the same order and suppressions and baselines hold across refactors. [Stable identifiers](https://github.com/libraz/codehelion/blob/main/docs/en/stable-ids.md) · [Baselines](https://github.com/libraz/codehelion/blob/main/docs/en/baselines.md) · [Suppression](https://github.com/libraz/codehelion/blob/main/docs/en/suppression.md)
+- **Evidence, not one score** — lexical, structural, control-flow, type and API similarity reported separately, with a measure the mode cannot take shown as absent. [Reading a report](https://github.com/libraz/codehelion/blob/main/docs/en/reading-a-report.md) · [Clone types](https://github.com/libraz/codehelion/blob/main/docs/en/clone-types.md)
+- **An ordered report** — on eight labelled snapshots of real projects nothing false reaches the first ten findings (p@10 1.0000, MAP 0.9290); read end to end, precision is 0.5920. [Accuracy](https://github.com/libraz/codehelion/blob/main/docs/en/accuracy.md)
+- **Seams and CI gates** — `guard` checks files that must change together, and `scan --fail-on-findings` gates on what a change added. [Seam tracking](https://github.com/libraz/codehelion/blob/main/docs/en/seam-tracking.md) · [Continuous integration](https://github.com/libraz/codehelion/blob/main/docs/en/continuous-integration.md)
+- **Artifact size** — WASM, ELF, Mach-O and PE/COFF read without running them: code bytes by owner, the functions that keep toolchain code linked in, name stems, compressed size, and a comparison of two builds. [Artifact analysis](https://github.com/libraz/codehelion/blob/main/docs/en/artifact-analysis.md)
+- **Local by construction** — no network and no execution of the scanned tree, enforced by lints and dependency policy, and every resource ceiling that fires is counted in the report. [Local execution and trust](https://github.com/libraz/codehelion/blob/main/docs/en/security.md)
 
-Sources are lexed and normalized, indexed by content, paired into candidates,
-verified by alignment, and grouped around a canonical member. The run is
-recorded into a local SQLite database, and the text, JSON and SARIF reports are
-exports of that record. Every resource ceiling that fires is counted in the
-report, so a run that could not finish the search says what it left unexamined.
+## Installation
 
-![What each analysis mode measures](docs/images/modes.svg)
-
-## Highlights
-
-- **Build-free scanning** — an error-tolerant lexer reads Rust, C and C++
-  sources directly, so a mixed-language tree is scanned once, on one basis. No
-  compiler, build system or `compile_commands.json` is required.
-- **Stable finding IDs** — findings are named by content fingerprints, not line
-  numbers. The same input always produces the same identifiers and the same
-  group order, which is what makes suppressions and baselines hold across
-  refactors.
-- **Evidence, not a single score** — a gapped clone reports lexical,
-  structural, control-flow, type and API similarity separately, and clone
-  confidence, maintenance risk and refactoring difficulty side by side. A
-  dimension the mode cannot measure is reported as absent rather than guessed.
-- **Visible limits** — every resource ceiling that fires (file size, parse
-  timeout, candidate budget) is counted in the report.
-- **Artifact size by owner** — `artifact analyze` reads WASM, ELF, Mach-O and
-  PE/COFF without running them, splits the code bytes between your code, the
-  toolchain and everything else, and, where the format carries a call graph (WASM,
-  ELF and archives of them), names the functions through which toolchain code
-  stays linked in.
-- **Local by construction** — the ban on network access and on executing the
-  scanned tree is enforced by lints and dependency policy, not by convention:
-  `clippy.toml` disallows process spawning and sockets in the scan path, and
-  `cargo-deny` refuses the common HTTP stacks outright.
-
-## Install
-
-Every [release](https://github.com/libraz/codehelion/releases) attaches a
-prebuilt binary, so nothing has to be compiled to try it. The archive holds one
-self-contained executable named `codehelion`; SQLite is bundled.
+Every [release](https://github.com/libraz/codehelion/releases) attaches a prebuilt, self-contained `codehelion` binary with SQLite bundled, and `SHA256SUMS` beside it.
 
 | platform | archive |
 |---|---|
@@ -122,99 +72,43 @@ self-contained executable named `codehelion`; SQLite is bundled.
 | macOS Apple silicon | `codehelion-<version>-macos-aarch64.tar.gz` |
 | Windows x86-64 | `codehelion-<version>-windows-x86_64.zip` |
 
-`SHA256SUMS` is attached beside them. With a Rust toolchain, `cargo install`
-builds the same binary from source instead:
-
-```sh
-cargo install codehelion
+```bash
+cargo install codehelion   # from source; requires Rust 1.98 or newer
 ```
 
-That route requires Rust 1.98 or newer, the optional Rust semantic helper
-included.
+Semantic mode also needs a helper per language. See [Getting started](https://github.com/libraz/codehelion/blob/main/docs/en/getting-started.md) for the helpers and `codehelion doctor`.
 
-```sh
+## Quick start
+
+```bash
 codehelion scan --mode structural     # read the tree, report the duplication
 codehelion explain 64f5bc34           # open one group
-codehelion report --format json --output report.json
+codehelion artifact analyze app.wasm  # where the bytes of a build go
 ```
 
-Semantic mode additionally needs a helper per language. Prebuilt helper archives
-(`codehelion-helpers-<version>-...`) are attached for Linux x86-64, macOS Apple
-silicon and Windows x86-64; elsewhere, `cargo install codehelion-backend-rust`
-and `codehelion-backend-clang` build them. `codehelion doctor` reports what this
-machine has. Full setup: [Getting started](docs/en/getting-started.md).
+→ [Getting started](https://github.com/libraz/codehelion/blob/main/docs/en/getting-started.md) · [The command line](https://github.com/libraz/codehelion/blob/main/docs/en/cli.md)
 
-## In CI
+## Build from source
 
-`scan --fail-on-findings` against a baseline exits `3` when duplication arrives
-that the baseline does not already carry — a gate on what a change added, not on
-a percentage that raising the number would answer. `guard --deny-asymmetric`
-exits `3` when a change touched part of a seam and not the rest. `--format
-sarif` uploads into a code-scanning view.
-[Continuous integration](docs/en/continuous-integration.md) has all three.
+```bash
+make check   # format-check + lint + boundary checks + test + doc
+make eval    # detection accuracy over the corpora
+```
+
+`make help` lists the rest. Conventions and guardrails are in [CONTRIBUTING.md](https://github.com/libraz/codehelion/blob/main/CONTRIBUTING.md).
 
 ## Documentation
 
-Start here: [Introduction](docs/en/introduction.md),
-[Getting started](docs/en/getting-started.md),
-[Analysis modes](docs/en/analysis-modes.md).
+- **Learn** — [Introduction](https://github.com/libraz/codehelion/blob/main/docs/en/introduction.md) · [Getting started](https://github.com/libraz/codehelion/blob/main/docs/en/getting-started.md) · [Analysis modes](https://github.com/libraz/codehelion/blob/main/docs/en/analysis-modes.md) · [Glossary](https://github.com/libraz/codehelion/blob/main/docs/en/glossary.md)
+- **Reading the output** — [Reading a report](https://github.com/libraz/codehelion/blob/main/docs/en/reading-a-report.md) · [Clone types](https://github.com/libraz/codehelion/blob/main/docs/en/clone-types.md) · [Grouping](https://github.com/libraz/codehelion/blob/main/docs/en/grouping.md) · [Stable identifiers](https://github.com/libraz/codehelion/blob/main/docs/en/stable-ids.md)
+- **Using it on a project** — [The refactoring loop](https://github.com/libraz/codehelion/blob/main/docs/en/refactoring-workflow.md) · [Baselines](https://github.com/libraz/codehelion/blob/main/docs/en/baselines.md) · [Suppression](https://github.com/libraz/codehelion/blob/main/docs/en/suppression.md) · [Configuration](https://github.com/libraz/codehelion/blob/main/docs/en/configuration.md) · [Seam tracking](https://github.com/libraz/codehelion/blob/main/docs/en/seam-tracking.md) · [Continuous integration](https://github.com/libraz/codehelion/blob/main/docs/en/continuous-integration.md) · [The command line](https://github.com/libraz/codehelion/blob/main/docs/en/cli.md)
+- **Artifacts** — [Artifact analysis](https://github.com/libraz/codehelion/blob/main/docs/en/artifact-analysis.md) · [Calibration](https://github.com/libraz/codehelion/blob/main/docs/en/calibration.md)
+- **Details** — [Limitations](https://github.com/libraz/codehelion/blob/main/docs/en/limitations.md) · [Accuracy](https://github.com/libraz/codehelion/blob/main/docs/en/accuracy.md) · [Local execution and trust](https://github.com/libraz/codehelion/blob/main/docs/en/security.md) · [Architecture](https://github.com/libraz/codehelion/blob/main/docs/en/architecture.md)
 
-Reading the output: [Reading a report](docs/en/reading-a-report.md),
-[Clone types](docs/en/clone-types.md), [Grouping](docs/en/grouping.md),
-[Stable identifiers](docs/en/stable-ids.md), [Glossary](docs/en/glossary.md).
+## Non-goals
 
-Using it on a project: [The refactoring loop](docs/en/refactoring-workflow.md),
-[Baselines](docs/en/baselines.md), [Suppression](docs/en/suppression.md),
-[Configuration](docs/en/configuration.md),
-[Seam tracking](docs/en/seam-tracking.md),
-[Continuous integration](docs/en/continuous-integration.md),
-[The command line](docs/en/cli.md).
-
-Artifacts: [Artifact analysis](docs/en/artifact-analysis.md),
-[Calibration](docs/en/calibration.md).
-
-Before you rely on it: [Limitations](docs/en/limitations.md),
-[Accuracy](docs/en/accuracy.md),
-[Local execution and trust](docs/en/security.md),
-[Architecture](docs/en/architecture.md).
-
-## What it does not claim
-
-A finding measures maintainability, not size: it names code a reader has to keep
-in step, not bytes a compiler emits. Optimisers fold identical code that is still
-duplicated in the source, and the compressed size of an artifact moves far less
-than its uncompressed size does.
-[`codehelion artifact analyze`](docs/en/artifact-analysis.md) measures that side
-separately. codehelion is not a mirror-consistency checker either: it reports the
-duplication it finds without claiming to have found every copy. The whole list is
-in [Limitations](docs/en/limitations.md).
-
-What is measured, over eight labelled snapshots of real projects: nothing false
-reaches the first ten findings (p@10 1.0000, MAP 0.9290) under the default
-priority ordering. Read end to end instead, the same verdicts give 0.5920 — the
-tail is close to half noise, which is why the report is ordered rather than
-merely listed. Both figures, their corpora and how to reproduce them are in
-[Accuracy](docs/en/accuracy.md).
-
-## Development
-
-```sh
-make format        # auto-fix: clippy --fix + cargo fmt
-make check         # format-check + lint + boundary checks + test + doc
-make eval          # detection accuracy over the corpora
-```
-
-`make help` lists the rest. Guardrails: `rustfmt` with a pinned config, `clippy`
-`pedantic` + `nursery` with warnings as errors, `unsafe` forbidden, `cargo-deny`
-over advisories, bans and licences, and two boundary checks that fail if the
-clone engine gains a dependency on the artifact reader or a compiler API reaches
-the CLI. Tests are written alongside the code they cover.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). To report a security issue, follow
-[SECURITY.md](SECURITY.md) rather than opening a public issue.
+codehelion measures maintainability, not size: removing a reported clone need not make the built artifact smaller. It does not claim to find every copy, prove semantic equivalence, check coding style or vulnerabilities, or refactor code for you, and it has no GUI or hosted service. See [Limitations](https://github.com/libraz/codehelion/blob/main/docs/en/limitations.md).
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+[Apache-2.0](https://github.com/libraz/codehelion/blob/main/LICENSE)

@@ -121,6 +121,10 @@ codehelion doctor
 when asked, and which local database a run would use. A helper that is not
 installed is reported as optional and absent; nothing fails because of it.
 
+Each release also attaches prebuilt helper archives
+(`codehelion-helpers-<version>-...`) for Linux x86-64, macOS Apple silicon and
+Windows x86-64, so the helpers need no toolchain on those platforms.
+
 ## Optional: artifact analysis
 
 The `artifact` commands read a compiled artifact's bytes — WASM, ELF, Mach-O,

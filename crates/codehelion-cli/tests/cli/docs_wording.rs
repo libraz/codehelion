@@ -1398,28 +1398,28 @@ fn pages_say_which_side_of_the_pre_1_0_line_they_document() {
     }
 }
 
-/// Both READMEs draw the line, in the same place, settled side first.
+/// Both introductions draw the line, in the same place, settled side first.
 ///
 /// Read in order because that is the promise being made: what a reader can
 /// build on comes before what they should not yet, and a paragraph that opens
 /// with the caveats says something different from the one that opens with the
 /// commitment.
 #[test]
-fn readmes_draw_the_line_between_settled_and_unsettled_surfaces() {
+fn introductions_draw_the_line_between_settled_and_unsettled_surfaces() {
     // The paragraph itself, not the whole file. Every one of these names also
-    // appears in the documentation index further down, so a search over the
-    // README would pass on a surface that had been dropped from the promise.
+    // appears elsewhere on the page, so a search over the whole document would
+    // pass on a surface that had been dropped from the promise.
     let mut listed = Vec::new();
     for (named, document, settled, unsettled) in [
         (
-            "README.md",
-            include_str!("../../../../README.md"),
+            "docs/en/introduction.md",
+            include_str!("../../../../docs/en/introduction.md"),
             "**Settled**",
             "**Still finding its shape**",
         ),
         (
-            "README_ja.md",
-            include_str!("../../../../README_ja.md"),
+            "docs/ja/introduction.md",
+            include_str!("../../../../docs/ja/introduction.md"),
             "**固まっている面**",
             "**まだ形が定まっていない面**",
         ),
@@ -1451,6 +1451,8 @@ fn readmes_draw_the_line_between_settled_and_unsettled_surfaces() {
         ["calibration", "calibration"],
         ["`history`", "`history`"],
         ["suppression", "抑制"],
+        ["name stems", "name stem"],
+        ["compressed sizes", "圧縮後サイズ"],
     ] {
         for ((named, paragraph), surface) in listed.iter().zip(surfaces) {
             assert!(

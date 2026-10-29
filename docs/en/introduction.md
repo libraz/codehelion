@@ -11,8 +11,25 @@ identifier that survives unrelated edits — so duplication that has already bee
 ruled on stays ruled on, and a scan months later can be measured against the one
 before it.
 
-codehelion is pre-1.0. The command-line surface, the report formats and the
-on-disk database layout can change between releases.
+## Maturity
+
+codehelion is pre-1.0, and its parts are not all at the same stage.
+
+**Settled** — scanning a tree in Fast or Structural mode, the text report,
+replaying a recorded run with `report` and `explain`, the JSON export, and
+reading a compiled artifact with `artifact analyze`. These have measured accuracy
+and have been used on real projects; a breaking change to one gets a release
+note.
+
+**Still finding its shape** — Semantic mode, baselines, SARIF, seam tracking and
+`guard`, `artifact compare`, code ownership, name stems and compressed sizes in
+artifact reports, calibration, `history`, and the configuration keys that tune
+suppression. Each is documented and tested, and none has had the real use that
+would make it worth a promise, so each can change between releases. The page for
+every one of them says so at the top.
+
+The on-disk database layout is not a stable surface either way; a scan recreates
+it.
 
 ## What one scan does
 
