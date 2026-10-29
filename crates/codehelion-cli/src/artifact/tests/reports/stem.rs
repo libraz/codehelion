@@ -658,7 +658,7 @@ fn counts_agree_with_their_numbers() {
         Vec::new(),
     ));
     assert!(
-        alone.contains(&format!("  note: 1 of 1 listed symbol change{note}")),
+        alone.contains(&format!("  note: 1 of 1 recorded symbol change{note}")),
         "{alone}"
     );
     let among = rendered_compare_text(&symbol_comparison(
@@ -670,7 +670,7 @@ fn counts_agree_with_their_numbers() {
         Vec::new(),
     ));
     assert!(
-        among.contains(&format!("  note: 1 of 3 listed symbol changes{note}")),
+        among.contains(&format!("  note: 1 of 3 recorded symbol changes{note}")),
         "{among}"
     );
     assert_counts_agree(&alone);

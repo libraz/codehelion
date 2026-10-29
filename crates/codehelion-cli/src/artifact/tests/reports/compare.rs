@@ -531,7 +531,7 @@ fn comparison_text_folds_every_symbol_change_that_carries_no_name() {
     render_compare_text(&report, false, &mut text).unwrap();
     let text = String::from_utf8(text).unwrap();
     assert!(
-        text.contains("note: 2 of 2 listed symbol changes have no name"),
+        text.contains("note: 2 of 2 recorded symbol changes have no name"),
         "{text}"
     );
     assert!(text.contains("cannot be paired"), "{text}");
@@ -539,7 +539,7 @@ fn comparison_text_folds_every_symbol_change_that_carries_no_name() {
     assert!(!text.contains("<unnamed>"), "{text}");
     assert_eq!(
         text.lines()
-            .filter(|line| line.contains("listed symbol changes have no name"))
+            .filter(|line| line.contains("recorded symbol changes have no name"))
             .count(),
         1,
         "{text}"
@@ -563,7 +563,7 @@ fn comparison_text_lists_named_symbol_changes_and_folds_only_the_rest() {
     let text = String::from_utf8(text).unwrap();
     assert!(text.contains("removed named_symbol"), "{text}");
     assert!(
-        text.contains("note: 2 of 3 listed symbol changes have no name"),
+        text.contains("note: 2 of 3 recorded symbol changes have no name"),
         "{text}"
     );
     assert!(!text.contains("<unnamed>"), "{text}");
@@ -584,7 +584,7 @@ fn comparison_json_keeps_the_symbol_changes_the_text_folded() {
     assert!(
         String::from_utf8(text)
             .unwrap()
-            .contains("listed symbol changes have no name")
+            .contains("recorded symbol changes have no name")
     );
 
     let json = serde_json::to_value(&report).unwrap();
@@ -1278,7 +1278,7 @@ fn assert_pairing(label: &str, report: &ArtifactComparisonReport, row: &PairingR
         let unnamed = deltas.len() - named;
         assert!(
             text.contains(&format!(
-                "note: {unnamed} of {} listed symbol changes have no name",
+                "note: {unnamed} of {} recorded symbol changes have no name",
                 deltas.len()
             )),
             "{label}\n{text}"
@@ -1356,6 +1356,33 @@ fn replaced_line_sorts_by_net_delta() {
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
 }
 
+/// Text lists the twenty largest symbol changes and counts the rest; the
+/// nameless note still counts every recorded entry.
+#[test]
+fn symbol_changes_list_the_largest_and_count_the_rest() {
+    let after: Vec<PairingEntry> = (1_u64..=25)
+        .map(|size| {
+            let name: &'static str = Box::leak(format!("grown_{size:02}").into_boxed_str());
+            (Some(name), name, size * 10)
+        })
+        .collect();
+    let report = pairing_comparison(&[(None, "stripped", 7)], &after);
+    assert_eq!(report.symbol_deltas.len(), 26);
+    let text = rendered_compare_text(&report);
+    let listed: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("  added grown_"))
+        .collect();
+    assert_eq!(listed.len(), 20, "{text}");
+    assert!(listed[0].starts_with("  added grown_25 "), "{text}");
+    assert!(listed[19].starts_with("  added grown_06 "), "{text}");
+    assert!(text.contains("\n  5 more symbol changes\n"), "{text}");
+    assert!(
+        text.contains("  note: 1 of 26 recorded symbol changes has no name"),
+        "{text}"
+    );
+}
+
 /// The coarse summaries come first: ownership, then stems, then the symbol
 /// list, then the duplicate groups under a heading of their own.
 #[test]
@@ -1394,4 +1421,11 @@ fn compare_text_orders_summaries_before_symbol_changes() {
     );
     let none = pairing_comparison(&[(Some("a"), "a", 4)], &[(Some("a"), "a", 4)]);
     assert!(!rendered_compare_text(&none).contains("duplicate group changes:"));
+}
+
+/// The identity assumption fits one text line of at most 300 characters.
+#[test]
+fn symbol_identity_assumption_fits_a_line() {
+    let line = format!("assumption: {SYMBOL_IDENTITY_CHANGED}");
+    assert!(line.len() <= 300, "{} characters", line.len());
 }

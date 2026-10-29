@@ -206,7 +206,7 @@ impl SymbolContent {
 
 /// How a name whose content identity changed is classified, which is not as
 /// [`symbol_change::MODIFIED`].
-pub(in crate::artifact) const SYMBOL_IDENTITY_CHANGED: &str = "symbol identity is content-derived; a name whose identity changed is recorded as one removed and one added symbol, each naming the other in counterpart_fingerprint when the name belongs to exactly one symbol on each side, shown as one replaced line in text, and counted in modified_named_symbols";
+pub(in crate::artifact) const SYMBOL_IDENTITY_CHANGED: &str = "symbol identity is content-derived; a name whose identity changed is recorded as one removed and one added symbol and counted in modified_named_symbols; when the name belongs to one symbol on each side, each names the other in counterpart_fingerprint and text shows one replaced line";
 
 /// One equality-group change. `kind` identifies the independent equality
 /// relation so a normalized match is never presented as an exact-byte match.

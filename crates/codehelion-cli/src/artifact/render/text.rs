@@ -1,6 +1,5 @@
 //! Human-readable rendering of one artifact report.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use codehelion_artifact::metrics::ReportedSize;
@@ -714,39 +713,30 @@ fn render_holdings(
         counted(holdings.shared_absorbed_symbols, "symbol", "symbols"),
     )?;
     for shared in holdings.shared.iter().take(LISTED_SHARED) {
-        let callers: Vec<String> = shared
-            .callers
-            .iter()
-            .take(LISTED_CALLERS)
-            .map(|caller| {
-                format!(
-                    "{} ({})",
-                    caller.name.as_deref().map_or_else(
-                        || Cow::Borrowed(caller.symbol.as_str()),
-                        |name| display_name(Some(name), verbose)
-                    ),
-                    ownership_label(caller.ownership)
-                )
-            })
-            .collect();
-        let more = shared.callers.len().saturating_sub(LISTED_CALLERS);
-        let more = if more > 0 {
-            format!(", {more} more")
-        } else {
-            String::new()
-        };
         writeln!(
             out,
-            "    {} {}: {}{}, called by {}{more}",
+            "    {} {}: {}{}",
             display_name(shared.name.as_deref(), verbose),
             shared.symbol,
             counted(shared.held_bytes, "byte", "bytes"),
             if shared.root { " (root)" } else { "" },
-            if callers.is_empty() {
-                "nothing".to_owned()
-            } else {
-                callers.join(", ")
-            },
+        )?;
+        for caller in shared.callers.iter().take(LISTED_CALLERS) {
+            writeln!(
+                out,
+                "      caller {} {} ({})",
+                display_name(caller.name.as_deref(), verbose),
+                caller.symbol,
+                ownership_label(caller.ownership)
+            )?;
+        }
+        render_omitted(
+            shared.callers.len(),
+            LISTED_CALLERS,
+            "caller",
+            "callers",
+            "      ",
+            out,
         )?;
     }
     render_omitted(

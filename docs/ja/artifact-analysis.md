@@ -92,11 +92,12 @@ toolchain holders (held bytes are part of the holder's retained size):
   parse (own) f31665862c71112cfffda8f55fc54dd2: 17307 bytes in 34 symbols, 6756 bytes in 4 symbols absorbed
     head strtof 320251c57384d307522b489a48cc4e39: 17307 bytes
   shared: 78 bytes in 5 symbols, 0 bytes in 0 symbols absorbed
-    setThrew ba286dbdc84dc40e5966ae8f29485879: 38 bytes (root), called by nothing
-    _initialize 4feb66b59715a8dcbf2af30ae02ec5d6: 20 bytes (root), called by nothing
-    _emscripten_stack_restore ef2222560055353cb931a59336cb3e00: 10 bytes (root), called by nothing
-    emscripten_stack_get_current 4eaae22504bd0bae04ab33f12aeef742: 8 bytes (root), called by nothing
-    __wasm_call_ctors a0d352ddbe45c0d90cb9d358e3fa1f9d: 2 bytes (root), called by _initialize (toolchain)
+    setThrew ba286dbdc84dc40e5966ae8f29485879: 38 bytes (root)
+    _initialize 4feb66b59715a8dcbf2af30ae02ec5d6: 20 bytes (root)
+    _emscripten_stack_restore ef2222560055353cb931a59336cb3e00: 10 bytes (root)
+    emscripten_stack_get_current 4eaae22504bd0bae04ab33f12aeef742: 8 bytes (root)
+    __wasm_call_ctors a0d352ddbe45c0d90cb9d358e3fa1f9d: 2 bytes (root)
+      caller _initialize 4feb66b59715a8dcbf2af30ae02ec5d6 (toolchain)
   assumption: unqualified functions whose immediate dominator is toolchain code are counted as toolchain code, except main and static initializers
   assumption: toolchain holders treat every recorded function reference as a root, so code reached through a function table is reported as shared
 ```
@@ -107,7 +108,7 @@ holder は、toolchain のコードではないのに toolchain のコードを�
 
 held bytes は holder の retained size の一部です。toolchain のコードがどこから入っているか、その入口を外すと何が切り離されるかを示すもので、削減の保証ではありません。次のビルドでは同じコードに別の経路から届くこともあります。
 
-非 toolchain の関数がひとつも支配していない toolchain のコードは shared toolchain code です。合計を出し、入口ごとにそれを直接呼ぶ関数を挙げます。成果物がエクスポートしている入口には `(root)` が付きます。shared のバイトはどの holder にも属さず、呼び出し元の間で按分もしません。holder は retained size が出ないときは出ず、レポートは数値の代わりにその旨を述べます。名前だけで所有者を決めることの限界は[制限](limitations.md#成果物検査はシンボルに依存します)にあります。
+非 toolchain の関数がひとつも支配していない toolchain のコードは shared toolchain code です。合計を出し、入口ごとに、それを直接呼ぶ関数を 1 行に 1 つずつ続けます。並べるのは fingerprint 順の先頭 3 つで、残りは件数だけを示します。成果物がエクスポートしている入口には `(root)` が付きます。shared のバイトはどの holder にも属さず、呼び出し元の間で按分もしません。holder は retained size が出ないときは出ず、レポートは数値の代わりにその旨を述べます。名前だけで所有者を決めることの限界は[制限](limitations.md#成果物検査はシンボルに依存します)にあります。
 
 owner のラベルはレポートを描画するたびに、保存済みのシンボル名と現在の `[artifact] own` から導きます。所有者に関するものはデータベースに書き込みません。そのため `artifact report` は実行時点の設定に従い、`artifact compare` も `artifact analyze` と同じく作業ディレクトリの設定を読みます。
 
@@ -211,7 +212,7 @@ stem delta:
 
 行が出るのは、シンボル差のうち 2 つ以上が stem を共有するとき、または stem の本体数が変わっていずれかの側に 2 つ以上あるときです。本体数は変更されたシンボルだけでなく、各成果物の全体で数えます。バイト差はシンボル差の合計です。該当する行がなければこの節は出ません。JSON では `stem_deltas`、CSV では `stem-delta` のレコードです。
 
-同じ名前で作り直された関数は内容の identity が変わるため、削除された 1 つと追加された 1 つとして記録されます。その名前が両側でちょうど 1 つのシンボルに属しているとき、2 つのエントリは互いの fingerprint を `counterpart_fingerprint` に持ちます。JSON でも CSV でも同じです。テキスト出力ではこの組を 1 行にまとめ、正味の差の大きさで他のシンボル変更と並べます。
+同じ名前で作り直された関数は内容の identity が変わるため、削除された 1 つと追加された 1 つとして記録されます。その名前が両側でちょうど 1 つのシンボルに属しているとき、2 つのエントリは互いの fingerprint を `counterpart_fingerprint` に持ちます。JSON でも CSV でも同じです。テキスト出力ではこの組を 1 行にまとめ、正味の差の大きさで他のシンボル変更と並べます。テキスト出力に並ぶのは大きい上位 20 件のシンボル変更で、残りは件数だけを示します。JSON と CSV には全エントリが入ります。
 
 ```text
 symbol changes:

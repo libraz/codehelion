@@ -688,3 +688,61 @@ fn symbols_sharing_a_fingerprint_list_their_distinct_names() {
     line(&none, false, "<unnamed>");
     assert_eq!(csv_name(&none), "");
 }
+
+/// A shared toolchain entry is followed by its callers, one per line like the
+/// heads under a holder, so a long caller name never shares a line with another.
+#[test]
+fn shared_entries_list_each_caller_on_its_own_line() {
+    let mut artifact = csv::artifact_with_a_toolchain_holder();
+    for (offset, byte, name) in [(60, 7, "third_caller"), (70, 8, "fourth_caller")] {
+        let mut caller = normalizable_symbol(offset, &[1, byte], &[9]);
+        caller.name = Some(name.to_owned());
+        caller.exported = true;
+        let fingerprint = caller.fingerprint;
+        artifact.symbols.push(caller);
+        artifact.calls.push(codehelion_artifact::ArtifactCall {
+            caller: fingerprint,
+            target: Some(artifact.symbols[1].fingerprint),
+            unresolved: None,
+        });
+    }
+    let mut report = ArtifactReport::from_ir(FilePath::new("fixture.wasm"), &artifact, None, None)
+        .with_own_declaration(&["<global>".to_owned()]);
+    let shared = &report.toolchain_holdings.as_ref().unwrap().shared;
+    let strtof = shared
+        .iter()
+        .find(|entry| entry.name.as_deref() == Some("strtof"))
+        .unwrap();
+    assert_eq!(strtof.callers.len(), 4);
+    let entry = format!("    strtof {}: ", strtof.symbol);
+
+    let text = rendered_text(&report, false);
+    assert!(!text.contains("called by"), "{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with(&entry))
+        .unwrap_or_else(|| unreachable!("missing {entry:?} in\n{text}"));
+    assert!(
+        lines[at + 1..=at + 3]
+            .iter()
+            .all(|line| line.starts_with("      caller ") && line.ends_with(')')),
+        "{text}"
+    );
+    assert_eq!(lines[at + 4], "      1 more caller", "{text}");
+
+    let holdings = report.toolchain_holdings.as_mut().unwrap();
+    let strtof = holdings
+        .shared
+        .iter_mut()
+        .find(|entry| entry.name.as_deref() == Some("strtof"))
+        .unwrap();
+    strtof.callers.clear();
+    let text = rendered_text(&report, false);
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with(&entry))
+        .unwrap_or_else(|| unreachable!("missing {entry:?} in\n{text}"));
+    assert!(!lines[at + 1].starts_with("      "), "{text}");
+}

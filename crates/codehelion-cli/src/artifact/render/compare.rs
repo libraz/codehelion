@@ -314,7 +314,8 @@ struct DeltaLine<'a> {
     text: String,
 }
 
-/// Changed symbols, one line each while a name identifies them.
+/// Changed symbols, one line each while a name identifies them, largest first
+/// and capped at [`LISTED_SYMBOL_CHANGES`] lines.
 ///
 /// A removed and an added symbol that name each other as counterparts are one
 /// `replaced` line carrying the net change; the report keeps both entries.
@@ -394,22 +395,30 @@ fn render_symbol_deltas(deltas: &[SymbolDelta], verbose: bool, out: &mut impl Wr
             .cmp(&left.magnitude)
             .then_with(|| left.fingerprint.cmp(right.fingerprint))
     });
-    for line in &lines {
+    for line in lines.iter().take(LISTED_SYMBOL_CHANGES) {
         writeln!(out, "{}", line.text)?;
     }
+    render_omitted(
+        lines.len(),
+        LISTED_SYMBOL_CHANGES,
+        "symbol change",
+        "symbol changes",
+        "  ",
+        out,
+    )?;
     if nameless > 0 {
         let total = deltas.len();
         let (subject, possessive) = if nameless == 1 {
             (
                 format!(
-                    "1 of {total} listed symbol {}",
+                    "1 of {total} recorded symbol {}",
                     noun(total, "change", "changes")
                 ),
                 "has no name; its",
             )
         } else {
             (
-                format!("{nameless} of {total} listed symbol changes"),
+                format!("{nameless} of {total} recorded symbol changes"),
                 "have no name; their",
             )
         };
@@ -421,6 +430,8 @@ fn render_symbol_deltas(deltas: &[SymbolDelta], verbose: bool, out: &mut impl Wr
     Ok(())
 }
 
+/// Symbol change lines listed in text; JSON and CSV carry every entry.
+const LISTED_SYMBOL_CHANGES: usize = 20;
 /// Owners listed in text; JSON carries every one.
 const LISTED_OWNERS: usize = 10;
 

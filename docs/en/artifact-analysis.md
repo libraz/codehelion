@@ -147,11 +147,12 @@ toolchain holders (held bytes are part of the holder's retained size):
   parse (own) f31665862c71112cfffda8f55fc54dd2: 17307 bytes in 34 symbols, 6756 bytes in 4 symbols absorbed
     head strtof 320251c57384d307522b489a48cc4e39: 17307 bytes
   shared: 78 bytes in 5 symbols, 0 bytes in 0 symbols absorbed
-    setThrew ba286dbdc84dc40e5966ae8f29485879: 38 bytes (root), called by nothing
-    _initialize 4feb66b59715a8dcbf2af30ae02ec5d6: 20 bytes (root), called by nothing
-    _emscripten_stack_restore ef2222560055353cb931a59336cb3e00: 10 bytes (root), called by nothing
-    emscripten_stack_get_current 4eaae22504bd0bae04ab33f12aeef742: 8 bytes (root), called by nothing
-    __wasm_call_ctors a0d352ddbe45c0d90cb9d358e3fa1f9d: 2 bytes (root), called by _initialize (toolchain)
+    setThrew ba286dbdc84dc40e5966ae8f29485879: 38 bytes (root)
+    _initialize 4feb66b59715a8dcbf2af30ae02ec5d6: 20 bytes (root)
+    _emscripten_stack_restore ef2222560055353cb931a59336cb3e00: 10 bytes (root)
+    emscripten_stack_get_current 4eaae22504bd0bae04ab33f12aeef742: 8 bytes (root)
+    __wasm_call_ctors a0d352ddbe45c0d90cb9d358e3fa1f9d: 2 bytes (root)
+      caller _initialize 4feb66b59715a8dcbf2af30ae02ec5d6 (toolchain)
   assumption: unqualified functions whose immediate dominator is toolchain code are counted as toolchain code, except main and static initializers
   assumption: toolchain holders treat every recorded function reference as a root, so code reached through a function table is reported as shared
 ```
@@ -177,8 +178,9 @@ enters and what dropping the entry would unlink, not a guaranteed reduction: the
 same code may be reached again by another route in the next build.
 
 Toolchain code that no single non-toolchain function dominates is **shared
-toolchain code**. It is totalled, and each entry lists the functions that call it
-directly, or `(root)` when the artifact exports it. Shared bytes belong to no
+toolchain code**. It is totalled, and each entry is followed by the functions that
+call it directly, one per line, the first three by fingerprint and the rest
+counted. An entry the artifact exports is marked `(root)`. Shared bytes belong to no
 holder and are not split among the callers. Holders are unavailable whenever
 retained sizes are, and the report says so instead of giving a figure. The limits of
 name-based ownership are in
@@ -371,7 +373,9 @@ A function rebuilt under the same name has a new content identity, so it is
 recorded as one removed and one added symbol. When the name belongs to exactly one
 symbol on each side, the two entries carry each other's fingerprint in
 `counterpart_fingerprint`, in JSON and in CSV. Text output prints the pair as one
-line, ordered with the other symbol changes by the size of its net difference:
+line, ordered with the other symbol changes by the size of its net difference.
+Text output lists the twenty largest symbol changes and counts the rest; JSON and
+CSV carry every entry:
 
 ```text
 symbol changes:

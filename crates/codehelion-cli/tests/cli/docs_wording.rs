@@ -1460,3 +1460,36 @@ fn readmes_draw_the_line_between_settled_and_unsettled_surfaces() {
         }
     }
 }
+
+#[test]
+fn documents_capped_symbol_changes_and_caller_lines() {
+    for (language, document, capped, callers) in [
+        (
+            "English",
+            include_str!("../../../../docs/en/artifact-analysis.md"),
+            "lists the twenty largest symbol changes",
+            "call it directly, one per line",
+        ),
+        (
+            "Japanese",
+            include_str!("../../../../docs/ja/artifact-analysis.md"),
+            "大きい上位 20 件のシンボル変更",
+            "直接呼ぶ関数を 1 行に 1 つずつ続けます",
+        ),
+    ] {
+        for snippet in [
+            capped,
+            callers,
+            "      caller _initialize 4feb66b59715a8dcbf2af30ae02ec5d6 (toolchain)",
+        ] {
+            assert!(
+                document.contains(snippet),
+                "{language} artifact document is missing {snippet}"
+            );
+        }
+        assert!(
+            !document.contains("called by"),
+            "{language} artifact document still shows the one-line caller list"
+        );
+    }
+}

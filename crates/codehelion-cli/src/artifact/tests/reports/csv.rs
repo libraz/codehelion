@@ -161,7 +161,7 @@ fn report_of_every_record_kind() -> ArtifactReport {
 /// The fixture with `parse, fast` calling the toolchain function `strtof`,
 /// which a second, unnamed function calls as well, so no single function
 /// dominates it, and `malloc`, which only `parse, fast` reaches.
-fn artifact_with_a_toolchain_holder() -> ArtifactIr {
+pub(super) fn artifact_with_a_toolchain_holder() -> ArtifactIr {
     let mut artifact = resolved_call_graph_artifact();
     artifact.symbols[0].name = Some("parse, fast".to_owned());
     artifact.symbols[1].name = Some("strtof".to_owned());
